@@ -1,0 +1,24 @@
+[Unit]
+Description=frps para IIT Tunnel Hub
+After=network-online.target iit-hub.service
+Wants=network-online.target iit-hub.service
+
+[Service]
+User=iit-hub
+Group=iit-hub
+EnvironmentFile=/opt/iit-tunnel-hub/.env
+ExecStart=/usr/local/bin/frps -c /opt/iit-tunnel-hub/frps/frps.toml
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+# Permite abrir los puertos 80 y 443 sin ser root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

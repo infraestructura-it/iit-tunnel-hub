@@ -1,0 +1,54 @@
+'use strict';
+// Configuración por variables de entorno. Ver .env.example en la raíz.
+
+const env = process.env;
+
+function int(name, def) {
+  const v = env[name];
+  if (v === undefined || v === '') return def;
+  const n = Number.parseInt(v, 10);
+  if (!Number.isFinite(n)) throw new Error(`${name} debe ser un número`);
+  return n;
+}
+
+const config = {
+  // Panel + API de administración
+  host: env.HOST || '0.0.0.0',
+  port: int('PORT', 8080),
+  adminToken: env.ADMIN_TOKEN || '',
+
+  // Endpoint que consulta frps (server plugin). Nunca debe quedar expuesto a Internet.
+  pluginHost: env.PLUGIN_HOST || '127.0.0.1',
+  pluginPort: int('PLUGIN_PORT', 9000),
+
+  dbPath: env.DB_PATH || './data/hub.db',
+
+  frps: {
+    // Dirección con la que las máquinas llegan a frps (IP pública, dominio o IP de ZeroTier/LAN)
+    publicAddr: env.FRPS_PUBLIC_ADDR || '127.0.0.1',
+    bindPort: int('FRPS_BIND_PORT', 7000),
+    // Token global de frps (auth.token). Opcional: la autenticación real es por máquina.
+    authToken: env.FRP_AUTH_TOKEN || '',
+    subdomainHost: env.FRPS_SUBDOMAIN_HOST || 'tuneles.local',
+    vhostHttpPort: int('FRPS_VHOST_HTTP_PORT', 80),
+    vhostHttpsPort: int('FRPS_VHOST_HTTPS_PORT', 443),
+    // Puertos que ve el visitante, si frps queda detrás de otro proxy (p. ej. Nginx con ssl_preread en el 443)
+    publicHttpPort: int('PUBLIC_HTTP_PORT', int('FRPS_VHOST_HTTP_PORT', 80)),
+    publicHttpsPort: int('PUBLIC_HTTPS_PORT', int('FRPS_VHOST_HTTPS_PORT', 443)),
+    tcpPortMin: int('FRPS_TCP_PORT_MIN', 20000),
+    tcpPortMax: int('FRPS_TCP_PORT_MAX', 20100),
+    // API del dashboard de frps (webServer) para leer el estado en vivo
+    apiUrl: (env.FRPS_API_URL || 'http://127.0.0.1:7500').replace(/\/$/, ''),
+    apiUser: env.FRPS_API_USER || 'admin',
+    apiPassword: env.FRPS_API_PASSWORD || '',
+  },
+};
+
+function validate() {
+  const errors = [];
+  if (config.adminToken.length < 16) errors.push('ADMIN_TOKEN es obligatorio y debe tener al menos 16 caracteres');
+  if (config.frps.tcpPortMin > config.frps.tcpPortMax) errors.push('FRPS_TCP_PORT_MIN no puede ser mayor que FRPS_TCP_PORT_MAX');
+  return errors;
+}
+
+module.exports = { config, validate };

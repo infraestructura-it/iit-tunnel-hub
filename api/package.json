@@ -1,0 +1,14 @@
+{
+  "name": "iit-tunnel-hub",
+  "version": "1.0.0",
+  "description": "Registro y monitoreo de máquinas conectadas por túneles frp — Infraestructura-IT",
+  "main": "src/server.js",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js"
+  },
+  "license": "UNLICENSED"
+}

@@ -1,0 +1,23 @@
+[Unit]
+Description=IIT Tunnel Hub (API y panel de máquinas frp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=iit-hub
+Group=iit-hub
+WorkingDirectory=/opt/iit-tunnel-hub/api
+EnvironmentFile=/opt/iit-tunnel-hub/.env
+Environment=DB_PATH=/var/lib/iit-tunnel-hub/hub.db
+StateDirectory=iit-tunnel-hub
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning src/server.js
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

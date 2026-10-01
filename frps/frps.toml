@@ -1,0 +1,36 @@
+# frps.toml — servidor frp de IIT Tunnel Hub (frp v0.71)
+# Los valores {{ .Envs.X }} se toman de las variables de entorno (archivo .env).
+# Mismo archivo para Docker (network_mode: host) y para instalación con systemd.
+
+bindPort = {{ .Envs.FRPS_BIND_PORT }}
+
+# Entrada de visitantes. HTTPS se enruta por SNI sin descifrar (el TLS termina en la máquina).
+vhostHTTPPort = {{ .Envs.FRPS_VHOST_HTTP_PORT }}
+vhostHTTPSPort = {{ .Envs.FRPS_VHOST_HTTPS_PORT }}
+subDomainHost = "{{ .Envs.FRPS_SUBDOMAIN_HOST }}"
+
+# Token global opcional. La autorización real la hace el hub por máquina (plugin).
+auth.method = "token"
+auth.token = "{{ .Envs.FRP_AUTH_TOKEN }}"
+
+# Solo se pueden abrir puertos TCP públicos dentro de este rango
+allowPorts = [{ start = {{ .Envs.FRPS_TCP_PORT_MIN }}, end = {{ .Envs.FRPS_TCP_PORT_MAX }} }]
+
+# Dashboard/API de frps: solo local, el hub lo consulta para mostrar el estado en vivo
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "{{ .Envs.FRPS_API_PASSWORD }}"
+
+# Latido obligatorio: el hub lo usa para expulsar máquinas deshabilitadas o eliminadas
+transport.heartbeatTimeout = 45
+
+log.to = "console"
+log.level = "info"
+
+# El hub autoriza logins, servicios, cada conexión entrante y cada latido
+[[httpPlugins]]
+name = "iit-tunnel-hub"
+addr = "127.0.0.1:{{ .Envs.PLUGIN_PORT }}"
+path = "/frp/handler"
+ops = ["Login", "NewProxy", "CloseProxy", "NewUserConn", "NewWorkConn", "Ping"]

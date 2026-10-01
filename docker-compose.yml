@@ -1,0 +1,27 @@
+# IIT Tunnel Hub — frps + hub (API y panel)
+# Uso:  cp .env.example .env  &&  (editar .env)  &&  docker compose up -d --build
+#
+# Ambos servicios usan la red del host (solo Linux): frps necesita abrir 80/443, el puerto
+# de control y el rango TCP, y el hub y frps se hablan por 127.0.0.1 sin exponer nada más.
+
+services:
+  hub:
+    build: ./api
+    network_mode: host
+    env_file: .env
+    environment:
+      DB_PATH: /data/hub.db
+    volumes:
+      - hub-data:/data
+    restart: unless-stopped
+
+  frps:
+    build: ./frps
+    network_mode: host
+    env_file: .env
+    depends_on:
+      - hub
+    restart: unless-stopped
+
+volumes:
+  hub-data:
