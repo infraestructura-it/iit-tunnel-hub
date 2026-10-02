@@ -151,6 +151,38 @@ lego guarda el par en `/etc/frp/lego/certificates/`; enlácelo a `/etc/frp/certs
 
 Para pruebas sirve un certificado comodín `*.clientes.infraestructura-it.com` distribuido a las máquinas, a costa de que todas compartan la misma llave.
 
+## Alertas
+
+Botón **🔔 Alertas** del panel. El hub revisa el estado cada 15 s y avisa:
+
+| Aviso | Cuándo |
+|---|---|
+| 🔴 Máquina sin conexión | Una máquina que estaba en línea sigue desconectada después del **tiempo de gracia** (por defecto 1 min) |
+| 🟢 Máquina reconectada | Vuelve una máquina de la que se había avisado; indica cuánto tiempo estuvo caída |
+| ⚠️ Servidor frps no responde / ✅ volvió | El propio frps deja de responder (no se marcan las máquinas como caídas mientras tanto) |
+
+No avisan las máquinas que nunca se han conectado, las deshabilitadas ni las que tienen las alertas apagadas (botón 🔔/🔕 en el detalle). Un reinicio del hub no genera falsas alarmas: las máquinas vuelven antes de que venza la gracia.
+
+**Canales**
+
+- **Telegram**: cree un bot con @BotFather, escríbale un mensaje y obtenga el chat ID en `https://api.telegram.org/bot<TOKEN>/getUpdates`. Sirve también un grupo (ID negativo).
+- **Webhooks**: POST JSON a cada URL configurada:
+
+  ```json
+  {
+    "source": "iit-tunnel-hub",
+    "type": "machine_offline",
+    "at": 1790951261, "since": 1790951201,
+    "machine": { "id": "clinica-norte-ups", "name": "UPS", "client": "Clínica Norte", "lastAddress": "190.x.x.x:51234" },
+    "text": "🔴 Máquina sin conexión\nUPS · Clínica Norte\n…"
+  }
+  ```
+  `type`: `machine_offline`, `machine_online` (con `downtimeSeconds`), `server_down`, `server_up`, `test`.
+
+- **WhatsApp, correo, SMS**: importe en Node-RED `deploy/node-red-alertas-whatsapp.json` (recibe el webhook en `/iit-alertas` y reenvía por WhatsApp con CallMeBot; cambie el número y la apikey en el nodo de función) y agregue `http://<node-red>:1880/iit-alertas` como webhook.
+
+**Guardar y enviar prueba** muestra el resultado de cada canal. Los envíos fallidos quedan en la actividad como "Alerta no enviada".
+
 ## API
 
 Todas las rutas requieren `Authorization: Bearer <ADMIN_TOKEN>`.
@@ -161,14 +193,16 @@ Todas las rutas requieren `Authorization: Bearer <ADMIN_TOKEN>`.
 | GET | `/api/machines` | Máquinas con servicios y estado en vivo |
 | POST | `/api/machines` | Registrar (devuelve token y frpc.toml) |
 | GET | `/api/machines/:id` | Detalle |
-| PATCH | `/api/machines/:id` | Cambiar `name`, `client`, `description`, `enabled` |
+| PATCH | `/api/machines/:id` | Cambiar `name`, `client`, `description`, `enabled`, `alerts` |
 | DELETE | `/api/machines/:id` | Eliminar (corta su tráfico) |
 | POST | `/api/machines/:id/rotate-token` | Nuevo token y frpc.toml |
 | GET | `/api/machines/:id/frpc.toml` | Configuración actual, sin el token |
 | POST | `/api/machines/:id/installer` | Instalador: `{platform: linux\|windows\|toml, token, serverAddr?}`. Exige el token vigente (403 si no coincide) |
 | POST | `/api/machines/:id/services` | Agregar servicio |
 | DELETE | `/api/machines/:id/services/:nombre` | Quitar servicio |
-| GET | `/api/events?machine=:id&limit=100` | Actividad (logins, rechazos, servicios) |
+| GET | `/api/events?machine=:id&limit=100` | Actividad (logins, rechazos, servicios, alertas) |
+| GET / PUT | `/api/alerts/settings` | Canales y tiempo de gracia (`graceSeconds`, `telegram{botToken,chatId}`, `webhooks[]`). El token del bot se devuelve enmascarado |
+| POST | `/api/alerts/test` | Envía una prueba a todos los canales y devuelve el resultado de cada uno |
 
 Ejemplo:
 
@@ -205,7 +239,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 41 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token y generación de instaladores.
+Levanta frps, el hub y frpc reales en localhost y verifica 49 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído).
 
 ## Límites conocidos
 

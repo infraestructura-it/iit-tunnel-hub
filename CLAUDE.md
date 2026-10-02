@@ -39,6 +39,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/src/plugin.js` | Lógica del server plugin (Login, NewProxy, CloseProxy, NewUserConn, NewWorkConn, Ping) |
 | `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml` |
 | `api/src/db.js` | Esquema SQLite (`machines`, `services`, `events`) y consultas |
+| `api/src/alerts.js` | Monitor de estado (cada `ALERT_CHECK_SECONDS`) y envío de alertas por Telegram y webhooks; configuración en la tabla `settings` |
 | `api/src/installers.js` | Instaladores autocontenidos por máquina (Linux `.sh`, Windows `.ps1`) con el toml y el token incrustados |
 | `api/src/frps.js` | Cliente de la API del dashboard de frps (caché 3 s) |
 | `api/src/config.js` | Variables de entorno |
@@ -47,7 +48,8 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `frp.ps1` | Descarga `frpc.exe`/`frps.exe` a `frp/` |
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (41 casos) |
+| `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (49 casos) |
 
 ## Comandos
 
@@ -79,6 +81,15 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 - Ante error interno el plugin **rechaza** (falla cerrado). Mantenerlo así.
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
+
+## Alertas: reglas (no romper)
+
+- Estado persistido por máquina: `state` (unknown/online/offline), `state_since`, `offline_alerted` (0 pendiente · 1 avisada · 2 sin aviso).
+- Solo se avisa de máquinas que estuvieron **en línea** y siguen caídas tras `graceSeconds`. Nunca vistas, deshabilitadas o con `alerts = 0` → 2, sin aviso.
+- La recuperación se envía solo si se avisó la caída (`offline_alerted = 1`).
+- Si frps no responde, se alerta `server_down` y **no** se tocan los estados de las máquinas.
+- La gracia evita falsas alarmas al reiniciar el hub (fail-closed desconecta a todos unos segundos).
+- Telegram no se pudo probar en el entorno de desarrollo (salida bloqueada); webhooks sí, en `test/e2e.sh`.
 
 ## frp v0.71: detalles verificados
 

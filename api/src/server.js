@@ -15,6 +15,7 @@ const { FrpsClient } = require('./frps');
 const { createPluginHandler } = require('./plugin');
 const M = require('./machines');
 const { PLATFORMS } = require('./installers');
+const A = require('./alerts');
 
 const VERSION = '1.0.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -113,7 +114,9 @@ function machineView(m, services, status) {
     client: m.client,
     description: m.description,
     enabled: !!m.enabled,
+    alerts: !!m.alerts,
     online: !!live,
+    stateSince: m.state_since || null,
     connection: live ? {
       clientIp: live.clientIP,
       hostname: live.hostname,
@@ -136,7 +139,7 @@ function machineView(m, services, status) {
 
 // ---------- rutas de la API ----------
 
-function createApi(store, frps) {
+function createApi(store, frps, monitor) {
   const routes = [];
   const route = (method, pattern, handler) => {
     const keys = [];
@@ -161,6 +164,7 @@ function createApi(store, frps) {
       enabled: machines.filter((m) => m.enabled).length,
       online: machines.filter((m) => status.clients.has(m.id)).length,
       services: services.length,
+      alerts: (() => { const a = A.loadSettings(store); return { telegram: !!(a.telegram.botToken && a.telegram.chatId), webhooks: a.webhooks.length, graceSeconds: a.graceSeconds }; })(),
       frps: {
         reachable: status.reachable,
         error: status.error,
@@ -227,8 +231,13 @@ function createApi(store, frps) {
       if (typeof body.enabled !== 'boolean') throw M.bad('enabled debe ser true o false');
       fields.enabled = body.enabled ? 1 : 0;
     }
+    if (body.alerts !== undefined) {
+      if (typeof body.alerts !== 'boolean') throw M.bad('alerts debe ser true o false');
+      fields.alerts = body.alerts ? 1 : 0;
+    }
     const m = store.updateMachine(p.id, fields);
     if (fields.enabled !== undefined) store.event(p.id, fields.enabled ? 'habilitada' : 'deshabilitada', '', 0);
+    if (fields.alerts !== undefined) store.event(p.id, fields.alerts ? 'alertas_activadas' : 'alertas_desactivadas', '', 0);
     return [200, machineView(m, store.servicesOf(m.id), await frps.status())];
   });
 
@@ -291,6 +300,21 @@ function createApi(store, frps) {
     return [200, { deleted: p.name }];
   });
 
+  route('GET', '/api/alerts/settings', async () => [200, A.publicSettings(A.loadSettings(store))]);
+
+  route('PUT', '/api/alerts/settings', async (req) => {
+    const body = await readJson(req);
+    const s = A.updateSettings(store, body, M.bad);
+    store.event(null, 'alertas_configuradas', `gracia ${s.graceSeconds} s · Telegram ${s.telegram.botToken && s.telegram.chatId ? 'sí' : 'no'} · webhooks ${s.webhooks.length}`, 0);
+    return [200, A.publicSettings(s)];
+  });
+
+  route('POST', '/api/alerts/test', async () => {
+    const results = await monitor.notify({ type: 'test', at: Math.floor(Date.now() / 1000) });
+    if (results.length === 0) throw M.bad('no hay canales configurados (Telegram o webhooks)');
+    return [200, { results }];
+  });
+
   route('GET', '/api/events', async (req) => {
     const u = new URL(req.url, 'http://x');
     const limit = Number(u.searchParams.get('limit')) || 100;
@@ -332,7 +356,8 @@ function main() {
 
   const store = open(config.dbPath);
   const frps = new FrpsClient(config.frps);
-  const api = createApi(store, frps);
+  const monitor = new A.AlertMonitor(store, frps, { intervalSeconds: config.alertCheckSeconds, timezone: config.timezone });
+  const api = createApi(store, frps, monitor);
   const plugin = createPluginHandler(store, frps);
 
   const app = http.createServer(async (req, res) => {
@@ -363,7 +388,10 @@ function main() {
   app.listen(config.port, config.host, () => console.log(`Panel y API en http://${config.host}:${config.port}`));
   pluginServer.listen(config.pluginPort, config.pluginHost, () => console.log(`Plugin frps en http://${config.pluginHost}:${config.pluginPort}/frp/handler`));
 
-  const shutdown = () => { app.close(); pluginServer.close(); process.exit(0); };
+  monitor.start();
+  console.log(`Alertas: revisión cada ${config.alertCheckSeconds} s`);
+
+  const shutdown = () => { monitor.stop(); app.close(); pluginServer.close(); process.exit(0); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

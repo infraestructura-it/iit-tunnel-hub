@@ -152,6 +152,23 @@ main { max-width: 1400px; margin: 0 auto; padding: 24px; }
 .events li.warn { border-color: var(--amber); }
 .events li.info { border-color: var(--cyan); }
 
+/* ---------- alertas ---------- */
+.btn.bell { opacity: .75; }
+.btn.bell.on { opacity: 1; border-color: rgba(52,245,164,.45); color: var(--green); }
+.down { color: var(--red) !important; font-weight: 500; }
+.muted-bell { font-size: 12px; opacity: .7; }
+textarea { resize: vertical; font-family: var(--code); font-size: 12px; }
+.check { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--muted); margin: -4px 0 12px; }
+.check input { width: auto; }
+.howto { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+.howto summary { cursor: pointer; }
+.howto ol { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+.howto code, .hint code { font-family: var(--code); font-size: 11px; color: #b9f5dd; }
+.alert-results { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 6px; font-size: 12px; }
+.alert-results li { padding: 8px 10px; border-radius: 6px; background: var(--bg-2); border-left: 3px solid var(--line-2); word-break: break-word; }
+.alert-results li.good { border-color: var(--green); color: var(--green); }
+.alert-results li.bad { border-color: var(--red); color: var(--red); }
+
 /* ---------- instaladores ---------- */
 .section-title { margin: 22px 0 12px; font-family: var(--display); font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .installers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
@@ -214,6 +231,10 @@ pre.code { background: #05070b; border: 1px solid var(--line-2); border-radius: 
   .grid { grid-template-columns: 1fr; }
   .svc-row { grid-template-columns: 1fr 1fr; }
   .installers { grid-template-columns: 1fr; }
+  .row { flex-direction: column; gap: 0; }
+  .modal { padding: 20px 16px; }
+  .modal-actions { flex-wrap: wrap; }
+  .modal-actions .btn { flex: 1 1 auto; justify-content: center; }
   .toolbar { flex-wrap: wrap; }
   .toolbar input { max-width: none; }
   .kv { grid-template-columns: 1fr; }

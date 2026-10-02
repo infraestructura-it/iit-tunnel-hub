@@ -23,6 +23,10 @@ const config = {
 
   dbPath: env.DB_PATH || './data/hub.db',
 
+  // Alertas: cada cuánto se revisa el estado y zona horaria de los mensajes
+  alertCheckSeconds: int('ALERT_CHECK_SECONDS', 15),
+  timezone: env.TZ_ALERTS || 'America/Bogota',
+
   frps: {
     // Dirección con la que las máquinas llegan a frps (IP pública, dominio o IP de ZeroTier/LAN)
     publicAddr: env.FRPS_PUBLIC_ADDR || '127.0.0.1',

@@ -49,12 +49,18 @@ const EVENT_STYLE = {
   conectada: 'good', servicio_activo: 'good', habilitada: 'good', registrada: 'info', servicio_agregado: 'info',
   token_rotado: 'warn', deshabilitada: 'warn', servicio_cerrado: 'warn', servicio_eliminado: 'warn', eliminada: 'warn',
   login_rechazado: 'bad', servicio_rechazado: 'bad', conexion_rechazada: 'bad',
+  desconectada: 'bad', reconectada: 'good', servidor_caido: 'bad', servidor_recuperado: 'good',
+  alerta_enviada: 'info', alerta_fallida: 'bad', alertas_configuradas: 'info',
+  alertas_activadas: 'info', alertas_desactivadas: 'warn', instalador_generado: 'info',
 };
 const EVENT_LABEL = {
   conectada: 'Conectada', servicio_activo: 'Servicio activo', habilitada: 'Habilitada', registrada: 'Registrada',
   servicio_agregado: 'Servicio agregado', token_rotado: 'Token rotado', deshabilitada: 'Deshabilitada',
   servicio_cerrado: 'Servicio cerrado', servicio_eliminado: 'Servicio eliminado', eliminada: 'Eliminada',
   login_rechazado: 'Login rechazado', servicio_rechazado: 'Servicio rechazado', conexion_rechazada: 'Conexión rechazada',
+  desconectada: 'Desconectada', reconectada: 'Reconectada', servidor_caido: 'Servidor frps caído', servidor_recuperado: 'Servidor frps recuperado',
+  alerta_enviada: 'Alerta enviada', alerta_fallida: 'Alerta no enviada', alertas_configuradas: 'Alertas configuradas',
+  alertas_activadas: 'Alertas activadas', alertas_desactivadas: 'Alertas desactivadas', instalador_generado: 'Instalador generado',
 };
 
 function toast(msg, err = false) {
@@ -134,6 +140,10 @@ function renderSummary() {
     ? `<span class="dot online" style="margin:0"></span> frps ${esc(s.frps.version)} · ${esc(s.frps.publicAddr)}:${s.frps.bindPort}`
     : `<span class="dot" style="margin:0;background:var(--red)"></span> frps sin respuesta`;
   pill.title = s.frps.reachable ? `Dominio: *.${s.frps.subdomainHost}` : s.frps.error || '';
+  const channels = (s.alerts.telegram ? 1 : 0) + s.alerts.webhooks;
+  const bell = $('#alerts-btn');
+  bell.classList.toggle('on', channels > 0);
+  bell.title = channels ? `Alertas: ${[s.alerts.telegram && 'Telegram', s.alerts.webhooks && `${s.alerts.webhooks} webhook(s)`].filter(Boolean).join(' y ')} · gracia ${s.alerts.graceSeconds} s` : 'Alertas sin configurar';
 }
 
 function filtered() {
@@ -175,12 +185,12 @@ function renderMachines() {
     const st = machineState(m);
     const conn = m.online
       ? `<span>IP <b>${esc(m.connection.clientIp)}</b> · ${esc(m.connection.hostname)}</span><span>Conectada ${ago(m.connection.connectedSince)} · frpc ${esc(m.connection.version)}</span>`
-      : `<span>${STATE_LABEL[st]}</span><span>Último login: <b>${m.lastLogin ? ago(m.lastLogin.at) : 'nunca'}</b>${m.lastLogin ? ' · ' + esc(m.lastLogin.address) : ''}</span>`;
+      : `<span>${m.enabled && m.lastLogin && m.stateSince ? `<b class="down">Sin conexión ${ago(m.stateSince)}</b>` : STATE_LABEL[st]}</span><span>Último login: <b>${m.lastLogin ? ago(m.lastLogin.at) : 'nunca'}</b>${m.lastLogin ? ' · ' + esc(m.lastLogin.address) : ''}</span>`;
     return `<article class="card ${st}" data-id="${esc(m.id)}">
       <div class="card-head">
         <span class="dot ${st}"></span>
         <div class="card-title">
-          <h3>${esc(m.name)}</h3>
+          <h3>${esc(m.name)}${m.alerts ? '' : ' <span class="muted-bell" title="Alertas desactivadas">🔕</span>'}</h3>
           ${m.client ? `<div class="client">${esc(m.client)}</div>` : ''}
           <div class="id">${esc(m.id)}</div>
         </div>
@@ -243,6 +253,7 @@ async function renderDrawer() {
     ${m.description ? `<p style="color:var(--muted);margin-top:0">${esc(m.description)}</p>` : ''}
     <div class="actions">
       <button class="btn small" data-act="toggle">${m.enabled ? 'Deshabilitar' : 'Habilitar'}</button>
+      <button class="btn small" data-act="alerts" title="Avisar si esta máquina se desconecta">${m.alerts ? '🔔 Alertas activadas' : '🔕 Alertas apagadas'}</button>
       <button class="btn small primary" data-act="install">Generar instalador</button>
       <button class="btn small" data-act="rotate">Rotar token</button>
       <button class="btn small danger" data-act="delete">Eliminar</button>
@@ -318,6 +329,11 @@ $('#drawer').addEventListener('click', async (e) => {
     if (act === 'toggle') {
       await api('PATCH', `/machines/${m.id}`, { enabled: !m.enabled });
       toast(m.enabled ? 'Máquina deshabilitada: tráfico cortado' : 'Máquina habilitada');
+      refresh();
+    }
+    if (act === 'alerts') {
+      await api('PATCH', `/machines/${m.id}`, { alerts: !m.alerts });
+      toast(m.alerts ? 'Alertas apagadas para esta máquina' : 'Alertas activadas para esta máquina');
       refresh();
     }
     if (act === 'rotate' || act === 'install') {
@@ -475,6 +491,67 @@ $('#creds-modal').addEventListener('click', async (e) => {
   } finally {
     $$('.installer').forEach((b) => { b.disabled = false; });
   }
+});
+
+// ---------- configuración de alertas ----------
+
+async function openAlerts() {
+  const f = $('#alerts-form');
+  $('#alerts-error').textContent = '';
+  $('#alerts-results').innerHTML = '';
+  try {
+    const a = await api('GET', '/alerts/settings');
+    const grace = f.elements.graceSeconds;
+    if (![...grace.options].some((o) => Number(o.value) === a.graceSeconds)) grace.add(new Option(`${a.graceSeconds} s`, a.graceSeconds));
+    grace.value = String(a.graceSeconds);
+    f.elements.botToken.value = '';
+    f.elements.botToken.placeholder = a.telegram.botTokenMasked ? `Configurado (${a.telegram.botTokenMasked}) · deje vacío para conservarlo` : '123456789:AAE…';
+    f.elements.clearToken.checked = false;
+    $('#clear-token-row').classList.toggle('hidden', !a.telegram.botTokenMasked);
+    f.elements.chatId.value = a.telegram.chatId;
+    f.elements.webhooks.value = a.webhooks.join('\n');
+    $('#alerts-modal').classList.remove('hidden');
+  } catch (err) { toast(err.message, true); }
+}
+
+async function saveAlerts() {
+  const f = $('#alerts-form');
+  const body = {
+    graceSeconds: Number(f.elements.graceSeconds.value),
+    telegram: { chatId: f.elements.chatId.value.trim() },
+    webhooks: f.elements.webhooks.value.split(/\s+/).filter(Boolean),
+  };
+  if (f.elements.clearToken.checked) body.telegram.botToken = null;
+  else if (f.elements.botToken.value.trim()) body.telegram.botToken = f.elements.botToken.value.trim();
+  return api('PUT', '/alerts/settings', body);
+}
+
+$('#alerts-btn').addEventListener('click', openAlerts);
+
+$('#alerts-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#alerts-error').textContent = '';
+  try {
+    await saveAlerts();
+    $('#alerts-modal').classList.add('hidden');
+    toast('Alertas guardadas');
+    refresh();
+  } catch (err) { $('#alerts-error').textContent = err.message; }
+});
+
+$('#alerts-test').addEventListener('click', async () => {
+  const btn = $('#alerts-test');
+  $('#alerts-error').textContent = '';
+  $('#alerts-results').innerHTML = '';
+  btn.disabled = true;
+  try {
+    await saveAlerts();
+    const r = await api('POST', '/alerts/test');
+    $('#alerts-results').innerHTML = r.results.map((x) =>
+      `<li class="${x.ok ? 'good' : 'bad'}">${x.ok ? '✔' : '✘'} ${esc(x.channel)}${x.ok ? ' · enviado' : ` · ${esc(x.error)}`}</li>`).join('');
+    refresh();
+  } catch (err) { $('#alerts-error').textContent = err.message; }
+  finally { btn.disabled = false; }
 });
 
 // ---------- modales genéricos ----------

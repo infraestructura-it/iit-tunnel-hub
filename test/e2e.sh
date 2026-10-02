@@ -33,6 +33,7 @@ export FRPS_VHOST_HTTP_PORT=18080 FRPS_VHOST_HTTPS_PORT=18443
 export FRPS_SUBDOMAIN_HOST=test.local FRP_AUTH_TOKEN="token-global-e2e"
 export FRPS_TCP_PORT_MIN=21000 FRPS_TCP_PORT_MAX=21010
 export FRPS_API_URL=http://127.0.0.1:7500 FRPS_API_PASSWORD="dash-e2e"
+export ALERT_CHECK_SECONDS=1
 
 API="http://127.0.0.1:$PORT/api"
 AUTH=(-H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json")
@@ -42,8 +43,22 @@ api() { local m="$1" p="$2"; shift 2; curl -s -X "$m" "${AUTH[@]}" "$API$p" "$@"
 mkdir -p "$WORK/www" && echo "hola-desde-la-maquina" > "$WORK/www/index.html"
 python3 -m http.server 18999 --bind 127.0.0.1 --directory "$WORK/www" >/dev/null 2>&1 & PIDS+=($!)
 
+# Receptor de webhooks de alertas: guarda cada POST como una línea JSON
+cat > "$WORK/recv.py" <<'PY'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        b = self.rfile.read(int(self.headers['content-length']))
+        open(sys.argv[2], 'a').write(b.decode() + '\n')
+        self.send_response(200); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PY
+touch "$WORK/hooks.log"
+python3 "$WORK/recv.py" 19600 "$WORK/hooks.log" & PIDS+=($!)
+
 node --disable-warning=ExperimentalWarning "$ROOT/api/src/server.js" > "$WORK/api.log" 2>&1 & PIDS+=($!)
-"$FRP_DIR/frps" -c "$ROOT/frps/frps.toml" > "$WORK/frps.log" 2>&1 & PIDS+=($!)
+"$FRP_DIR/frps" -c "$ROOT/frps/frps.toml" > "$WORK/frps.log" 2>&1 & FRPS_PID=$!; PIDS+=($FRPS_PID)
 sleep 1.5
 
 wait_for() { local cond="$1" n=0; while [ $n -lt 40 ]; do eval "$cond" && return 0; sleep 0.25; n=$((n+1)); done; return 1; }
@@ -139,7 +154,7 @@ kill $FRPC1 2>/dev/null; sleep 1
 check "el token viejo ya no entra" 'wait_for "grep -q \"token inválido\" $WORK/m1/frpc2.log"'
 kill $OLD 2>/dev/null
 sed -i "s|^metadatas.token = .*|metadatas.token = \"$NEW\"|" "$WORK/m1/frpc.toml"
-( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc3.log 2>&1 ) & PIDS+=($!)
+( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc3.log 2>&1 ) & FRPC3=$!; PIDS+=($FRPC3)
 check "el token nuevo conecta" 'wait_for "[ \"\$(api GET /machines/$ID | jq -r .online)\" = true ]"'
 
 echo "7. Instaladores"
@@ -155,13 +170,41 @@ check "lleva el token de la máquina y el token global" 'grep -q "$NEW" "$WORK/i
 inst windows "$NEW" > "$WORK/instalar.ps1"
 check "instalador Windows generado" 'grep -q "Register-ScheduledTask" "$WORK/instalar.ps1"'
 
-echo "8. Configuración y limpieza"
+echo "8. Alertas"
+hooks() { jq -r 'select(.machine.id == "'"$ID"'" or .machine == null) | .type' "$WORK/hooks.log" 2>/dev/null | paste -sd' '; }
+api PUT /alerts/settings -d '{"graceSeconds":2,"webhooks":["http://127.0.0.1:19600/alertas"]}' >/dev/null
+check "webhook ftp:// rechazado" '[ "$(api PUT /alerts/settings -o /dev/null -w "%{http_code}" -d "{\"webhooks\":[\"ftp://x\"]}")" = "400" ]'
+check "prueba de alertas llega al webhook" '[ "$(api POST /alerts/test | jq -r ".results[0].ok")" = "true" ] && grep -q "\"type\":\"test\"" "$WORK/hooks.log"'
+: > "$WORK/hooks.log"
+kill $FRPC3 2>/dev/null
+check "caída de la máquina → alerta machine_offline" 'wait_for_long "hooks | grep -q machine_offline"'
+check "la alerta trae el texto en español" 'jq -r "select(.type==\"machine_offline\") | .text" "$WORK/hooks.log" | grep -q "sin conexión"'
+( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc4.log 2>&1 ) & FRPC4=$!; PIDS+=($FRPC4)
+check "reconexión → alerta machine_online con tiempo caída" 'wait_for_long "hooks | grep -q machine_online" && [ "$(jq -r "select(.type==\"machine_online\") | .downtimeSeconds" "$WORK/hooks.log")" -ge 2 ]'
+: > "$WORK/hooks.log"
+kill $FRPC4 2>/dev/null; sleep 0.5
+( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc5.log 2>&1 ) & FRPC5=$!; PIDS+=($FRPC5)
+wait_for "[ \"\$(api GET /machines/$ID | jq -r .online)\" = true ]"; sleep 3
+check "corte breve (menor que la gracia) no alerta" '[ -z "$(hooks)" ]'
+api PATCH /machines/$ID -d '{"alerts":false}' >/dev/null
+kill $FRPC5 2>/dev/null; sleep 5
+check "máquina con alertas apagadas no alerta" '[ -z "$(hooks)" ]'
+api PATCH /machines/$ID -d '{"alerts":true}' >/dev/null
+( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc6.log 2>&1 ) & PIDS+=($!)
+wait_for_long "[ \"\$(api GET /machines/$ID | jq -r .online)\" = true ]"
+
+echo "9. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
 check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"api\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
 check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/api | jq -r .deleted)" = "api" ]'
 check "eliminar máquina" '[ "$(api DELETE /machines/$ID | jq -r .deleted)" = "$ID" ]'
 check "máquina eliminada ya no recibe tráfico" 'http_blocked'
 check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \"\$(curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq length)\" = 0 ]"'
+
+echo "10. Servidor frps caído"
+: > "$WORK/hooks.log"
+kill $FRPS_PID 2>/dev/null
+check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'
 
 echo
 echo "Resultado: $PASS correctas, $FAIL fallidas"

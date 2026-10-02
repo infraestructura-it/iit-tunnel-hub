@@ -48,7 +48,9 @@ class FrpsClient {
       }
       result = { reachable: true, error: null, server, clients: clientMap, proxies: proxyMap };
     } catch (err) {
-      result = { reachable: false, error: err.message, server: null, clients: new Map(), proxies: new Map() };
+      const code = err.cause?.code || (err.name === 'TimeoutError' ? 'TIMEOUT' : null);
+      const msg = code ? `la API de frps no responde en ${this.apiUrl} (${code})` : err.message;
+      result = { reachable: false, error: msg, server: null, clients: new Map(), proxies: new Map() };
     }
     this.cache = result;
     this.cacheAt = Date.now();

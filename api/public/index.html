@@ -30,6 +30,7 @@
     <div class="brand">IIT <span>//</span> Tunnel Hub</div>
     <div class="spacer"></div>
     <span class="pill" id="frps-pill"><span class="dot"></span> frps</span>
+    <button class="btn small bell" id="alerts-btn" title="Alertas">🔔 Alertas</button>
     <button class="btn small" id="logout">Salir</button>
   </header>
 
@@ -133,6 +134,57 @@
       <button class="btn" data-close>Listo</button>
     </div>
   </div>
+</div>
+
+<!-- Configuración de alertas -->
+<div id="alerts-modal" class="overlay hidden">
+  <form class="modal" id="alerts-form">
+    <h2>Alertas</h2>
+    <div class="sub">Aviso cuando una máquina pierde la conexión, cuando vuelve y cuando el servidor frps no responde.</div>
+
+    <div class="field">
+      <label for="grace">Avisar si sigue sin conexión después de</label>
+      <select id="grace" name="graceSeconds">
+        <option value="30">30 segundos</option>
+        <option value="60">1 minuto</option>
+        <option value="120">2 minutos</option>
+        <option value="300">5 minutos</option>
+        <option value="600">10 minutos</option>
+        <option value="1800">30 minutos</option>
+      </select>
+      <div class="hint">Evita avisos por micro-cortes. frps tarda hasta 45 s más en notar una máquina que se apagó de golpe.</div>
+    </div>
+
+    <h4 class="section-title">Telegram</h4>
+    <div class="row">
+      <div class="field"><label>Token del bot</label><input name="botToken" type="password" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label>Chat ID</label><input name="chatId" placeholder="123456789 o -100… (grupo)" autocomplete="off"></div>
+    </div>
+    <label id="clear-token-row" class="check hidden"><input type="checkbox" name="clearToken"> Quitar el bot de Telegram</label>
+    <details class="howto">
+      <summary>Cómo obtener el token y el chat ID</summary>
+      <ol>
+        <li>En Telegram, escriba a <b>@BotFather</b>, envíe <code>/newbot</code> y copie el token que le entrega.</li>
+        <li>Escriba cualquier mensaje a su bot nuevo (o agréguelo a un grupo y escriba ahí).</li>
+        <li>Abra <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code> y copie el valor de <code>"chat":{"id": …}</code>.</li>
+      </ol>
+    </details>
+
+    <h4 class="section-title">Webhooks</h4>
+    <div class="field">
+      <label>URLs (una por línea)</label>
+      <textarea name="webhooks" rows="3" spellcheck="false" placeholder="http://10.147.19.233:1880/iit-alertas"></textarea>
+      <div class="hint">Reciben un POST JSON con <code>type</code>, <code>machine</code>, <code>since</code>, <code>downtimeSeconds</code> y <code>text</code>. Úselo con Node-RED para reenviar por WhatsApp, correo o SMS.</div>
+    </div>
+
+    <ul class="alert-results" id="alerts-results"></ul>
+    <div class="error" id="alerts-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Cancelar</button>
+      <button type="button" class="btn" id="alerts-test">Guardar y enviar prueba</button>
+      <button type="submit" class="btn primary">Guardar</button>
+    </div>
+  </form>
 </div>
 
 <!-- Detalle de máquina -->

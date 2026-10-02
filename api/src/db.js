@@ -51,8 +51,24 @@ function open(dbPath) {
       detail      TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS events_machine_ts ON events (machine_id, ts DESC);
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
+  migrate(db);
   return new Store(db);
+}
+
+// Columnas agregadas después de la primera versión: se crean si faltan (bases existentes)
+function migrate(db) {
+  const cols = new Set(db.prepare('PRAGMA table_info(machines)').all().map((c) => c.name));
+  const add = (name, def) => { if (!cols.has(name)) db.exec(`ALTER TABLE machines ADD COLUMN ${name} ${def}`); };
+  add('alerts', 'INTEGER NOT NULL DEFAULT 1');          // 1 = enviar alertas de esta máquina
+  add('state', "TEXT NOT NULL DEFAULT 'unknown'");     // unknown | online | offline (último estado observado)
+  add('state_since', 'INTEGER');                        // desde cuándo está en ese estado
+  add('offline_alerted', 'INTEGER NOT NULL DEFAULT 0'); // 0 pendiente · 1 avisada · 2 sin aviso
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -84,8 +100,24 @@ class Store {
       recentEvents: db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?'),
       machineEvents: db.prepare('SELECT * FROM events WHERE machine_id = ? ORDER BY id DESC LIMIT ?'),
       pruneEvents: db.prepare('DELETE FROM events WHERE id <= (SELECT MAX(id) FROM events) - ?'),
+
+      setState: db.prepare('UPDATE machines SET state = ?, state_since = ?, offline_alerted = ? WHERE id = ?'),
+      setAlerted: db.prepare('UPDATE machines SET offline_alerted = ? WHERE id = ?'),
+      getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
+      putSetting: db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
     };
   }
+
+  // offline_alerted: 0 = pendiente, 1 = se avisó, 2 = no se avisa (deshabilitada, sin alertas o nunca vista)
+  setState(id, state, since, alerted) { this.q.setState.run(state, since, alerted, id); }
+  setAlerted(id, alerted) { this.q.setAlerted.run(alerted, id); }
+
+  getSetting(key, fallback = null) {
+    const row = this.q.getSetting.get(key);
+    if (!row) return fallback;
+    try { return JSON.parse(row.value); } catch { return fallback; }
+  }
+  putSetting(key, value) { this.q.putSetting.run(key, JSON.stringify(value)); }
 
   listMachines() { return this.q.listMachines.all(); }
   getMachine(id) { return this.q.getMachine.get(id) || null; }
@@ -97,7 +129,7 @@ class Store {
   }
 
   updateMachine(id, fields) {
-    const allowed = ['name', 'client', 'description', 'enabled'];
+    const allowed = ['name', 'client', 'description', 'enabled', 'alerts'];
     const sets = [];
     const values = [];
     for (const k of allowed) {

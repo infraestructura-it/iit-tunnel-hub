@@ -1,0 +1,68 @@
+[
+  {
+    "id": "iit_alert_in",
+    "type": "http in",
+    "name": "Webhook IIT Tunnel Hub",
+    "url": "/iit-alertas",
+    "method": "post",
+    "upload": false,
+    "x": 170,
+    "y": 100,
+    "wires": [
+      [
+        "iit_alert_ok",
+        "iit_alert_fmt",
+        "iit_alert_debug"
+      ]
+    ]
+  },
+  {
+    "id": "iit_alert_ok",
+    "type": "http response",
+    "name": "200 OK",
+    "statusCode": "200",
+    "x": 400,
+    "y": 60,
+    "wires": []
+  },
+  {
+    "id": "iit_alert_fmt",
+    "type": "function",
+    "name": "WhatsApp (CallMeBot)",
+    "func": "// Configure su número (con indicativo, sin +) y la apikey que CallMeBot le envía por WhatsApp.\n// Para activar CallMeBot y obtener la apikey siga las instrucciones de https://www.callmebot.com (sección WhatsApp).\nconst PHONE = '573000000000';\nconst APIKEY = 'SU_APIKEY';\n\n// Opcional: no reenviar las recuperaciones\n// if (msg.payload.type === 'machine_online') return null;\n\nconst text = msg.payload.text || JSON.stringify(msg.payload);\nmsg.url = 'https://api.callmebot.com/whatsapp.php?phone=' + PHONE +\n          '&text=' + encodeURIComponent(text) + '&apikey=' + APIKEY;\nmsg.method = 'GET';\ndelete msg.payload;\nreturn msg;",
+    "outputs": 1,
+    "x": 420,
+    "y": 120,
+    "wires": [
+      [
+        "iit_alert_send"
+      ]
+    ]
+  },
+  {
+    "id": "iit_alert_send",
+    "type": "http request",
+    "name": "Enviar",
+    "method": "use",
+    "ret": "txt",
+    "url": "",
+    "x": 620,
+    "y": 120,
+    "wires": [
+      [
+        "iit_alert_debug"
+      ]
+    ]
+  },
+  {
+    "id": "iit_alert_debug",
+    "type": "debug",
+    "name": "Alertas IIT",
+    "active": true,
+    "tosidebar": true,
+    "complete": "payload",
+    "x": 790,
+    "y": 100,
+    "wires": []
+  }
+]
