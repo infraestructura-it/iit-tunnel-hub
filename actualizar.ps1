@@ -2,9 +2,10 @@
 #
 # Hace, en orden:
 #   1. Busca el zip (el indicado, o el iit-tunnel-hub*.zip más reciente en C:\descargas o Descargas)
-#   2. Detiene el hub (solo el proceso que escucha en 8090), frps y frpc (recuerda qué frpc corrían)
-#   3. Descomprime en una carpeta temporal y copia sobre el proyecto
-#      (nunca toca frp\, data\, .git\, .env ni frpc-*.toml)
+#   2. Lo descomprime en una carpeta temporal y revisa que sea del proyecto (completo o parcial)
+#      Si no sirve, se detiene aquí sin haber parado nada
+#   3. Detiene el hub (solo el proceso que escucha en 8090), frps y frpc (recuerda qué frpc corrían)
+#      y copia sobre el proyecto (nunca toca frp\, data\, .git\, .env ni frpc-*.toml)
 #   4. Desbloquea los archivos y revisa que estén los principales
 #   5. Arranca de nuevo con iniciar-local.ps1 y vuelve a lanzar los frpc que estaban corriendo
 #   6. Muestra el git status (el commit y el push los hace usted)
@@ -49,7 +50,30 @@ if ($Zip) {
 $Zip = (Resolve-Path $Zip).Path
 Ok "$Zip ($((Get-Item $Zip).LastWriteTime.ToString('yyyy-MM-dd HH:mm')))"
 
-# ---------- 2. detener ----------
+# ---------- 2. descomprimir (antes de detener nada: si el zip no sirve, todo sigue corriendo) ----------
+Paso "Descomprimiendo"
+$tmp = Join-Path $env:TEMP ("iit-act-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+Expand-Archive -Path $Zip -DestinationPath $tmp -Force
+
+# El zip puede traer los archivos en la raíz o dentro de una sola carpeta envoltorio (iit-tunnel-hub\...).
+# Puede ser completo o parcial (solo los archivos que cambiaron).
+$conocidas = 'api', 'deploy', 'frps', 'test'
+$origen = $tmp
+$hijos = @(Get-ChildItem $tmp -Force)
+if ($hijos.Count -eq 1 -and $hijos[0].PSIsContainer -and $hijos[0].Name -notin $conocidas) { $origen = $hijos[0].FullName }
+
+$delProyecto = @(Get-ChildItem $origen -Force | Where-Object {
+  ($_.PSIsContainer -and $_.Name -in $conocidas) -or
+  (-not $_.PSIsContainer -and $_.Extension -in '.ps1', '.md', '.yml', '.example')
+})
+if (-not $delProyecto) { Remove-Item $tmp -Recurse -Force; Falla "El zip no parece del proyecto (no trae api\, deploy\, frps\, test\ ni scripts .ps1/.md)." }
+$archivos = @(Get-ChildItem $origen -Recurse -File)
+$parcial = -not (Test-Path "$origen\api\src\server.js")
+Ok "$($archivos.Count) archivos$(if ($parcial) { ' (actualización parcial)' })"
+$archivos | Select-Object -First 15 | ForEach-Object { Write-Host "    $($_.FullName.Substring($origen.Length + 1))" -ForegroundColor DarkGray }
+if ($archivos.Count -gt 15) { Write-Host "    … y $($archivos.Count - 15) más" -ForegroundColor DarkGray }
+
+# ---------- 2b. detener ----------
 Paso "Deteniendo hub, frps y frpc"
 
 # frpc: se guarda con qué configuración corría cada uno para relanzarlo al final
@@ -87,21 +111,7 @@ for ($i = 0; $i -lt 20; $i++) {
   Start-Sleep -Milliseconds 500
 }
 
-# ---------- 3. descomprimir y copiar ----------
-Paso "Descomprimiendo"
-$tmp = Join-Path $env:TEMP ("iit-act-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
-Expand-Archive -Path $Zip -DestinationPath $tmp -Force
-
-# El zip puede traer los archivos en la raíz o dentro de una carpeta (iit-tunnel-hub\...)
-$origen = $tmp
-if (-not (Test-Path "$tmp\api")) {
-  $sub = Get-ChildItem $tmp -Directory | Where-Object { Test-Path "$($_.FullName)\api" } | Select-Object -First 1
-  if (-not $sub) { Remove-Item $tmp -Recurse -Force; Falla "El zip no parece del proyecto (no trae la carpeta api)." }
-  $origen = $sub.FullName
-}
-$total = (Get-ChildItem $origen -Recurse -File).Count
-Ok "$total archivos en el zip"
-
+# ---------- 3. copiar ----------
 Paso "Copiando sobre $root"
 # robocopy: /E subcarpetas · /XD y /XF excluyen lo que nunca debe pisarse · códigos < 8 = éxito
 robocopy $origen $root /E /NFL /NDL /NJH /NJS /NP /XD frp data .git node_modules /XF .env *.db frpc-*.toml instalar-* | Out-Null
