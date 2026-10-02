@@ -10,3 +10,4 @@ node_modules/
 frp/
 *.exe
 frpc-*.toml
+instalar-*
