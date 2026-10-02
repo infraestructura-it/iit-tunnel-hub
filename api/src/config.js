@@ -1,6 +1,8 @@
 'use strict';
 // Configuración por variables de entorno. Ver .env.example en la raíz.
 
+const path = require('node:path');
+
 const env = process.env;
 
 function int(name, def) {
@@ -26,6 +28,18 @@ const config = {
   // Alertas: cada cuánto se revisa el estado y zona horaria de los mensajes
   alertCheckSeconds: int('ALERT_CHECK_SECONDS', 15),
   timezone: env.TZ_ALERTS || 'America/Bogota',
+  telegramApiBase: (env.TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/$/, ''),
+
+  // IA (Claude API). La clave y el modelo también se pueden configurar desde el panel; la variable tiene prioridad.
+  ai: {
+    envApiKey: env.ANTHROPIC_API_KEY || '',
+    baseUrl: (env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/$/, ''),
+    model: env.AI_MODEL || '',
+    // Clave SSH con la que el hub ejecuta los comandos de la lista blanca (se crea sola)
+    sshKeyPath: env.AI_SSH_KEY || path.join(path.dirname(path.resolve(env.DB_PATH || './data/hub.db')), 'ia_ssh_ed25519'),
+    // Dirección desde la que el hub alcanza a frps (corren en el mismo servidor)
+    frpsLocalAddr: env.FRPS_LOCAL_ADDR || '127.0.0.1',
+  },
 
   frps: {
     // Dirección con la que las máquinas llegan a frps (IP pública, dominio o IP de ZeroTier/LAN)

@@ -30,7 +30,8 @@
     <div class="brand">IIT <span>//</span> Tunnel Hub</div>
     <div class="spacer"></div>
     <span class="pill" id="frps-pill"><span class="dot"></span> frps</span>
-    <button class="btn small bell" id="alerts-btn" title="Alertas">🔔 Alertas</button>
+    <button class="btn small ai-btn" id="ai-btn" title="Asistente IA">🤖<span class="lbl"> IA</span> <span class="badge hidden" id="ai-badge"></span></button>
+    <button class="btn small bell" id="alerts-btn" title="Alertas">🔔<span class="lbl"> Alertas</span></button>
     <button class="btn small" id="logout">Salir</button>
   </header>
 
@@ -209,6 +210,95 @@
   </div>
 </template>
 
+<!-- Asistente IA -->
+<div id="ai-modal" class="overlay hidden">
+  <div class="modal ai-modal">
+    <div class="ai-head">
+      <div style="flex:1;min-width:0">
+        <h2 id="ai-title">Asistente IA</h2>
+        <div class="sub" id="ai-sub">Pregunte por el estado de las máquinas o pida diagnósticos.</div>
+      </div>
+      <button class="btn icon" data-close title="Cerrar">✕</button>
+    </div>
+    <div class="tabs" id="ai-tabs">
+      <button class="tab active" data-tab="chat">Chat</button>
+      <button class="tab" data-tab="pending">Pendientes <span class="badge hidden" id="ai-tab-badge"></span></button>
+      <button class="tab" data-tab="settings" id="ai-settings-tab">Ajustes</button>
+    </div>
+
+    <div class="tab-panel" data-panel="chat">
+      <div class="chat" id="ai-chat"></div>
+      <form class="chat-input" id="ai-form">
+        <textarea id="ai-text" rows="2" maxlength="4000" placeholder="Ej.: ¿Qué máquinas de Clínica Norte están caídas y desde cuándo?"></textarea>
+        <div class="chat-buttons">
+          <button type="button" class="btn small" id="ai-reset" title="Empezar una conversación nueva">Nueva</button>
+          <button type="submit" class="btn primary" id="ai-send">Enviar</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="tab-panel hidden" data-panel="pending">
+      <div id="ai-pending"></div>
+    </div>
+
+    <form class="tab-panel hidden" data-panel="settings" id="ai-settings-form">
+      <label class="switch"><input type="checkbox" name="enabled"> <span>IA activada</span></label>
+      <div class="row">
+        <div class="field"><label>Clave de API de Claude</label><input name="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…"><div class="hint" id="ai-key-hint">Se obtiene en console.anthropic.com → API Keys.</div></div>
+        <div class="field"><label>Modelo</label><input name="model" list="ai-models" spellcheck="false"><datalist id="ai-models"><option value="claude-sonnet-5-5"><option value="claude-opus-5-5"><option value="claude-haiku-4-5-20251001"></datalist><div class="hint">Sonnet: buen equilibrio costo/velocidad. Haiku: más barato. Opus: más capaz.</div></div>
+      </div>
+      <label class="switch"><input type="checkbox" name="analyzeAlerts"> <span>Diagnóstico automático cuando una máquina se cae</span></label>
+      <label class="switch"><input type="checkbox" name="telegramBot"> <span>Responder por Telegram (usa el bot y el chat de Alertas)</span></label>
+      <div class="field" style="max-width:220px"><label>Máximo de pasos por pregunta</label><input name="maxSteps" type="number" min="1" max="20"></div>
+      <div class="usage" id="ai-usage"></div>
+      <div class="error" id="ai-settings-error"></div>
+      <div class="modal-actions"><button type="submit" class="btn primary">Guardar</button></div>
+    </form>
+  </div>
+</div>
+
+<!-- Alcance de la IA por máquina -->
+<div id="scope-modal" class="overlay hidden">
+  <form class="modal scope-modal" id="scope-form">
+    <h2>Alcance de la IA</h2>
+    <div class="sub" id="scope-sub"></div>
+
+    <label class="switch"><input type="checkbox" name="enabled"> <span>Permitir que la IA consulte esta máquina</span></label>
+    <div class="field">
+      <label>Contexto para la IA</label>
+      <textarea name="context" rows="3" maxlength="3000" placeholder="Qué es el equipo, qué valores son normales, qué hacer ante fallas, a quién avisar…"></textarea>
+    </div>
+
+    <h4 class="section-title">SSH</h4>
+    <div class="row">
+      <div class="field"><label>Servicio tcp del SSH</label><select name="sshService"></select></div>
+      <div class="field"><label>Usuario</label><input name="sshUser" placeholder="pi" spellcheck="false"></div>
+    </div>
+    <details class="howto" id="ssh-key-box">
+      <summary>Clave pública del hub (agréguela en la máquina)</summary>
+      <div class="secret" style="margin-top:8px"><span id="hub-pubkey">…</span><button type="button" class="btn small" id="copy-pubkey">Copiar</button></div>
+      <div class="hint">En la máquina: <code>echo "&lt;clave&gt;" &gt;&gt; ~/.ssh/authorized_keys</code> para el usuario indicado.</div>
+    </details>
+
+    <h4 class="section-title">Comandos SSH permitidos</h4>
+    <div class="hint" style="margin:-6px 0 10px">La IA solo elige comandos de esta lista; nunca escribe comandos propios. Las acciones esperan su aprobación.</div>
+    <div id="scope-commands" class="scope-list"></div>
+    <button type="button" class="btn small" id="add-command">+ Comando</button>
+
+    <h4 class="section-title">Consultas HTTP por el túnel</h4>
+    <div class="hint" style="margin:-6px 0 10px">Parámetros con <code>{nombre}</code> en la ruta o el cuerpo. Las cabeceras (tokens) nunca se envían a la IA. Todo lo que no sea GET es acción.</div>
+    <div id="scope-http" class="scope-list"></div>
+    <button type="button" class="btn small" id="add-http">+ Consulta HTTP</button>
+
+    <div class="error" id="scope-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Cancelar</button>
+      <button type="submit" class="btn primary">Guardar alcance</button>
+    </div>
+  </form>
+</div>
+
 <script src="app.js"></script>
+<script src="ai.js"></script>
 </body>
 </html>

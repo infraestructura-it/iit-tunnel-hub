@@ -140,6 +140,11 @@ function renderSummary() {
     ? `<span class="dot online" style="margin:0"></span> frps ${esc(s.frps.version)} · ${esc(s.frps.publicAddr)}:${s.frps.bindPort}`
     : `<span class="dot" style="margin:0;background:var(--red)"></span> frps sin respuesta`;
   pill.title = s.frps.reachable ? `Dominio: *.${s.frps.subdomainHost}` : s.frps.error || '';
+  const aiBtn = $('#ai-btn');
+  aiBtn.classList.toggle('on', !!s.ai?.ready);
+  $('#ai-badge').textContent = s.ai?.pending || '';
+  $('#ai-badge').classList.toggle('hidden', !s.ai?.pending);
+  aiBtn.title = s.ai?.ready ? (s.ai.pending ? `${s.ai.pending} acción(es) esperando aprobación` : 'Asistente IA') : 'IA sin configurar';
   const channels = (s.alerts.telegram ? 1 : 0) + s.alerts.webhooks;
   const bell = $('#alerts-btn');
   bell.classList.toggle('on', channels > 0);
@@ -301,6 +306,15 @@ async function renderDrawer() {
     </section>
 
     <section>
+      <h4>🤖 Inteligencia artificial</h4>
+      <div class="ai-summary" id="ai-summary">${m.ai ? 'Alcance habilitado' : 'La IA no tiene alcance sobre esta máquina'}</div>
+      <div class="actions" style="margin-top:10px">
+        <button class="btn small primary" data-ai-act="chat">Abrir asistente</button>
+        <button class="btn small" data-ai-act="scope">Configurar alcance</button>
+      </div>
+    </section>
+
+    <section>
       <h4>Actividad de la máquina</h4>
       <ul class="events">${events.length ? events.map((e) => eventItem(e, false)).join('') : '<li style="border:0;color:var(--dim)">Sin eventos</li>'}</ul>
     </section>`;
@@ -309,6 +323,7 @@ async function renderDrawer() {
     const f = $('#add-svc-form', d);
     for (const [k, v] of Object.entries(formValues)) if (f.elements[k]) f.elements[k].value = v;
   }
+  if (typeof aiDrawerSummary === 'function') aiDrawerSummary(m);
 }
 
 $('#drawer').addEventListener('click', async (e) => {

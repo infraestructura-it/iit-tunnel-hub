@@ -34,6 +34,7 @@ export FRPS_SUBDOMAIN_HOST=test.local FRP_AUTH_TOKEN="token-global-e2e"
 export FRPS_TCP_PORT_MIN=21000 FRPS_TCP_PORT_MAX=21010
 export FRPS_API_URL=http://127.0.0.1:7500 FRPS_API_PASSWORD="dash-e2e"
 export ALERT_CHECK_SECONDS=1
+export ANTHROPIC_BASE_URL=http://127.0.0.1:19900 TELEGRAM_API_BASE=http://127.0.0.1:19800
 
 API="http://127.0.0.1:$PORT/api"
 AUTH=(-H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json")
@@ -56,6 +57,33 @@ http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
 PY
 touch "$WORK/hooks.log"
 python3 "$WORK/recv.py" 19600 "$WORK/hooks.log" & PIDS+=($!)
+
+# Simuladores de la API de Claude y de Telegram, y API de una "máquina" que registra lo que recibe
+node "$ROOT/test/mock-claude.js" 19900 "$WORK/claude.log" & PIDS+=($!)
+node "$ROOT/test/mock-telegram.js" 19800 & PIDS+=($!)
+cat > "$WORK/machine_api.py" <<'PY'
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        b = self.rfile.read(int(self.headers.get('content-length') or 0)).decode()
+        open(sys.argv[2], 'a').write(json.dumps({'path': self.path, 'auth': self.headers.get('authorization'), 'body': b}) + '\n')
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok":true}')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PY
+touch "$WORK/machine.log"
+python3 "$WORK/machine_api.py" 19700 "$WORK/machine.log" & PIDS+=($!)
+
+# sshd de la "máquina" (solo si hay sshd y se ejecuta como root)
+SSHD=0
+if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/sshd ] && command -v ssh >/dev/null; then
+  mkdir -p /run/sshd
+  ssh-keygen -q -t ed25519 -N '' -f "$WORK/hostkey"
+  touch "$WORK/authorized_keys"; chmod 600 "$WORK/authorized_keys"
+  /usr/sbin/sshd -D -p 18022 -h "$WORK/hostkey" -o AuthorizedKeysFile="$WORK/authorized_keys" -o StrictModes=no \
+    -o ListenAddress=127.0.0.1 -o PidFile="$WORK/sshd.pid" -E "$WORK/sshd.log" & PIDS+=($!)
+  SSHD=1
+fi
 
 node --disable-warning=ExperimentalWarning "$ROOT/api/src/server.js" > "$WORK/api.log" 2>&1 & PIDS+=($!)
 "$FRP_DIR/frps" -c "$ROOT/frps/frps.toml" > "$WORK/frps.log" 2>&1 & FRPS_PID=$!; PIDS+=($FRPS_PID)
@@ -190,18 +218,102 @@ api PATCH /machines/$ID -d '{"alerts":false}' >/dev/null
 kill $FRPC5 2>/dev/null; sleep 5
 check "máquina con alertas apagadas no alerta" '[ -z "$(hooks)" ]'
 api PATCH /machines/$ID -d '{"alerts":true}' >/dev/null
-( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc6.log 2>&1 ) & PIDS+=($!)
+( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc6.log 2>&1 ) & FRPC6=$!; PIDS+=($FRPC6)
 wait_for_long "[ \"\$(api GET /machines/$ID | jq -r .online)\" = true ]"
 
-echo "9. Configuración y limpieza"
+echo "9. IA (Claude API simulada)"
+TG=http://127.0.0.1:19800
+say() { jq -n --arg t "$2" '{text:$t}' | api POST "/ai/conversations/$1/messages" --data @- ; }
+tool() { jq -nc --arg n "$1" --argjson i "$2" '"@tool " + $n + " " + ($i|tojson)' | jq -r .; }
+check "sin configurar, el chat responde 409" '[ "$(api POST /ai/conversations/general/messages -o /dev/null -w "%{http_code}" -d "{\"text\":\"hola\"}")" = "409" ]'
+check "clave de API inválida → 400" '[ "$(api PUT /ai/settings -o /dev/null -w "%{http_code}" -d "{\"apiKey\":\"abc\"}")" = "400" ]'
+api PUT /ai/settings -d '{"enabled":true,"apiKey":"sk-ant-api03-PRUEBA-0123456789abcdefghij","analyzeAlerts":true}' >/dev/null
+check "la clave se devuelve enmascarada" '[ "$(api GET /ai/settings | jq -r .apiKeyMasked)" = "sk-ant-…ghij" ]'
+
+# servicios para la IA: ssh y una API de la máquina; nueva configuración de frpc con el token vigente
+api POST /machines/$ID/services -d '{"name":"ssh","type":"tcp","localPort":18022}' >/dev/null
+api POST /machines/$ID/services -d '{"name":"api","type":"tcp","localPort":19700}' >/dev/null
+api POST /machines/$ID/installer -d "{\"platform\":\"toml\",\"token\":\"$NEW\"}" > "$WORK/m1/frpc.toml"
+kill $FRPC6 2>/dev/null; sleep 0.5
+( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc7.log 2>&1 ) & FRPC7=$!; PIDS+=($FRPC7)
+wait_for "[ \"\$(api GET /machines/$ID | jq \"[.services[]|select(.status==\\\"online\\\")]|length\")\" -ge 5 ]"
+api GET /ai/ssh-key | jq -r .publicKey > "$WORK/authorized_keys"
+check "el hub genera su clave SSH" 'grep -q "^ssh-ed25519 " "$WORK/authorized_keys"'
+
+check "alcance: servicio inexistente → 400" '[ "$(api PUT /machines/$ID/ai-scope -o /dev/null -w "%{http_code}" -d "{\"enabled\":true,\"http\":[{\"id\":\"x\",\"service\":\"nada\",\"path\":\"/\"}]}")" = "400" ]'
+check "alcance: comandos sin SSH → 400" '[ "$(api PUT /machines/$ID/ai-scope -o /dev/null -w "%{http_code}" -d "{\"enabled\":true,\"commands\":[{\"id\":\"u\",\"command\":\"uptime\"}]}")" = "400" ]'
+jq -n --arg u "$(whoami)" --arg f "$WORK/ssh-accion" '{enabled:true, context:"Equipo de pruebas", ssh:{service:"ssh",user:$u},
+  http:[{id:"inicio",service:"web",method:"GET",path:"/",mode:"read"},
+        {id:"encender",service:"api",method:"POST",path:"/luz",headers:{"Authorization":"Bearer SECRETO-123"},body:"{\"entity_id\":\"{entidad}\"}",mode:"read"}],
+  commands:[{id:"uptime",command:"uptime",mode:"read"},{id:"marcar",command:("touch " + $f),mode:"action"}]}' > "$WORK/scope.json"
+api PUT /machines/$ID/ai-scope --data @"$WORK/scope.json" > "$WORK/scope.out"
+check "un POST declarado lectura queda como acción" '[ "$(jq -r ".http[1].mode" "$WORK/scope.out")" = "action" ]'
+check "las cabeceras secretas se devuelven enmascaradas" '[ "$(jq -r ".http[1].headers.Authorization" "$WORK/scope.out")" = "********" ]'
+
+check "chat general usa listar_maquinas" 'say general "$(tool listar_maquinas "{}")" | jq -r .reply | grep -q "$ID"'
+check "lectura HTTP por el túnel" 'say m-$ID "$(tool consultar_http "{\"maquina_id\":\"$ID\",\"consulta_id\":\"inicio\",\"motivo\":\"ver\"}")" | jq -r .reply | grep -q "hola-desde-la-maquina"'
+say m-$ID "$(tool consultar_http "{\"maquina_id\":\"$ID\",\"consulta_id\":\"encender\",\"parametros\":{\"entidad\":\"light.sala\"},\"motivo\":\"prueba\"}")" > "$WORK/r.json"
+AID=$(jq -r '.actions[-1].id' "$WORK/r.json")
+check "una acción queda pendiente y NO se ejecuta" '[ "$(jq -r ".actions[-1].status" "$WORK/r.json")" = "pendiente" ] && [ ! -s "$WORK/machine.log" ]'
+check "parámetro con inyección rechazado" 'say m-$ID "$(tool consultar_http "{\"maquina_id\":\"$ID\",\"consulta_id\":\"encender\",\"parametros\":{\"entidad\":\"x\\\"; rm -rf /\"},\"motivo\":\"x\"}")" | jq -r .reply | grep -q "ERROR el parámetro"'
+check "chat de máquina no opera sobre otra" 'say m-$ID "$(tool estado_maquina "{\"maquina_id\":\"otra\"}")" | jq -r .reply | grep -q "solo puede operar"'
+check "comando fuera del alcance rechazado" 'say m-$ID "$(tool ejecutar_comando "{\"maquina_id\":\"$ID\",\"comando_id\":\"rm\",\"motivo\":\"x\"}")" | jq -r .reply | grep -q "no está en el alcance"'
+check "aprobar ejecuta la acción en la máquina" '[ "$(api POST /ai/actions/$AID/approve | jq -r .action.status)" = "ejecutada" ] && grep -q "light.sala" "$WORK/machine.log"'
+check "la máquina recibió la cabecera secreta" 'grep -q "Bearer SECRETO-123" "$WORK/machine.log"'
+check "el secreto nunca llegó a Claude" '! grep -q "SECRETO-123" "$WORK/claude.log"'
+check "doble aprobación → 409" '[ "$(api POST /ai/actions/$AID/approve -o /dev/null -w "%{http_code}")" = "409" ]'
+check "la IA recibe el resultado aprobado" 'api GET /ai/conversations/m-$ID | jq -r ".messages[-1].text" | grep -q "ENTENDIDO"'
+say m-$ID "$(tool consultar_http "{\"maquina_id\":\"$ID\",\"consulta_id\":\"encender\",\"parametros\":{\"entidad\":\"light.patio\"},\"motivo\":\"prueba\"}")" > "$WORK/r.json"
+RID=$(jq -r '.actions[-1].id' "$WORK/r.json")
+check "rechazar no ejecuta" '[ "$(api POST /ai/actions/$RID/reject | jq -r .action.status)" = "rechazada" ] && ! grep -q "light.patio" "$WORK/machine.log"'
+if [ $SSHD = 1 ]; then
+  check "SSH de lectura por el túnel" 'say m-$ID "$(tool ejecutar_comando "{\"maquina_id\":\"$ID\",\"comando_id\":\"uptime\",\"motivo\":\"carga\"}")" | jq -r .reply | grep -q "load average"'
+  say m-$ID "$(tool ejecutar_comando "{\"maquina_id\":\"$ID\",\"comando_id\":\"marcar\",\"motivo\":\"prueba\"}")" > "$WORK/r.json"
+  SID=$(jq -r '.actions[-1].id' "$WORK/r.json")
+  check "acción SSH pendiente no se ejecuta" '[ ! -e "$WORK/ssh-accion" ]'
+  check "acción SSH aprobada se ejecuta" '[ "$(api POST /ai/actions/$SID/approve | jq -r .action.status)" = "ejecutada" ] && [ -e "$WORK/ssh-accion" ]'
+else
+  echo "  - (pruebas SSH omitidas: requieren sshd y root)"
+fi
+api PUT /machines/$ID/ai-scope -d '{"enabled":false}' >/dev/null
+check "alcance desactivado bloquea consultas" 'say m-$ID "$(tool consultar_http "{\"maquina_id\":\"$ID\",\"consulta_id\":\"inicio\",\"motivo\":\"ver\"}")" | jq -r .reply | grep -q "no está habilitada"'
+check "las peticiones a Claude fueron válidas (sin 400)" '! grep -q "\"error\"" "$WORK/claude.log"'
+
+# diagnóstico automático de alertas
+: > "$WORK/hooks.log"
+kill $FRPC7 2>/dev/null
+check "caída → alerta + diagnóstico de la IA" 'wait_for_long "grep -q ai_analysis \"$WORK/hooks.log\""'
+( cd "$WORK/m1" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc8.log 2>&1 ) & PIDS+=($!)
+wait_for_long "[ \"\$(api GET /machines/$ID | jq -r .online)\" = true ]"
+
+# bot de Telegram (simulado)
+api PUT /alerts/settings -d '{"telegram":{"botToken":"123456789:AAEhBOweik6ad6PsVkwxyz0123456789ABCD","chatId":"4242"}}' >/dev/null
+api PUT /ai/settings -d '{"telegramBot":true}' >/dev/null
+tg_sent() { curl -s $TG/__sent | jq -r '.[] | select(.method=="sendMessage") | .text'; }
+curl -s -X POST $TG/__push -d '{"message":{"message_id":1,"chat":{"id":4242},"text":"/estado"}}' >/dev/null
+check "Telegram /estado responde" 'wait_for_long "tg_sent | grep -q \"en línea\""'
+N=$(curl -s $TG/__sent | jq length)
+curl -s -X POST $TG/__push -d '{"message":{"message_id":2,"chat":{"id":999},"text":"hola"}}' >/dev/null
+sleep 3
+check "Telegram ignora chats no autorizados" '[ "$(curl -s $TG/__sent | jq length)" = "$N" ] && api GET "/events?limit=40" | jq -r ".[].kind" | grep -q telegram_no_autorizado'
+T=$(tool consultar_http "{\"maquina_id\":\"$ID\",\"consulta_id\":\"encender\",\"parametros\":{\"entidad\":\"light.tg\"},\"motivo\":\"tg\"}")
+api PUT /machines/$ID/ai-scope --data @"$WORK/scope.json" >/dev/null
+jq -n --arg t "$T" '{message:{message_id:3,chat:{id:4242},text:$t}}' | curl -s -X POST $TG/__push --data @- >/dev/null
+check "Telegram envía botones para aprobar" 'wait_for_long "curl -s $TG/__sent | jq -e \".[] | select(.reply_markup.inline_keyboard[0][0].callback_data? // \\\"\\\" | startswith(\\\"ap:\\\"))\" >/dev/null"'
+TID=$(curl -s $TG/__sent | jq -r '[.[] | .reply_markup.inline_keyboard[0][0].callback_data? // empty][-1]' | cut -d: -f2)
+curl -s -X POST $TG/__push -d "{\"callback_query\":{\"id\":\"cb1\",\"data\":\"ap:$TID\",\"message\":{\"message_id\":9,\"chat\":{\"id\":4242}}}}" >/dev/null
+check "aprobar desde Telegram ejecuta la acción" 'wait_for_long "grep -q light.tg \"$WORK/machine.log\""'
+api PUT /ai/settings -d '{"telegramBot":false}' >/dev/null
+
+echo "10. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
-check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"api\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
-check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/api | jq -r .deleted)" = "api" ]'
+check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"extra\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
+check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/extra | jq -r .deleted)" = "extra" ]'
 check "eliminar máquina" '[ "$(api DELETE /machines/$ID | jq -r .deleted)" = "$ID" ]'
 check "máquina eliminada ya no recibe tráfico" 'http_blocked'
 check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \"\$(curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq length)\" = 0 ]"'
 
-echo "10. Servidor frps caído"
+echo "11. Servidor frps caído"
 : > "$WORK/hooks.log"
 kill $FRPS_PID 2>/dev/null
 check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'

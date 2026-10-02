@@ -97,6 +97,8 @@ function message(alert, tz) {
       return `⚠️ El servidor de túneles (frps) no responde\nDesde: ${when(alert.since)}\n${alert.error || ''}`.trim();
     case 'server_up':
       return `✅ El servidor de túneles (frps) volvió a responder\nEstuvo caído ${duration(alert.downtimeSeconds)}`;
+    case 'ai_analysis':
+      return `🤖 Diagnóstico IA · ${m.name}${m.client ? ` · ${m.client}` : ''}\n${alert.analysis}`;
     case 'test':
       return '🔔 Prueba de alertas de IIT Tunnel Hub\nSi recibe este mensaje, el canal está bien configurado.';
     default:
@@ -119,12 +121,12 @@ async function postJson(url, body) {
 }
 
 /** Envía una alerta a todos los canales. Devuelve [{channel, ok, error}]. */
-async function send(settings, alert, tz) {
+async function send(settings, alert, tz, telegramBase = 'https://api.telegram.org') {
   const text = message(alert, tz);
   const payload = { source: 'iit-tunnel-hub', ...alert, text };
   const jobs = [];
   if (settings.telegram.botToken && settings.telegram.chatId) {
-    jobs.push(['telegram', postJson(`https://api.telegram.org/bot${settings.telegram.botToken}/sendMessage`,
+    jobs.push(['telegram', postJson(`${telegramBase}/bot${settings.telegram.botToken}/sendMessage`,
       { chat_id: settings.telegram.chatId, text, disable_web_page_preview: true })]);
   }
   for (const url of settings.webhooks) jobs.push([`webhook ${new URL(url).host}`, postJson(url, payload)]);
@@ -135,7 +137,9 @@ async function send(settings, alert, tz) {
 // ---------- monitor ----------
 
 class AlertMonitor {
-  constructor(store, frps, { intervalSeconds = 15, timezone = 'America/Bogota', log = console } = {}) {
+  constructor(store, frps, { intervalSeconds = 15, timezone = 'America/Bogota', telegramBase, log = console } = {}) {
+    this.telegramBase = telegramBase;
+    this.ai = null; // AIService opcional: diagnóstico automático de caídas
     this.store = store;
     this.frps = frps;
     this.intervalMs = intervalSeconds * 1000;
@@ -155,7 +159,7 @@ class AlertMonitor {
 
   async notify(alert) {
     const settings = loadSettings(this.store);
-    const results = await send(settings, alert, this.tz);
+    const results = await send(settings, alert, this.tz, this.telegramBase);
     const mid = alert.machine?.id ?? null;
     if (results.length === 0) return results;
     const failed = results.filter((r) => !r.ok);
@@ -163,6 +167,14 @@ class AlertMonitor {
     const okc = results.filter((r) => r.ok).map((r) => r.channel);
     if (okc.length) this.store.event(mid, 'alerta_enviada', `${alert.type} → ${okc.join(', ')}`, 0);
     return results;
+  }
+
+  /** Diagnóstico de la IA en segundo plano: llega como un segundo mensaje, sin retrasar la alerta. */
+  #diagnose(machine, since) {
+    if (!this.ai?.ready()) return;
+    this.ai.analyzeOffline(machine, since)
+      .then((analysis) => analysis && this.notify({ type: 'ai_analysis', at: now(), since, machine, analysis }))
+      .catch((e) => this.store.event(machine.id, 'ia_error', `diagnóstico: ${e.message}`, 300));
   }
 
   async tick() {
@@ -224,7 +236,10 @@ class AlertMonitor {
       } else if (!m.offline_alerted && t - (m.state_since || t) >= grace) {
         const notify = !!(m.enabled && m.alerts);
         this.store.setAlerted(m.id, notify ? 1 : 2); // se marca antes de enviar para no repetir si el envío tarda
-        if (notify) await this.notify({ type: 'machine_offline', at: t, since: m.state_since, machine: info });
+        if (notify) {
+          await this.notify({ type: 'machine_offline', at: t, since: m.state_since, machine: info });
+          this.#diagnose(info, m.state_since);
+        }
       }
     }
   }

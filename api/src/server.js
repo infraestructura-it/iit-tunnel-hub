@@ -16,6 +16,9 @@ const { createPluginHandler } = require('./plugin');
 const M = require('./machines');
 const { PLATFORMS } = require('./installers');
 const A = require('./alerts');
+const { AIService, AIError, viewMessages } = require('./ai');
+const SC = require('./ai-scope');
+const { TelegramBot } = require('./telegram');
 
 const VERSION = '1.0.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -115,6 +118,7 @@ function machineView(m, services, status) {
     description: m.description,
     enabled: !!m.enabled,
     alerts: !!m.alerts,
+    ai: (() => { try { return !!JSON.parse(m.ai_scope || '{}').enabled; } catch { return false; } })(),
     online: !!live,
     stateSince: m.state_since || null,
     connection: live ? {
@@ -139,7 +143,7 @@ function machineView(m, services, status) {
 
 // ---------- rutas de la API ----------
 
-function createApi(store, frps, monitor) {
+function createApi(store, frps, monitor, ai) {
   const routes = [];
   const route = (method, pattern, handler) => {
     const keys = [];
@@ -164,6 +168,7 @@ function createApi(store, frps, monitor) {
       enabled: machines.filter((m) => m.enabled).length,
       online: machines.filter((m) => status.clients.has(m.id)).length,
       services: services.length,
+      ai: (() => { const a = ai.settings(); return { enabled: a.enabled, ready: ai.ready(), pending: ai.pending().length }; })(),
       alerts: (() => { const a = A.loadSettings(store); return { telegram: !!(a.telegram.botToken && a.telegram.chatId), webhooks: a.webhooks.length, graceSeconds: a.graceSeconds }; })(),
       frps: {
         reachable: status.reachable,
@@ -315,6 +320,59 @@ function createApi(store, frps, monitor) {
     return [200, { results }];
   });
 
+  // ---------- IA ----------
+
+  // Conversaciones del panel: "general" o "m-<maquina>"
+  const panelConv = (cid) => {
+    if (cid === 'general') return { id: 'panel:general', machineId: null };
+    const m = /^m-(.+)$/.exec(cid);
+    if (m) { mustMachine(m[1]); return { id: `panel:m:${m[1]}`, machineId: m[1] }; }
+    throw new M.HttpError(404, 'conversación no encontrada');
+  };
+  const convView = (id) => {
+    const c = store.getConversation(id);
+    return { messages: c ? viewMessages(c.messages) : [], actions: store.conversationActions(id) };
+  };
+
+  route('GET', '/api/ai/settings', async () => [200, ai.publicSettings()]);
+  route('PUT', '/api/ai/settings', async (req) => {
+    const r = ai.updateSettings(await readJson(req));
+    store.event(null, 'ia_configurada', `${r.enabled ? 'activa' : 'inactiva'} · ${r.model} · diagnóstico ${r.analyzeAlerts ? 'sí' : 'no'} · Telegram ${r.telegramBot ? 'sí' : 'no'}`, 0);
+    return [200, r];
+  });
+  route('GET', '/api/ai/ssh-key', async () => [200, { publicKey: await ai.publicKey() }]);
+
+  route('GET', '/api/machines/:id/ai-scope', async (_req, p) => {
+    mustMachine(p.id);
+    return [200, SC.scopeForPanel(store.getScope(p.id))];
+  });
+  route('PUT', '/api/machines/:id/ai-scope', async (req, p) => {
+    mustMachine(p.id);
+    const scope = SC.normalizeScope(await readJson(req, 128 * 1024), store.servicesOf(p.id), store.getScope(p.id), M.bad);
+    store.setScope(p.id, scope);
+    store.event(p.id, 'ia_alcance', `${scope.enabled ? 'habilitada' : 'deshabilitada'} · ${scope.http.length} consultas · ${scope.commands.length} comandos`, 0);
+    return [200, SC.scopeForPanel(scope)];
+  });
+
+  route('GET', '/api/ai/conversations/:cid', async (_req, p) => [200, convView(panelConv(p.cid).id)]);
+  route('DELETE', '/api/ai/conversations/:cid', async (_req, p) => { ai.reset(panelConv(p.cid).id); return [200, { ok: true }]; });
+  route('POST', '/api/ai/conversations/:cid/messages', async (req, p) => {
+    const c = panelConv(p.cid);
+    const body = await readJson(req);
+    const r = await ai.chat(c.id, { machineId: c.machineId, channel: 'panel' }, body.text);
+    return [200, { reply: r.reply, ...convView(c.id) }];
+  });
+
+  route('GET', '/api/ai/actions', async () => [200, ai.pending()]);
+  route('POST', '/api/ai/actions/:id/approve', async (_req, p) => {
+    const r = await ai.approve(Number(p.id), 'panel');
+    return [200, { ...r, ...convView(r.action.conversation_id) }];
+  });
+  route('POST', '/api/ai/actions/:id/reject', async (_req, p) => {
+    const r = await ai.reject(Number(p.id), 'panel');
+    return [200, { ...r, ...convView(r.action.conversation_id) }];
+  });
+
   route('GET', '/api/events', async (req) => {
     const u = new URL(req.url, 'http://x');
     const limit = Number(u.searchParams.get('limit')) || 100;
@@ -339,7 +397,7 @@ function createApi(store, frps, monitor) {
 }
 
 function errorResponse(res, err) {
-  if (err instanceof M.HttpError) return send(res, err.status, { error: err.message });
+  if (err instanceof M.HttpError || err instanceof AIError) return send(res, err.status, { error: err.message });
   if (err?.code === 'ERR_SQLITE_ERROR' && /UNIQUE/.test(err.message)) return send(res, 409, { error: 'conflicto: el valor ya está en uso' });
   console.error(err);
   return send(res, 500, { error: 'error interno' });
@@ -356,8 +414,11 @@ function main() {
 
   const store = open(config.dbPath);
   const frps = new FrpsClient(config.frps);
-  const monitor = new A.AlertMonitor(store, frps, { intervalSeconds: config.alertCheckSeconds, timezone: config.timezone });
-  const api = createApi(store, frps, monitor);
+  const monitor = new A.AlertMonitor(store, frps, { intervalSeconds: config.alertCheckSeconds, timezone: config.timezone, telegramBase: config.telegramApiBase });
+  const ai = new AIService({ store, frps, config, machineView });
+  monitor.ai = ai;
+  const bot = new TelegramBot({ store, ai, frps, apiBase: config.telegramApiBase });
+  const api = createApi(store, frps, monitor, ai);
   const plugin = createPluginHandler(store, frps);
 
   const app = http.createServer(async (req, res) => {
@@ -389,9 +450,10 @@ function main() {
   pluginServer.listen(config.pluginPort, config.pluginHost, () => console.log(`Plugin frps en http://${config.pluginHost}:${config.pluginPort}/frp/handler`));
 
   monitor.start();
+  bot.start();
   console.log(`Alertas: revisión cada ${config.alertCheckSeconds} s`);
 
-  const shutdown = () => { monitor.stop(); app.close(); pluginServer.close(); process.exit(0); };
+  const shutdown = () => { monitor.stop(); bot.stop(); app.close(); pluginServer.close(); process.exit(0); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

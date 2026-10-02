@@ -40,6 +40,11 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml` |
 | `api/src/db.js` | Esquema SQLite (`machines`, `services`, `events`) y consultas |
 | `api/src/alerts.js` | Monitor de estado (cada `ALERT_CHECK_SECONDS`) y envío de alertas por Telegram y webhooks; configuración en la tabla `settings` |
+| `api/src/ai.js` | Agente Claude: herramientas, bucle tool_use, conversaciones, aprobaciones, diagnóstico de alertas, uso |
+| `api/src/ai-scope.js` | Alcance de IA por máquina: validación, vistas sin secretos, ejecución HTTP por frps y SSH con clave del hub |
+| `api/src/telegram.js` | Bot de Telegram (long polling): solo el chat de Alertas, botones aprobar/rechazar |
+| `api/public/ai.js` | Panel: chat, pendientes, ajustes de IA y editor de alcance |
+| `test/mock-claude.js`, `test/mock-telegram.js` | Simuladores para las pruebas (validan el formato de la API como lo haría la real) |
 | `api/src/installers.js` | Instaladores autocontenidos por máquina (Linux `.sh`, Windows `.ps1`) con el toml y el token incrustados |
 | `api/src/frps.js` | Cliente de la API del dashboard de frps (caché 3 s) |
 | `api/src/config.js` | Variables de entorno |
@@ -49,7 +54,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (49 casos) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (79 casos) |
 
 ## Comandos
 
@@ -81,6 +86,16 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 - Ante error interno el plugin **rechaza** (falla cerrado). Mantenerlo así.
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
+
+## IA: reglas (no romper)
+
+- La IA solo usa ids de consultas/comandos del alcance; **nunca** URLs ni comandos libres. Parámetros validados con `PARAM_VALUE_RE`.
+- Modo `action` ⇒ se crea `ai_actions` en `pendiente` y **no** se ejecuta; solo `approve()` ejecuta (transición atómica `pendiente → ejecutando`). Todo método ≠ GET es `action`.
+- Cabeceras de consultas HTTP = secretos: no van en `scopeForAI`, ni en resúmenes, ni al panel (`********`). Hay prueba que verifica que no llegan a Claude.
+- Conversación por máquina: herramientas restringidas a esa máquina. Diagnóstico de alertas: solo herramientas del hub.
+- Alternancia de roles: usar `pushUserText` para agregar texto de usuario (une con el último si también es del usuario).
+- API: `POST {ANTHROPIC_BASE_URL}/v1/messages`, cabeceras `x-api-key` y `anthropic-version: 2023-06-01`; modelo por defecto `claude-sonnet-5-5` (configurable). Sin clave real en desarrollo: las pruebas usan `test/mock-claude.js`.
+- El hub alcanza los servicios de las máquinas a través de frps en `FRPS_LOCAL_ADDR` (vhost http con cabecera Host, o puerto remoto tcp). Servicios `https` no se admiten en el alcance.
 
 ## Alertas: reglas (no romper)
 
@@ -120,7 +135,8 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 
 ## Pendientes / ideas
 
-- Usuarios y roles (hoy un solo `ADMIN_TOKEN`).
+- Usuarios y roles (hoy un solo `ADMIN_TOKEN`); las aprobaciones de IA registran "panel" o "telegram", no la persona.
+- Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.
 - Tipo `stcp` para SSH sin puerto público.

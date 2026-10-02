@@ -183,6 +183,35 @@ No avisan las máquinas que nunca se han conectado, las deshabilitadas ni las qu
 
 **Guardar y enviar prueba** muestra el resultado de cada canal. Los envíos fallidos quedan en la actividad como "Alerta no enviada".
 
+## Inteligencia artificial (Claude)
+
+Botón **🤖 IA** del panel. En **Ajustes** se pega la clave de API de Claude (console.anthropic.com) y se elige el modelo (por defecto `claude-sonnet-5-5`).
+
+**Qué hace**
+
+| Dónde | Qué |
+|---|---|
+| Chat general | Preguntas sobre todas las máquinas: "¿qué equipos están caídos?", "¿hubo desconexiones repetidas hoy?" |
+| Chat por máquina (detalle → *Abrir asistente*) | Diagnóstico de una máquina, usando solo su alcance; no puede operar sobre otras |
+| Diagnóstico de alertas | Cuando una máquina cae, la IA revisa sus eventos, su última IP y si otras máquinas del mismo cliente cayeron, y envía un segundo mensaje con la causa probable |
+| Telegram | Con *Responder por Telegram* activo, el mismo bot de Alertas atiende preguntas en ese chat (`/estado`, `/pendientes`, `/nuevo`) y permite aprobar acciones con botones. Solo responde al chat configurado |
+
+**Alcance por máquina** (detalle → *Configurar alcance*)
+
+- **Contexto**: notas para la IA (qué es el equipo, qué es normal, a quién avisar).
+- **Consultas HTTP** por el túnel a servicios `http` o `tcp` de la máquina: método, ruta, cuerpo, parámetros `{nombre}` y **cabeceras secretas** (p. ej. `Authorization: Bearer <token de HA>`) que **nunca se envían a la IA** y el panel muestra enmascaradas.
+- **Comandos SSH** de una **lista blanca**: la IA solo elige un comando por su id; nunca escribe comandos. Requiere un servicio `tcp` hacia el puerto 22 y agregar la **clave pública del hub** (se muestra en el editor) al `~/.ssh/authorized_keys` del usuario indicado.
+- **Modo**: *lectura* (la IA lo ejecuta sola) o *acción* (queda **pendiente hasta que un humano la aprueba** en el panel o en Telegram). Toda consulta que no sea `GET` es acción. Las pendientes expiran en 1 hora.
+
+**Garantías**
+
+- La IA no puede llamar URLs ni ejecutar comandos fuera del alcance; los valores de parámetros solo admiten `A-Z a-z 0-9 . _ : @ -`.
+- Las respuestas de los equipos se le entregan como datos y el prompt le prohíbe tratarlas como instrucciones; aun así, ninguna acción ocurre sin aprobación humana.
+- Todo queda en la actividad: consultas, acciones propuestas, aprobadas, rechazadas y su resultado.
+- Ajustes muestra el **uso** (llamadas y tokens del día y del mes) para controlar el costo.
+
+**Requisitos**: el hub y frps en el mismo servidor (el hub alcanza los servicios a través de frps en `127.0.0.1`) y el cliente OpenSSH (`ssh`, `ssh-keygen`) instalado si se usan comandos. La imagen Docker ya lo incluye.
+
 ## API
 
 Todas las rutas requieren `Authorization: Bearer <ADMIN_TOKEN>`.
@@ -201,6 +230,13 @@ Todas las rutas requieren `Authorization: Bearer <ADMIN_TOKEN>`.
 | POST | `/api/machines/:id/services` | Agregar servicio |
 | DELETE | `/api/machines/:id/services/:nombre` | Quitar servicio |
 | GET | `/api/events?machine=:id&limit=100` | Actividad (logins, rechazos, servicios, alertas) |
+| GET / PUT | `/api/ai/settings` | IA: `enabled`, `apiKey` (enmascarada al leer), `model`, `analyzeAlerts`, `telegramBot`, `maxSteps`; incluye el uso |
+| GET | `/api/ai/ssh-key` | Clave pública SSH del hub (se crea si no existe) |
+| GET / PUT | `/api/machines/:id/ai-scope` | Alcance de la IA de la máquina (cabeceras secretas enmascaradas como `********`; enviarlas así conserva el valor) |
+| GET / DELETE | `/api/ai/conversations/:cid` | Conversación del panel (`general` o `m-<maquina>`) y sus acciones; DELETE la reinicia |
+| POST | `/api/ai/conversations/:cid/messages` | `{text}` → respuesta de la IA |
+| GET | `/api/ai/actions` | Acciones pendientes de aprobación |
+| POST | `/api/ai/actions/:id/approve` · `/reject` | Aprobar (ejecuta) o rechazar una acción |
 | GET / PUT | `/api/alerts/settings` | Canales y tiempo de gracia (`graceSeconds`, `telegram{botToken,chatId}`, `webhooks[]`). El token del bot se devuelve enmascarado |
 | POST | `/api/alerts/test` | Envía una prueba a todos los canales y devuelve el resultado de cada uno |
 
@@ -239,7 +275,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 49 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído).
+Levanta frps, el hub y frpc reales en localhost y verifica 79 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot.
 
 ## Límites conocidos
 

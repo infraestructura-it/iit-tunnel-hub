@@ -56,6 +56,34 @@ function open(dbPath) {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    -- Conversaciones con la IA (panel, Telegram o análisis de alertas)
+    CREATE TABLE IF NOT EXISTS ai_conversations (
+      id          TEXT PRIMARY KEY,
+      machine_id  TEXT,                 -- null = conversación general
+      channel     TEXT NOT NULL,        -- panel | telegram | alerta
+      messages    TEXT NOT NULL DEFAULT '[]',
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+
+    -- Acciones propuestas por la IA que requieren aprobación humana
+    CREATE TABLE IF NOT EXISTS ai_actions (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id  TEXT NOT NULL,
+      machine_id       TEXT NOT NULL,
+      kind             TEXT NOT NULL,   -- http | ssh
+      item_id          TEXT NOT NULL,   -- id de la consulta o del comando en el alcance
+      params           TEXT NOT NULL DEFAULT '{}',
+      summary          TEXT NOT NULL,
+      reason           TEXT NOT NULL DEFAULT '',
+      status           TEXT NOT NULL,   -- pendiente | ejecutada | fallida | rechazada | expirada
+      result           TEXT,
+      requested_at     INTEGER NOT NULL,
+      decided_at       INTEGER,
+      decided_by       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ai_actions_status ON ai_actions (status, requested_at DESC);
   `);
   migrate(db);
   return new Store(db);
@@ -69,6 +97,7 @@ function migrate(db) {
   add('state', "TEXT NOT NULL DEFAULT 'unknown'");     // unknown | online | offline (último estado observado)
   add('state_since', 'INTEGER');                        // desde cuándo está en ese estado
   add('offline_alerted', 'INTEGER NOT NULL DEFAULT 0'); // 0 pendiente · 1 avisada · 2 sin aviso
+  add('ai_scope', "TEXT NOT NULL DEFAULT '{}'");        // alcance de la IA (JSON, ver ai-scope.js)
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -103,6 +132,19 @@ class Store {
 
       setState: db.prepare('UPDATE machines SET state = ?, state_since = ?, offline_alerted = ? WHERE id = ?'),
       setAlerted: db.prepare('UPDATE machines SET offline_alerted = ? WHERE id = ?'),
+      setScope: db.prepare('UPDATE machines SET ai_scope = ?, updated_at = ? WHERE id = ?'),
+      getConv: db.prepare('SELECT * FROM ai_conversations WHERE id = ?'),
+      putConv: db.prepare(`INSERT INTO ai_conversations (id, machine_id, channel, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(id) DO UPDATE SET messages = excluded.messages, updated_at = excluded.updated_at`),
+      delConv: db.prepare('DELETE FROM ai_conversations WHERE id = ?'),
+      insertAction: db.prepare(`INSERT INTO ai_actions (conversation_id, machine_id, kind, item_id, params, summary, reason, status, requested_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?)`),
+      getAction: db.prepare('SELECT * FROM ai_actions WHERE id = ?'),
+      decideAction: db.prepare(`UPDATE ai_actions SET status = ?, result = ?, decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pendiente'`),
+      setActionResult: db.prepare('UPDATE ai_actions SET status = ?, result = ? WHERE id = ?'),
+      pendingActions: db.prepare(`SELECT * FROM ai_actions WHERE status = 'pendiente' ORDER BY id DESC`),
+      convActions: db.prepare('SELECT * FROM ai_actions WHERE conversation_id = ? ORDER BY id'),
+      expireActions: db.prepare(`UPDATE ai_actions SET status = 'expirada', decided_at = ? WHERE status = 'pendiente' AND requested_at < ?`),
       getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
       putSetting: db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
     };
@@ -111,6 +153,37 @@ class Store {
   // offline_alerted: 0 = pendiente, 1 = se avisó, 2 = no se avisa (deshabilitada, sin alertas o nunca vista)
   setState(id, state, since, alerted) { this.q.setState.run(state, since, alerted, id); }
   setAlerted(id, alerted) { this.q.setAlerted.run(alerted, id); }
+
+  // ---------- IA ----------
+  getScope(id) {
+    const m = this.getMachine(id);
+    if (!m) return null;
+    try { return JSON.parse(m.ai_scope || '{}'); } catch { return {}; }
+  }
+  setScope(id, scope) { this.q.setScope.run(JSON.stringify(scope), now(), id); }
+
+  getConversation(id) {
+    const c = this.q.getConv.get(id);
+    if (!c) return null;
+    return { ...c, messages: JSON.parse(c.messages) };
+  }
+  saveConversation(c) {
+    const t = now();
+    this.q.putConv.run(c.id, c.machine_id ?? null, c.channel, JSON.stringify(c.messages), c.created_at || t, t);
+  }
+  deleteConversation(id) { this.q.delConv.run(id); }
+
+  createAction(a) {
+    const r = this.q.insertAction.run(a.conversationId, a.machineId, a.kind, a.itemId, JSON.stringify(a.params || {}), a.summary, a.reason || '', now());
+    return this.getAction(Number(r.lastInsertRowid));
+  }
+  getAction(id) { return this.q.getAction.get(id) || null; }
+  /** Pasa una acción pendiente a otro estado. Devuelve false si ya no estaba pendiente (doble clic, dos canales). */
+  decideAction(id, status, result, by) { return this.q.decideAction.run(status, result ?? null, now(), by, id).changes > 0; }
+  setActionResult(id, status, result) { this.q.setActionResult.run(status, result, id); }
+  pendingActions() { return this.q.pendingActions.all(); }
+  conversationActions(convId) { return this.q.convActions.all(convId); }
+  expireActions(maxAgeSeconds) { return this.q.expireActions.run(now(), now() - maxAgeSeconds).changes; }
 
   getSetting(key, fallback = null) {
     const row = this.q.getSetting.get(key);
