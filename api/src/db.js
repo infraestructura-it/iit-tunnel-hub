@@ -5,6 +5,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
+// Tabla de servicios. stcp = servicio privado: sin puerto público, solo visitantes autorizados (secret = clave stcp)
+const SERVICES_TABLE = (name) => `
+    CREATE TABLE IF NOT EXISTS ${name} (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      machine_id  TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+      name        TEXT NOT NULL,
+      type        TEXT NOT NULL CHECK (type IN ('http','https','tcp','stcp')),
+      local_ip    TEXT NOT NULL DEFAULT '127.0.0.1',
+      local_port  INTEGER NOT NULL,
+      subdomain   TEXT UNIQUE,
+      remote_port INTEGER UNIQUE,
+      tls_mode    TEXT,
+      secret      TEXT,
+      created_at  INTEGER NOT NULL,
+      UNIQUE (machine_id, name)
+    );`;
+
 function open(dbPath) {
   fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(dbPath);
@@ -29,19 +46,7 @@ function open(dbPath) {
       last_version        TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS services (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      machine_id  TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
-      name        TEXT NOT NULL,
-      type        TEXT NOT NULL CHECK (type IN ('http','https','tcp')),
-      local_ip    TEXT NOT NULL DEFAULT '127.0.0.1',
-      local_port  INTEGER NOT NULL,
-      subdomain   TEXT UNIQUE,
-      remote_port INTEGER UNIQUE,
-      tls_mode    TEXT,
-      created_at  INTEGER NOT NULL,
-      UNIQUE (machine_id, name)
-    );
+${SERVICES_TABLE('services')}
 
     CREATE TABLE IF NOT EXISTS events (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +91,18 @@ function open(dbPath) {
     CREATE INDEX IF NOT EXISTS ai_actions_status ON ai_actions (status, requested_at DESC);
   `);
   migrate(db);
+  db.exec(`
+    -- Accesos a servicios privados (stcp): la máquina visitante abre bind_port en su equipo
+    CREATE TABLE IF NOT EXISTS service_access (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      service_id  INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      visitor_id  TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+      bind_port   INTEGER NOT NULL,
+      created_at  INTEGER NOT NULL,
+      UNIQUE (service_id, visitor_id),
+      UNIQUE (visitor_id, bind_port)
+    );
+  `);
   return new Store(db);
 }
 
@@ -98,6 +115,23 @@ function migrate(db) {
   add('state_since', 'INTEGER');                        // desde cuándo está en ese estado
   add('offline_alerted', 'INTEGER NOT NULL DEFAULT 0'); // 0 pendiente · 1 avisada · 2 sin aviso
   add('ai_scope', "TEXT NOT NULL DEFAULT '{}'");        // alcance de la IA (JSON, ver ai-scope.js)
+
+  // services: el CHECK de tipo no admitía 'stcp' y faltaba la columna secret. SQLite no altera
+  // un CHECK: se reconstruye la tabla conservando ids y datos.
+  const svcSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'services'").get()?.sql || '';
+  if (!svcSql.includes("'stcp'")) {
+    const cols = 'id, machine_id, name, type, local_ip, local_port, subdomain, remote_port, tls_mode, created_at';
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec('BEGIN');
+      db.exec(SERVICES_TABLE('services_nueva'));
+      db.exec(`INSERT INTO services_nueva (${cols}) SELECT ${cols} FROM services`);
+      db.exec('DROP TABLE services');
+      db.exec('ALTER TABLE services_nueva RENAME TO services');
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    finally { db.exec('PRAGMA foreign_keys = ON'); }
+  }
 }
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -118,8 +152,16 @@ class Store {
       listServices: db.prepare('SELECT * FROM services ORDER BY machine_id, name'),
       servicesOf: db.prepare('SELECT * FROM services WHERE machine_id = ? ORDER BY name'),
       getService: db.prepare('SELECT * FROM services WHERE machine_id = ? AND name = ?'),
-      insertService: db.prepare(`INSERT INTO services (machine_id, name, type, local_ip, local_port, subdomain, remote_port, tls_mode, created_at)
-                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+      insertService: db.prepare(`INSERT INTO services (machine_id, name, type, local_ip, local_port, subdomain, remote_port, tls_mode, secret, created_at)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+      setSecret: db.prepare('UPDATE services SET secret = ? WHERE id = ?'),
+
+      listAccess: db.prepare(`SELECT a.id, a.service_id, a.visitor_id, a.bind_port, a.created_at,
+                                     s.machine_id AS owner_id, s.name AS service, s.secret, s.local_port
+                              FROM service_access a JOIN services s ON s.id = a.service_id
+                              ORDER BY a.visitor_id, a.bind_port`),
+      insertAccess: db.prepare('INSERT INTO service_access (service_id, visitor_id, bind_port, created_at) VALUES (?, ?, ?, ?)'),
+      deleteAccess: db.prepare('DELETE FROM service_access WHERE id = ?'),
       deleteService: db.prepare('DELETE FROM services WHERE machine_id = ? AND name = ?'),
       subdomainOwner: db.prepare('SELECT machine_id, name FROM services WHERE subdomain = ?'),
       usedPorts: db.prepare('SELECT remote_port FROM services WHERE remote_port IS NOT NULL'),
@@ -230,9 +272,22 @@ class Store {
 
   createService(machineId, s) {
     this.q.insertService.run(machineId, s.name, s.type, s.localIp, s.localPort,
-      s.subdomain ?? null, s.remotePort ?? null, s.tlsMode ?? null, now());
+      s.subdomain ?? null, s.remotePort ?? null, s.tlsMode ?? null, s.secret ?? null, now());
     return this.getService(machineId, s.name);
   }
+  setServiceSecret(serviceId, secret) { this.q.setSecret.run(secret, serviceId); }
+
+  // ---------- accesos a servicios privados (stcp) ----------
+  // Cada fila trae: id, service_id, visitor_id, bind_port, owner_id, service, secret, local_port
+  listAccess() { return this.q.listAccess.all(); }
+  getAccess(id) { return this.listAccess().find((a) => a.id === Number(id)) || null; }
+  accessForService(serviceId) { return this.listAccess().filter((a) => a.service_id === serviceId); }
+  accessOfVisitor(visitorId) { return this.listAccess().filter((a) => a.visitor_id === visitorId); }
+  createAccess(serviceId, visitorId, bindPort) {
+    const r = this.q.insertAccess.run(serviceId, visitorId, bindPort, now());
+    return this.getAccess(Number(r.lastInsertRowid));
+  }
+  deleteAccess(id) { return this.q.deleteAccess.run(Number(id)).changes > 0; }
 
   deleteService(machineId, name) { return this.q.deleteService.run(machineId, name).changes > 0; }
 

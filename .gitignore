@@ -1,13 +1,19 @@
 .env
 .frp/
+frp/
+*.exe
 data/
 *.db
 *.db-wal
 *.db-shm
 node_modules/
 
-# frp local y configuraciones con tokens
-frp/
-*.exe
+# Configuraciones e instaladores de máquinas: llevan el token
 frpc-*.toml
 instalar-*
+
+# Accesos privados (stcp): llevan claves de servicios
+accesos-*.toml
+accesos-*.sh
+accesos-*.ps1
+*.rdp

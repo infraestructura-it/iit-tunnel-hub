@@ -192,6 +192,9 @@ check "serverAddr inválido → 400" '[ "$(api POST /machines/$ID/installer -o /
 inst linux "$NEW" 10.1.2.3 > "$WORK/instalar.sh"
 check "instalador Linux con sintaxis bash válida" 'bash -n "$WORK/instalar.sh"'
 awk "/^cat > .*<<'IIT_FRPC_TOML'/{f=1;next} /^IIT_FRPC_TOML/{f=0} f" "$WORK/instalar.sh" > "$WORK/inst.toml"
+check "incluye el archivo de accesos con ruta absoluta" 'grep -q "^includes = \[./etc/iit-frpc/accesos-$ID.toml.\]" "$WORK/inst.toml"'
+# /etc/iit-frpc no existe en este equipo: se apunta el include a una carpeta que sí existe para validar
+sed -i "s|/etc/iit-frpc/|$WORK/|" "$WORK/inst.toml"
 check "la configuración incrustada es válida para frpc" '"$FRP_DIR/frpc" verify -c "$WORK/inst.toml" >/dev/null'
 check "usa la dirección de servidor indicada" 'grep -q "serverAddr = \"10.1.2.3\"" "$WORK/inst.toml"'
 check "lleva el token de la máquina y el token global" 'grep -q "$NEW" "$WORK/inst.toml" && grep -q "auth.token" "$WORK/inst.toml"'
@@ -305,7 +308,100 @@ curl -s -X POST $TG/__push -d "{\"callback_query\":{\"id\":\"cb1\",\"data\":\"ap
 check "aprobar desde Telegram ejecuta la acción" 'wait_for_long "grep -q light.tg \"$WORK/machine.log\""'
 api PUT /ai/settings -d '{"telegramBot":false}' >/dev/null
 
-echo "10. Configuración y limpieza"
+echo "10. Servicios privados (stcp): SSH/RDP sin puerto público"
+# Base con el esquema anterior (sin stcp): la migración conserva los datos y admite el tipo nuevo
+cat > "$WORK/migra.js" <<'JS'
+const { DatabaseSync } = require('node:sqlite');
+const old = new DatabaseSync(process.argv[2]);
+old.exec(`CREATE TABLE machines (id TEXT PRIMARY KEY, name TEXT NOT NULL, client TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_login_at INTEGER,
+  last_client_address TEXT, last_hostname TEXT, last_os TEXT, last_arch TEXT, last_version TEXT);
+CREATE TABLE services (id INTEGER PRIMARY KEY AUTOINCREMENT, machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE, name TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('http','https','tcp')), local_ip TEXT NOT NULL DEFAULT '127.0.0.1', local_port INTEGER NOT NULL,
+  subdomain TEXT UNIQUE, remote_port INTEGER UNIQUE, tls_mode TEXT, created_at INTEGER NOT NULL, UNIQUE (machine_id, name));
+INSERT INTO machines (id, name, token_hash, created_at, updated_at) VALUES ('vieja', 'Vieja', 'x', 1, 1);
+INSERT INTO services (machine_id, name, type, local_port, subdomain, created_at) VALUES ('vieja', 'web', 'http', 80, 'web-vieja', 1);`);
+old.close();
+const s = require(process.argv[3]).open(process.argv[2]);
+s.createService('vieja', { name: 'ssh', type: 'stcp', localIp: '127.0.0.1', localPort: 22, secret: 'k' });
+const svcs = s.servicesOf('vieja');
+if (svcs.length !== 2 || svcs.find((x) => x.name === 'web').subdomain !== 'web-vieja') throw new Error('servicios perdidos');
+s.createAccess(svcs.find((x) => x.type === 'stcp').id, 'vieja', 6022);
+s.deleteMachine('vieja');
+if (s.listAccess().length) throw new Error('accesos huérfanos');
+require(process.argv[3]).open(process.argv[2]); // segunda apertura: la migración no se repite
+JS
+node --disable-warning=ExperimentalWarning "$WORK/migra.js" "$WORK/vieja.db" "$ROOT/api/src/db.js" 2>"$WORK/migra.log"; MIG=$?
+check "migración de una base anterior conserva los servicios y admite stcp" '[ $MIG = 0 ] || { cat "$WORK/migra.log"; false; }'
+frps_ports() { lsof -nP -a -p "$FRPS_PID" -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | sort -u | paste -sd' '; }
+PORTS_BEFORE=$(frps_ports)
+
+api POST /machines -d '{"name":"Servidor privado","services":[{"name":"ssh","type":"stcp","localPort":18999}]}' > "$WORK/own.json"
+OWN=$(jq -r .machine.id "$WORK/own.json")
+check "servicio privado sin dirección pública" '[ "$(jq -r ".machine.services[0].publicUrl" "$WORK/own.json")" = "null" ] && [ "$(jq -r ".machine.services[0].private" "$WORK/own.json")" = "true" ]'
+check "el frpc.toml del dueño no lleva la clave" '! jq -r .frpcToml "$WORK/own.json" | grep -qi secretkey'
+mkdir -p "$WORK/own" "$WORK/vis" "$WORK/int"
+jq -r .frpcToml "$WORK/own.json" > "$WORK/own/frpc.toml"
+( cd "$WORK/own" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & OWNPID=$!; PIDS+=($OWNPID)
+
+api POST /machines -d '{"name":"Puesto tecnico"}' > "$WORK/vis.json"
+VIS=$(jq -r .machine.id "$WORK/vis.json")
+jq -r .frpcToml "$WORK/vis.json" > "$WORK/vis/frpc.toml"
+( cd "$WORK/vis" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & VISPID=$!; PIDS+=($VISPID)
+check "frpc arranca aunque aún no exista el archivo de accesos" 'wait_for "[ \"\$(api GET /machines/$VIS | jq -r .online)\" = true ]"'
+check "el servicio privado queda activo en frps" 'wait_for "[ \"\$(api GET /machines/$OWN | jq -r .services[0].status)\" = online ]"'
+
+check "acceso a la misma máquina → 400" '[ "$(api POST /access -o /dev/null -w "%{http_code}" -d "{\"machine\":\"$OWN\",\"service\":\"ssh\",\"visitor\":\"$OWN\"}")" = "400" ]'
+check "acceso a un servicio no privado → 400" '[ "$(api POST /access -o /dev/null -w "%{http_code}" -d "{\"machine\":\"$ID\",\"service\":\"web\",\"visitor\":\"$VIS\"}")" = "400" ]'
+api POST /access -d "{\"machine\":\"$OWN\",\"service\":\"ssh\",\"visitor\":\"$VIS\"}" > "$WORK/acc.json"
+ACC=$(jq -r .id "$WORK/acc.json"); BP=$(jq -r .bindPort "$WORK/acc.json")
+check "acceso otorgado con puerto local sugerido" '[ "$BP" = "6100" ]'
+check "acceso duplicado → 409" '[ "$(api POST /access -o /dev/null -w "%{http_code}" -d "{\"machine\":\"$OWN\",\"service\":\"ssh\",\"visitor\":\"$VIS\"}")" = "409" ]'
+check "el panel muestra quién tiene acceso y a qué" '[ "$(api GET /machines/$OWN | jq -r ".services[0].access[0].visitor")" = "$VIS" ] && [ "$(api GET /machines/$VIS | jq -r ".visits[0].bindPort")" = "6100" ]'
+
+api GET /machines/$VIS/accesos.toml > "$WORK/vis/accesos-$VIS.toml"
+check "archivo de accesos válido con la clave" 'grep -q "^secretKey = " "$WORK/vis/accesos-$VIS.toml" && "$FRP_DIR/frpc" verify -c "$WORK/vis/frpc.toml" >/dev/null'
+kill $VISPID 2>/dev/null; sleep 0.5
+( cd "$WORK/vis" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc2.log 2>&1 ) & VISPID=$!; PIDS+=($VISPID)
+through() { curl -s -m 3 "http://127.0.0.1:$1/"; }
+check "el dueño se reconecta solo para aplicar el acceso" 'wait_for_long "api GET \"/events?machine=$OWN\" | jq -r \".[].kind\" | grep -q reconexion"'
+check "el visitante autorizado llega al servicio privado" 'wait_for_long "[ \"\$(through 6100)\" = hola-desde-la-maquina ]"'
+check "frps no abrió ningún puerto nuevo para el servicio privado" '[ -n "$PORTS_BEFORE" ] && [ "$(frps_ports)" = "$PORTS_BEFORE" ]'
+
+# Otra máquina registrada que consiguió la clave pero no tiene acceso
+api POST /machines -d '{"name":"Intruso"}' > "$WORK/int.json"
+INT=$(jq -r .machine.id "$WORK/int.json")
+jq -r .frpcToml "$WORK/int.json" > "$WORK/int/frpc.toml"
+sed "s/^bindPort = .*/bindPort = 6200/" "$WORK/vis/accesos-$VIS.toml" > "$WORK/int/accesos-$INT.toml"
+( cd "$WORK/int" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & INTPID=$!; PIDS+=($INTPID)
+wait_for "grep -q \"start visitor success\" $WORK/int/frpc.log"
+check "una máquina sin acceso no entra aunque tenga la clave" 'sleep 1; [ "$(through 6200)" != hola-desde-la-maquina ]'
+kill $INTPID 2>/dev/null
+
+api GET /machines/$VIS/accesos/linux > "$WORK/accesos.sh"
+check "script de accesos Linux con sintaxis válida" 'bash -n "$WORK/accesos.sh" && grep -q "bindPort = 6100" "$WORK/accesos.sh"'
+check "script de accesos Windows con BOM" '[ "$(api GET /machines/$VIS/accesos/windows | head -c 3 | od -An -tx1 | tr -d " ")" = "efbbbf" ]'
+check "archivo .rdp apunta al puerto local" 'api GET "/access/$ACC/rdp?user=admin" | grep -q "full address:s:127.0.0.1:6100"'
+VTOKEN=$(jq -r .token "$WORK/vis.json")
+api POST /machines/$VIS/installer -d "{\"platform\":\"linux\",\"token\":\"$VTOKEN\"}" > "$WORK/vis-inst.sh"
+check "el instalador del visitante trae sus accesos" 'bash -n "$WORK/vis-inst.sh" && grep -q "IIT_ACCESOS" "$WORK/vis-inst.sh" && grep -q "serverUser = \"$OWN\"" "$WORK/vis-inst.sh"'
+
+api POST /machines/$OWN/services/ssh/rotate-secret >/dev/null
+check "rotar la clave corta el acceso con el archivo viejo" 'wait_for_long "[ \"\$(through 6100)\" != hola-desde-la-maquina ]"'
+api GET /machines/$VIS/accesos.toml > "$WORK/vis/accesos-$VIS.toml"
+kill $VISPID 2>/dev/null; sleep 0.5
+( cd "$WORK/vis" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc3.log 2>&1 ) & VISPID=$!; PIDS+=($VISPID)
+check "con el archivo nuevo vuelve a entrar" 'wait_for_long "[ \"\$(through 6100)\" = hola-desde-la-maquina ]"'
+
+api DELETE /access/$ACC >/dev/null
+check "revocar el acceso lo corta" 'wait_for_long "[ \"\$(through 6100)\" != hola-desde-la-maquina ]"'
+check "eventos de acceso registrados" '[ "$(api GET "/events?machine=$OWN" | jq "[.[]|select(.kind|test(\"acceso_|clave_rotada\"))]|length")" -ge 3 ]'
+
+kill $OWNPID $VISPID 2>/dev/null
+for m in $OWN $VIS $INT; do api DELETE /machines/$m >/dev/null; done
+check "eliminar máquinas borra sus accesos" '[ "$(api GET /access | jq length)" = 0 ]'
+
+echo "11. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
 check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"extra\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
 check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/extra | jq -r .deleted)" = "extra" ]'
@@ -313,7 +409,7 @@ check "eliminar máquina" '[ "$(api DELETE /machines/$ID | jq -r .deleted)" = "$
 check "máquina eliminada ya no recibe tráfico" 'http_blocked'
 check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \"\$(curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq length)\" = 0 ]"'
 
-echo "11. Servidor frps caído"
+echo "12. Servidor frps caído"
 : > "$WORK/hooks.log"
 kill $FRPS_PID 2>/dev/null
 check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'

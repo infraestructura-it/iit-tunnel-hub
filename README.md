@@ -120,6 +120,7 @@ Tipos de servicio:
 | `https` · TLS en la máquina | `https://…` | frpc termina el TLS con el plugin `https2http`. Requiere certificado en la máquina. **El servidor no puede leer el tráfico.** |
 | `https` · TLS del servicio | `https://…` | El servicio local ya habla HTTPS (NVR, UPS con panel HTTPS…). |
 | `tcp` | `servidor:20000` | Puerto público asignado del rango. |
+| `stcp` · **privado** | ninguna | SSH, RDP, VNC… **sin puerto público**: solo entran las máquinas a las que les dé acceso (ver abajo). |
 
 ### Instalar en el equipo (instalador generado)
 
@@ -137,6 +138,27 @@ En la ventana de credenciales (al registrar, o con **Generar instalador** en el 
 - Como el hub solo guarda el hash del token, **Generar instalador** crea un token nuevo; un equipo ya instalado queda desconectado hasta ejecutar el instalador nuevo.
 
 Instalación manual (equipos especiales): descargue **Solo frpc.toml** y ejecute `frpc -c frpc-<maquina>.toml`, o en Linux `sudo ./deploy/frpc-install.sh frpc-<maquina>.toml`.
+
+### Servicios privados (SSH, RDP, VNC sin puerto público)
+
+Con un servicio `tcp`, frps abre un puerto en internet y cualquiera puede intentar entrar (escáneres, fuerza bruta contra RDP). Un servicio **privado** (`stcp`) no abre ningún puerto: solo es alcanzable desde **otra máquina registrada** que actúa como **visitante**, normalmente su PC de soporte.
+
+```
+PC de soporte (visitante)                    frps                        Equipo del cliente
+mstsc → 127.0.0.1:6389 ─ frpc ═══════════▶ :7000 ═══════════════════ frpc ─▶ 127.0.0.1:3389
+```
+
+Para entrar se necesitan las tres cosas: ser una máquina registrada (login con su token), tener **acceso** otorgado en el panel y la **clave** del servicio. El hub inyecta la clave y la lista de visitantes permitidos (`allowUsers`) cuando frps registra el servicio, así que la clave no está en el `frpc.toml` del equipo del cliente.
+
+1. En la máquina del cliente: **Agregar servicio** → atajo **SSH :22**, **Escritorio remoto :3389** o **VNC :5900** (o tipo *privado* con cualquier puerto). Actualice su frpc como con cualquier servicio nuevo.
+2. En el servicio privado: **+ Acceso** → elija la máquina visitante y, si quiere, el puerto local (por defecto 6022 SSH, 6389 RDP, 6900 VNC).
+3. Descargue los **accesos** del visitante y ejecútelos **en ese equipo**: `accesos-<maquina>.ps1` (Windows) o `sudo bash accesos-<maquina>.sh` (Linux). Guardan el archivo `accesos-<maquina>.toml` junto al `frpc.toml` y reinician frpc. No llevan el token de la máquina.
+4. Conéctese en el visitante: `ssh -p 6022 usuario@127.0.0.1`, el archivo **.rdp** del panel o `mstsc /v:127.0.0.1:6389`.
+
+- Quitar un acceso o **Rotar clave** surte efecto en unos 15 s: el hub pide al dueño del servicio reconectarse y frps vuelve a registrar el servicio con la lista nueva. Tras rotar, los visitantes deben ejecutar sus accesos de nuevo.
+- El `frpc.toml` incluye `includes = ['…/accesos-<maquina>.toml']`; si el archivo no existe, frpc lo ignora. Las configuraciones generadas **antes** de esta versión no lo tienen: para que una máquina sea visitante, genere su instalador (o frpc.toml) de nuevo.
+- En instalación manual, el archivo de accesos va en la carpeta **desde donde se ejecuta frpc**.
+- La IA todavía no usa servicios privados para SSH (requiere un servicio `tcp`).
 
 ### Certificados para HTTPS con TLS en la máquina
 
@@ -229,6 +251,13 @@ Todas las rutas requieren `Authorization: Bearer <ADMIN_TOKEN>`.
 | POST | `/api/machines/:id/installer` | Instalador: `{platform: linux\|windows\|toml, token, serverAddr?}`. Exige el token vigente (403 si no coincide) |
 | POST | `/api/machines/:id/services` | Agregar servicio |
 | DELETE | `/api/machines/:id/services/:nombre` | Quitar servicio |
+| POST | `/api/machines/:id/services/:nombre/rotate-secret` | Nueva clave de un servicio privado (el dueño se reconecta) |
+| GET | `/api/access` | Accesos a servicios privados (dueño, servicio, visitante, puerto local, cómo conectarse) |
+| POST | `/api/access` | Dar acceso: `{machine, service, visitor, bindPort?}` |
+| DELETE | `/api/access/:id` | Quitar acceso |
+| GET | `/api/access/:id/rdp?user=` | Archivo `.rdp` hacia el puerto local del visitante |
+| GET | `/api/machines/:id/accesos.toml` | Archivo de accesos de una máquina visitante (claves incluidas, sin token) |
+| GET | `/api/machines/:id/accesos/:platform` | Script que instala ese archivo y reinicia frpc (`linux` o `windows`) |
 | GET | `/api/events?machine=:id&limit=100` | Actividad (logins, rechazos, servicios, alertas) |
 | GET / PUT | `/api/ai/settings` | IA: `enabled`, `apiKey` (enmascarada al leer), `model`, `analyzeAlerts`, `telegramBot`, `maxSteps`; incluye el uso |
 | GET | `/api/ai/ssh-key` | Clave pública SSH del hub (se crea si no existe) |
@@ -255,17 +284,17 @@ curl -X POST http://127.0.0.1:8080/api/machines \
   }'
 ```
 
-Campos de un servicio: `name` (a-z, 0-9, guiones), `type` (`http`, `https`, `tcp`), `localIp` (por defecto `127.0.0.1`), `localPort`, y según el tipo `subdomain`, `tlsMode` (`local` o `passthrough`) o `remotePort` (se asigna solo si no se envía).
+Campos de un servicio: `name` (a-z, 0-9, guiones), `type` (`http`, `https`, `tcp`, `stcp`), `localIp` (por defecto `127.0.0.1`), `localPort`, y según el tipo `subdomain`, `tlsMode` (`local` o `passthrough`) o `remotePort` (se asigna solo si no se envía).
 
 ## Cómo se aplica la seguridad
 
 | Momento | Qué verifica el hub |
 |---|---|
 | **Login** de frpc | Que `user` sea una máquina registrada y habilitada, y que `metadatas.token` coincida con el hash guardado |
-| **NewProxy** | Que el servicio exista para esa máquina con el mismo tipo, subdominio o puerto. No se aceptan `customDomains` |
+| **NewProxy** | Que el servicio exista para esa máquina con el mismo tipo, subdominio o puerto. No se aceptan `customDomains`. En servicios privados reemplaza la clave y `allowUsers` por los del hub |
 | **NewUserConn** | En cada visitante tcp/https: que la máquina siga habilitada (corte inmediato) |
 | **NewWorkConn** | En cada conexión de trabajo (cubre el tipo http) |
-| **Ping** (cada 15 s) | Si la máquina fue deshabilitada o eliminada, frpc cierra la sesión y ya no puede volver a entrar |
+| **Ping** (cada 15 s) | Si la máquina fue deshabilitada o eliminada, frpc cierra la sesión y ya no puede volver a entrar. También se rechaza una vez para que se reconecte y aplique cambios de accesos |
 
 Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reiniciar o actualizar el hub, las máquinas se desconectan unos segundos y vuelven a entrar solas cuando el hub regresa.
 
@@ -275,7 +304,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 79 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot.
+Levanta frps, el hub y frpc reales en localhost y verifica 104 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores.
 
 ## Límites conocidos
 

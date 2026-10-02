@@ -17,6 +17,8 @@ const bad = (msg) => new HttpError(400, msg);
 // ---------- tokens ----------
 
 function newToken() { return crypto.randomBytes(32).toString('base64url'); }
+/** Clave de un servicio privado (stcp). La comparten frps (la inyecta el hub) y los visitantes autorizados. */
+function newSecret() { return crypto.randomBytes(24).toString('base64url'); }
 function hashToken(token) { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
 function tokenMatches(token, hash) {
   if (typeof token !== 'string' || !token || !hash) return false;
@@ -84,6 +86,8 @@ function normalizeMachine(body, store) {
  *           "local"       → frpc termina TLS con el plugin https2http (certificado en la máquina)
  *           "passthrough" → el servicio local ya habla HTTPS
  *  - tcp:   frps abre un puerto público del rango configurado
+ *  - stcp:  servicio PRIVADO (SSH, RDP, VNC…): frps no abre ningún puerto; solo entran las máquinas
+ *           visitantes autorizadas en el panel. La clave la genera el hub y la inyecta en NewProxy.
  */
 function normalizeService(body, machineId, store, frps) {
   const name = str(body.name, 20, 'service.name').toLowerCase();
@@ -91,13 +95,14 @@ function normalizeService(body, machineId, store, frps) {
   if (store.getService(machineId, name)) throw new HttpError(409, `la máquina ya tiene un servicio "${name}"`);
 
   const type = str(body.type, 10, 'service.type').toLowerCase() || 'http';
-  if (!['http', 'https', 'tcp'].includes(type)) throw bad('service.type debe ser http, https o tcp');
+  if (!['http', 'https', 'tcp', 'stcp'].includes(type)) throw bad('service.type debe ser http, https, tcp o stcp');
 
   const localIp = str(body.localIp, 253, 'service.localIp') || '127.0.0.1';
   if (!IPV4_RE.test(localIp) && !HOST_RE.test(localIp)) throw bad('service.localIp no es una IP o host válido');
   const localPort = port(body.localPort, 'service.localPort');
 
-  const out = { name, type, localIp, localPort, subdomain: null, remotePort: null, tlsMode: null };
+  const out = { name, type, localIp, localPort, subdomain: null, remotePort: null, tlsMode: null, secret: null };
+  if (type === 'stcp') out.secret = newSecret();
 
   if (type === 'http' || type === 'https') {
     const sub = (str(body.subdomain, 63, 'service.subdomain') || `${name}-${machineId}`).toLowerCase();
@@ -133,6 +138,7 @@ function normalizeService(body, machineId, store, frps) {
 // ---------- URLs públicas ----------
 
 function publicUrl(svc, frps) {
+  if (svc.type === 'stcp') return null; // privado: no tiene dirección pública
   if (svc.type === 'tcp') return `tcp://${frps.publicAddr}:${svc.remote_port}`;
   const host = `${svc.subdomain}.${frps.subdomainHost}`;
   if (svc.type === 'http') return `http://${host}${frps.publicHttpPort === 80 ? '' : ':' + frps.publicHttpPort}`;
@@ -158,6 +164,8 @@ function normalizeServerAddr(v, fallback) {
  * opts.serverAddr: dirección del servidor para esta máquina (por defecto FRPS_PUBLIC_ADDR)
  * opts.certDir:    carpeta de certificados para https con TLS local (por defecto ./certs)
  * opts.extra:      líneas adicionales de configuración global (p. ej. log.to)
+ * opts.accessFile: archivo de accesos privados que frpc incluye (por defecto ./accesos-<id>.toml,
+ *                  relativo a la carpeta desde donde se ejecuta frpc). Si no existe, frpc lo ignora.
  */
 function frpcToml(machine, services, frps, token, opts = {}) {
   const certDir = opts.certDir || './certs';
@@ -176,6 +184,8 @@ function frpcToml(machine, services, frps, token, opts = {}) {
   if (frps.authToken) lines.push(`auth.token = ${q(frps.authToken)}`);
   lines.push(`metadatas.token = ${q(token || 'PEGUE_AQUI_EL_TOKEN_DE_LA_MAQUINA')}`);
   for (const l of opts.extra || []) lines.push(l);
+  // Accesos a servicios privados de otras máquinas: van en un archivo aparte que se cambia sin tocar el token
+  lines.push(`includes = [${tq(opts.accessFile || accessFileName(machine.id, './'))}]`);
 
   for (const s of services) {
     lines.push('', `[[proxies]]`, `name = ${q(s.name)}`, `type = ${q(s.type)}`);
@@ -193,6 +203,7 @@ function frpcToml(machine, services, frps, token, opts = {}) {
     } else {
       lines.push(`localIP = ${q(s.local_ip)}`, `localPort = ${s.local_port}`);
       if (s.type === 'tcp') lines.push(`remotePort = ${s.remote_port}`);
+      else if (s.type === 'stcp') lines.push(`# Privado: sin puerto público. La clave y los visitantes permitidos los asigna el hub.`);
       else lines.push(`subdomain = ${q(s.subdomain)}`);
     }
   }
@@ -200,6 +211,91 @@ function frpcToml(machine, services, frps, token, opts = {}) {
   return lines.join('\n') + '\n';
 }
 
+// ---------- accesos a servicios privados (stcp) ----------
+
+const ACCESS_PORT_MIN = 6000;
+const ACCESS_PORT_MAX = 6999;
+
+function accessFileName(machineId, dir = '') { return `${dir}accesos-${machineId}.toml`; }
+
+/** Puertos sugeridos según el puerto local del servicio, para que sea fácil reconocerlos. */
+function suggestedPort(localPort) {
+  if (localPort === 22) return 6022;
+  if (localPort === 3389) return 6389;
+  if (localPort === 5900) return 6900;
+  return ACCESS_PORT_MIN + 100;
+}
+
+/**
+ * Valida un acceso nuevo: la máquina `visitorId` podrá abrir el servicio privado `service`
+ * en 127.0.0.1:<bindPort> de su propio equipo.
+ */
+function normalizeAccess(body, store) {
+  const ownerId = str(body.machine, 32, 'machine');
+  const svcName = str(body.service, 20, 'service');
+  const visitorId = str(body.visitor, 32, 'visitor');
+  const owner = store.getMachine(ownerId);
+  if (!owner) throw new HttpError(404, `no existe la máquina "${ownerId}"`);
+  const svc = store.getService(ownerId, svcName);
+  if (!svc) throw new HttpError(404, `la máquina ${ownerId} no tiene el servicio "${svcName}"`);
+  if (svc.type !== 'stcp') throw bad(`el servicio "${svcName}" no es privado (stcp): sus accesos no se administran aquí`);
+  const visitor = store.getMachine(visitorId);
+  if (!visitor) throw new HttpError(404, `no existe la máquina visitante "${visitorId}"`);
+  if (visitorId === ownerId) throw bad('la máquina visitante debe ser otra (desde la misma máquina use el servicio local)');
+
+  const mine = store.accessOfVisitor(visitorId);
+  if (mine.some((a) => a.service_id === svc.id)) throw new HttpError(409, `${visitorId} ya tiene acceso a ${ownerId}/${svcName}`);
+  const used = new Set(mine.map((a) => a.bind_port));
+  let bindPort;
+  if (body.bindPort !== undefined && body.bindPort !== null && body.bindPort !== '') {
+    bindPort = port(body.bindPort, 'bindPort');
+    if (bindPort < 1024) throw bad('bindPort debe ser 1024 o mayor (los puertos bajos requieren administrador)');
+    if (used.has(bindPort)) throw new HttpError(409, `${visitorId} ya usa el puerto ${bindPort} para otro acceso`);
+  } else {
+    for (let p = suggestedPort(svc.local_port); p <= ACCESS_PORT_MAX && !bindPort; p++) if (!used.has(p)) bindPort = p;
+    for (let p = ACCESS_PORT_MIN; p <= ACCESS_PORT_MAX && !bindPort; p++) if (!used.has(p)) bindPort = p;
+    if (!bindPort) throw new HttpError(409, 'no quedan puertos libres para accesos en esta máquina');
+  }
+  return { svc, owner, visitor, bindPort };
+}
+
+/** Archivo de accesos de una máquina visitante: un [[visitors]] por servicio privado autorizado. */
+function accessToml(visitor, grants) {
+  const lines = [
+    `# Accesos privados de ${visitor.name} (${visitor.id}) — generado por IIT Tunnel Hub ${new Date().toISOString()}`,
+    `# Va en la misma carpeta que el frpc.toml de esta máquina, con el nombre ${accessFileName(visitor.id)}.`,
+    `# Después de reemplazarlo, reinicie frpc. Contiene claves de acceso: no lo comparta.`,
+  ];
+  for (const a of grants) {
+    lines.push('',
+      `# ${a.owner_id}/${a.service} → 127.0.0.1:${a.bind_port} en este equipo (puerto ${a.local_port} en la máquina remota)`,
+      `[[visitors]]`,
+      `name = ${q(`acceso-${a.owner_id}-${a.service}`)}`,
+      `type = "stcp"`,
+      `serverUser = ${q(a.owner_id)}`,
+      `serverName = ${q(a.service)}`,
+      `secretKey = ${q(a.secret)}`,
+      `bindAddr = "127.0.0.1"`,
+      `bindPort = ${a.bind_port}`);
+  }
+  if (!grants.length) lines.push('', '# Esta máquina no tiene accesos a servicios privados.');
+  return lines.join('\n') + '\n';
+}
+
+/** Archivo .rdp para Escritorio remoto apuntando al puerto local del visitante. */
+function rdpFile(a, user = '') {
+  const l = [
+    `full address:s:127.0.0.1:${a.bind_port}`,
+    'prompt for credentials:i:1',
+    'administrative session:i:0',
+    'screen mode id:i:2',
+    'authentication level:i:2',
+  ];
+  if (user) l.push(`username:s:${user}`);
+  return l.join('\r\n') + '\r\n';
+}
+
 module.exports = {
+  normalizeAccess, accessToml, accessFileName, rdpFile, newSecret, suggestedPort,
   HttpError, bad, newToken, hashToken, tokenMatches, normalizeMachine, normalizeService, publicUrl, frpcToml, normalizeServerAddr, ID_RE,
 };

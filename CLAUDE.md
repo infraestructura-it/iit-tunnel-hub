@@ -37,15 +37,15 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 |---|---|
 | `api/src/server.js` | Rutas REST, servidor del plugin, estáticos, arranque |
 | `api/src/plugin.js` | Lógica del server plugin (Login, NewProxy, CloseProxy, NewUserConn, NewWorkConn, Ping) |
-| `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml` |
-| `api/src/db.js` | Esquema SQLite (`machines`, `services`, `events`) y consultas |
+| `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml`, accesos stcp (`normalizeAccess`, `accessToml`, `rdpFile`) |
+| `api/src/db.js` | Esquema SQLite (`machines`, `services`, `service_access`, `events`, `settings`, `ai_*`), migraciones y consultas |
 | `api/src/alerts.js` | Monitor de estado (cada `ALERT_CHECK_SECONDS`) y envío de alertas por Telegram y webhooks; configuración en la tabla `settings` |
 | `api/src/ai.js` | Agente Claude: herramientas, bucle tool_use, conversaciones, aprobaciones, diagnóstico de alertas, uso |
 | `api/src/ai-scope.js` | Alcance de IA por máquina: validación, vistas sin secretos, ejecución HTTP por frps y SSH con clave del hub |
 | `api/src/telegram.js` | Bot de Telegram (long polling): solo el chat de Alertas, botones aprobar/rechazar |
 | `api/public/ai.js` | Panel: chat, pendientes, ajustes de IA y editor de alcance |
 | `test/mock-claude.js`, `test/mock-telegram.js` | Simuladores para las pruebas (validan el formato de la API como lo haría la real) |
-| `api/src/installers.js` | Instaladores autocontenidos por máquina (Linux `.sh`, Windows `.ps1`) con el toml y el token incrustados |
+| `api/src/installers.js` | Instaladores autocontenidos por máquina (Linux `.sh`, Windows `.ps1`) con el toml, el token y los accesos incrustados; scripts de accesos (`ACCESS_PLATFORMS`) |
 | `api/src/frps.js` | Cliente de la API del dashboard de frps (caché 3 s) |
 | `api/src/config.js` | Variables de entorno |
 | `frps/frps.toml` | Config de frps; toma valores con `{{ .Envs.X }}` |
@@ -55,7 +55,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (79 casos) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (104 casos) |
 
 ## Comandos
 
@@ -89,6 +89,16 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
 
+## Servicios privados (stcp): reglas (no romper)
+
+- `stcp` no tiene `remote_port` ni `subdomain`; `services.secret` guarda la clave (la genera el hub). El `frpc.toml` del **dueño no lleva la clave**.
+- `NewProxy` de un stcp responde `{reject:false, unchange:false, content:{...c, sk, allow_users}}`: la clave y los visitantes los fija el hub. Sin visitantes se usa `['!nadie']` (con lista vacía frps deja entrar al propio dueño).
+- Visitantes = máquinas registradas (`service_access`: servicio, visitante, `bind_port` único por visitante). No hay op de plugin para visitantes: la seguridad es login del visitante + `allowUsers` + clave.
+- Cambiar accesos, rotar clave, borrar un stcp o borrar una máquina visitante ⇒ `plugin.requestReload(dueño)`: se rechaza **un** Ping, frpc cierra la sesión y reconecta (~15 s) y frps vuelve a preguntar `NewProxy`. El Login limpia la marca.
+- Todo `frpc.toml` lleva `includes = ['<dir>/accesos-<id>.toml']`. frp resuelve rutas relativas contra el **directorio de trabajo** (no el del toml) y falla si la **carpeta** no existe, pero ignora un archivo inexistente: por eso es un archivo en la misma carpeta y no una subcarpeta. Instaladores: `/etc/iit-frpc/` y `__IIT_DIR__\`.
+- El archivo de accesos y los scripts `accesos-<id>.{sh,ps1}` llevan claves pero **no** el token de la máquina. `.ps1` con BOM.
+- La IA no usa stcp (SSH de la IA sigue requiriendo `tcp`): haría falta que el hub sea visitante.
+
 ## IA: reglas (no romper)
 
 - La IA solo usa ids de consultas/comandos del alcance; **nunca** URLs ni comandos libres. Parámetros validados con `PARAM_VALUE_RE`.
@@ -113,10 +123,13 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 - Plugin: `POST /frp/handler?op=<Op>`; respuesta `{reject, reject_reason}` o `{reject:false, unchange:true}`.
 - frps antepone el usuario al nombre del proxy: `"<maquina>.<servicio>"`.
 - El tipo `http` **no** pasa por `NewUserConn`; por eso se intercepta también `NewWorkConn`.
-- Dashboard API usada: `/api/serverinfo`, `/api/clients` (incluye `online`), `/api/proxy/{http,https,tcp}`. No hay endpoint para expulsar un cliente: se hace rechazando `Ping`.
+- Dashboard API usada: `/api/serverinfo`, `/api/clients` (incluye `online`), `/api/proxy/{http,https,tcp,stcp}`. No hay endpoint para expulsar un cliente: se hace rechazando `Ping`.
 - `transport.heartbeatTimeout` debe ser > 0 en frps para que el rechazo de `Ping` expulse.
 - `https` con `tlsMode: "local"` usa el plugin `https2http` de frpc: el TLS termina en la máquina, frps solo enruta por SNI.
 - frpc 0.71 escribe `login to server success` (sin "the"); los instaladores buscan esa frase.
+- Ping rechazado: frps responde `Pong{Error}` y frpc cierra la sesión al recibirlo (`handlePong` → `closeSession`), luego reconecta con backoff rápido.
+- Visitante stcp: `NewVisitorConn` lleva el RunID de su sesión; frps toma el usuario de esa sesión y lo compara con `allowUsers` del proxy. Nombre destino = `serverUser.serverName`.
+- Plugin con contenido modificado: `NewProxy` acepta `unchange:false` + `content` y frps registra el proxy con ese contenido.
 - Error `token in login doesn't match token from configuration` = no coincide el **token global** (`auth.token`) entre frps y frpc; no tiene que ver con el token de máquina (ese error sería "token inválido" desde el hub).
 
 ## Problemas conocidos en Windows (equipos de desarrollo)
@@ -139,7 +152,8 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 
 - Usuarios y roles (hoy un solo `ADMIN_TOKEN`); las aprobaciones de IA registran "panel" o "telegram", no la persona.
 - Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
+- Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
+- Que el hub sea visitante stcp para que la IA use SSH privado.
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.
-- Tipo `stcp` para SSH sin puerto público.
 - Instalación con una línea (`curl … | sudo bash`) mediante código de un solo uso.

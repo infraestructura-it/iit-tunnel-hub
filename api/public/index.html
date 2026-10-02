@@ -137,6 +137,29 @@
   </div>
 </div>
 
+<!-- Acceso a un servicio privado (stcp): qué máquina visitante entra a qué servicio -->
+<div id="access-modal" class="overlay hidden">
+  <div class="modal">
+    <form id="access-form">
+      <h2>Acceso privado</h2>
+      <div class="sub">La máquina visitante abre el servicio en <b>127.0.0.1</b> de su propio equipo. frps no expone ningún puerto a internet.</div>
+      <div class="field"><label>Servicio privado</label><select name="target" required></select></div>
+      <div class="row">
+        <div class="field"><label>Desde la máquina (visitante)</label><select name="visitor" required></select>
+          <div class="hint">Normalmente su PC de soporte. Debe estar registrada e instalada como cualquier máquina.</div></div>
+        <div class="field"><label>Puerto local</label><input name="bindPort" type="number" min="1024" max="65535" placeholder="automático">
+          <div class="hint">Puerto en el equipo visitante (p. ej. 6022 para SSH, 6389 para RDP).</div></div>
+      </div>
+      <div class="error" id="access-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Dar acceso</button>
+      </div>
+    </form>
+    <div id="access-next" class="hidden"></div>
+  </div>
+</div>
+
 <!-- Configuración de alertas -->
 <div id="alerts-modal" class="overlay hidden">
   <form class="modal" id="alerts-form">
@@ -201,6 +224,7 @@
         <option value="http">http</option>
         <option value="https">https (SNI)</option>
         <option value="tcp">tcp</option>
+        <option value="stcp">privado (stcp)</option>
       </select>
     </div>
     <div><label>IP local</label><input data-k="localIp" value="127.0.0.1"></div>

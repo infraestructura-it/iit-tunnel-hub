@@ -14,7 +14,7 @@ const { open } = require('./db');
 const { FrpsClient } = require('./frps');
 const { createPluginHandler } = require('./plugin');
 const M = require('./machines');
-const { PLATFORMS } = require('./installers');
+const { PLATFORMS, ACCESS_PLATFORMS, howToConnect } = require('./installers');
 const A = require('./alerts');
 const { AIService, AIError, viewMessages } = require('./ai');
 const SC = require('./ai-scope');
@@ -91,7 +91,38 @@ function serveStatic(req, res, pathname) {
 
 // ---------- vistas ----------
 
-function serviceView(s, machineId, status) {
+// Índice de accesos a servicios privados: por servicio (quién entra) y por visitante (a qué entra)
+function accessIndex(list) {
+  const byService = new Map();
+  const byVisitor = new Map();
+  for (const a of list) {
+    if (!byService.has(a.service_id)) byService.set(a.service_id, []);
+    byService.get(a.service_id).push(a);
+    if (!byVisitor.has(a.visitor_id)) byVisitor.set(a.visitor_id, []);
+    byVisitor.get(a.visitor_id).push(a);
+  }
+  return { byService, byVisitor };
+}
+const NO_ACCESS = { byService: new Map(), byVisitor: new Map() };
+
+function accessView(a, status) {
+  const h = howToConnect(a);
+  return {
+    id: a.id,
+    machine: a.owner_id,
+    service: a.service,
+    visitor: a.visitor_id,
+    bindPort: a.bind_port,
+    remotePort: a.local_port,
+    kind: h.kind,
+    connect: h.cmd,
+    serviceOnline: status.proxies.get(`${a.owner_id}.${a.service}`)?.status === 'online',
+    visitorOnline: status.clients.has(a.visitor_id),
+    createdAt: a.created_at,
+  };
+}
+
+function serviceView(s, machineId, status, access = NO_ACCESS) {
   const proxy = status.proxies.get(`${machineId}.${s.name}`);
   return {
     name: s.name,
@@ -102,6 +133,8 @@ function serviceView(s, machineId, status) {
     remotePort: s.remote_port,
     tlsMode: s.tls_mode,
     publicUrl: M.publicUrl(s, config.frps),
+    private: s.type === 'stcp',
+    access: s.type === 'stcp' ? (access.byService.get(s.id) || []).map((a) => accessView(a, status)) : undefined,
     status: proxy ? proxy.status : 'sin_registro',
     connections: proxy?.curConns ?? 0,
     trafficInToday: proxy?.todayTrafficIn ?? 0,
@@ -109,7 +142,7 @@ function serviceView(s, machineId, status) {
   };
 }
 
-function machineView(m, services, status) {
+function machineView(m, services, status, access = NO_ACCESS) {
   const live = status.clients.get(m.id);
   return {
     id: m.id,
@@ -137,13 +170,14 @@ function machineView(m, services, status) {
     } : null,
     createdAt: m.created_at,
     updatedAt: m.updated_at,
-    services: services.map((s) => serviceView(s, m.id, status)),
+    services: services.map((s) => serviceView(s, m.id, status, access)),
+    visits: (access.byVisitor.get(m.id) || []).map((a) => accessView(a, status)),
   };
 }
 
 // ---------- rutas de la API ----------
 
-function createApi(store, frps, monitor, ai) {
+function createApi(store, frps, monitor, ai, plugin) {
   const routes = [];
   const route = (method, pattern, handler) => {
     const keys = [];
@@ -156,6 +190,11 @@ function createApi(store, frps, monitor, ai) {
     if (!m) throw new M.HttpError(404, `no existe la máquina "${id}"`);
     return m;
   };
+
+  const access = () => accessIndex(store.listAccess());
+  const view = async (m) => machineView(m, store.servicesOf(m.id), await frps.status(), access());
+  // Las máquinas dueñas de servicios privados se reconectan para que frps tome la clave y los visitantes nuevos
+  const reload = (ids) => { for (const id of new Set(ids)) plugin?.requestReload(id); };
 
   route('GET', '/api/health', async () => [200, { ok: true, version: VERSION }]);
 
@@ -192,7 +231,8 @@ function createApi(store, frps, monitor, ai) {
       if (!byMachine.has(s.machine_id)) byMachine.set(s.machine_id, []);
       byMachine.get(s.machine_id).push(s);
     }
-    return [200, store.listMachines().map((m) => machineView(m, byMachine.get(m.id) || [], status))];
+    const idx = access();
+    return [200, store.listMachines().map((m) => machineView(m, byMachine.get(m.id) || [], status, idx))];
   });
 
   route('POST', '/api/machines', async (req) => {
@@ -210,7 +250,7 @@ function createApi(store, frps, monitor, ai) {
     const services = store.servicesOf(created);
     store.event(created, 'registrada', m.name, 0);
     return [201, {
-      machine: machineView(m, services, await frps.status()),
+      machine: machineView(m, services, await frps.status(), access()),
       token,
       frpcToml: M.frpcToml(m, services, config.frps, token),
       note: 'Guarde el token: no se vuelve a mostrar. Si lo pierde, use rotate-token.',
@@ -218,8 +258,7 @@ function createApi(store, frps, monitor, ai) {
   });
 
   route('GET', '/api/machines/:id', async (_req, p) => {
-    const m = mustMachine(p.id);
-    return [200, machineView(m, store.servicesOf(m.id), await frps.status())];
+    return [200, await view(mustMachine(p.id))];
   });
 
   route('PATCH', '/api/machines/:id', async (req, p) => {
@@ -243,12 +282,15 @@ function createApi(store, frps, monitor, ai) {
     const m = store.updateMachine(p.id, fields);
     if (fields.enabled !== undefined) store.event(p.id, fields.enabled ? 'habilitada' : 'deshabilitada', '', 0);
     if (fields.alerts !== undefined) store.event(p.id, fields.alerts ? 'alertas_activadas' : 'alertas_desactivadas', '', 0);
-    return [200, machineView(m, store.servicesOf(m.id), await frps.status())];
+    return [200, await view(m)];
   });
 
   route('DELETE', '/api/machines/:id', async (_req, p) => {
     mustMachine(p.id);
+    // Si era visitante de servicios privados, sus dueños se reconectan para retirarla de allowUsers
+    const owners = store.accessOfVisitor(p.id).map((a) => a.owner_id);
     store.deleteMachine(p.id);
+    reload(owners);
     store.event(p.id, 'eliminada', '', 0);
     return [200, { deleted: p.id }];
   });
@@ -284,7 +326,8 @@ function createApi(store, frps, monitor, ai) {
     }
     const P = PLATFORMS[platform];
     store.event(m.id, 'instalador_generado', `${platform} · servidor ${serverAddr}`, 0);
-    return [200, P.build(m, services, config.frps, body.token, serverAddr), {
+    const grants = store.accessOfVisitor(m.id);
+    return [200, P.build(m, services, config.frps, body.token, serverAddr, grants.length ? M.accessToml(m, grants) : ''), {
       'content-type': P.type,
       'content-disposition': `attachment; filename="instalar-${m.id}.${P.ext}"`,
     }];
@@ -294,15 +337,94 @@ function createApi(store, frps, monitor, ai) {
     const m = mustMachine(p.id);
     const body = await readJson(req);
     const s = store.createService(m.id, M.normalizeService(body, m.id, store, config.frps));
-    store.event(m.id, 'servicio_agregado', `${s.name} (${s.type})`, 0);
-    return [201, serviceView(s, m.id, await frps.status())];
+    store.event(m.id, 'servicio_agregado', `${s.name} (${s.type === 'stcp' ? 'privado' : s.type})`, 0);
+    return [201, serviceView(s, m.id, await frps.status(), access())];
   });
 
   route('DELETE', '/api/machines/:id/services/:name', async (_req, p) => {
     mustMachine(p.id);
-    if (!store.deleteService(p.id, p.name)) throw new M.HttpError(404, `no existe el servicio "${p.name}"`);
+    const s = store.getService(p.id, p.name);
+    if (!s || !store.deleteService(p.id, p.name)) throw new M.HttpError(404, `no existe el servicio "${p.name}"`);
     store.event(p.id, 'servicio_eliminado', p.name, 0);
+    if (s.type === 'stcp') reload([p.id]); // frps retira el servicio privado y nadie más entra
     return [200, { deleted: p.name }];
+  });
+
+  // ---------- servicios privados (stcp) y sus accesos ----------
+
+  const mustStcp = (machineId, name) => {
+    const s = store.getService(machineId, name);
+    if (!s) throw new M.HttpError(404, `no existe el servicio "${name}"`);
+    if (s.type !== 'stcp') throw M.bad(`el servicio "${name}" no es privado (stcp)`);
+    return s;
+  };
+  const mustAccess = (id) => {
+    const a = store.getAccess(id);
+    if (!a) throw new M.HttpError(404, 'no existe ese acceso');
+    return a;
+  };
+
+  route('POST', '/api/machines/:id/services/:name/rotate-secret', async (_req, p) => {
+    mustMachine(p.id);
+    const s = mustStcp(p.id, p.name);
+    store.setServiceSecret(s.id, M.newSecret());
+    const visitors = store.accessForService(s.id).map((a) => a.visitor_id);
+    store.event(p.id, 'clave_rotada', `${p.name}: los visitantes deben actualizar su archivo de accesos${visitors.length ? ' (' + visitors.join(', ') + ')' : ''}`, 0);
+    reload([p.id]);
+    return [200, { rotated: p.name, visitors }];
+  });
+
+  route('GET', '/api/access', async () => {
+    const status = await frps.status();
+    return [200, store.listAccess().map((a) => accessView(a, status))];
+  });
+
+  route('POST', '/api/access', async (req) => {
+    const r = M.normalizeAccess(await readJson(req), store);
+    const a = store.createAccess(r.svc.id, r.visitor.id, r.bindPort);
+    store.event(r.owner.id, 'acceso_otorgado', `${r.svc.name} → ${r.visitor.id} (puerto ${r.bindPort})`, 0);
+    store.event(r.visitor.id, 'acceso_otorgado', `${r.owner.id}/${r.svc.name} en 127.0.0.1:${r.bindPort}`, 0);
+    reload([r.owner.id]);
+    return [201, accessView(a, await frps.status())];
+  });
+
+  route('DELETE', '/api/access/:id', async (_req, p) => {
+    const a = mustAccess(p.id);
+    store.deleteAccess(a.id);
+    store.event(a.owner_id, 'acceso_revocado', `${a.service} → ${a.visitor_id}`, 0);
+    store.event(a.visitor_id, 'acceso_revocado', `${a.owner_id}/${a.service}`, 0);
+    reload([a.owner_id]);
+    return [200, { deleted: a.id }];
+  });
+
+  // Archivo de accesos de una máquina visitante (no lleva el token de la máquina)
+  route('GET', '/api/machines/:id/accesos.toml', async (_req, p) => {
+    const m = mustMachine(p.id);
+    return [200, M.accessToml(m, store.accessOfVisitor(m.id)), {
+      'content-type': 'application/toml; charset=utf-8',
+      'content-disposition': `attachment; filename="${M.accessFileName(m.id)}"`,
+    }];
+  });
+
+  route('GET', '/api/machines/:id/accesos/:platform', async (_req, p) => {
+    const m = mustMachine(p.id);
+    const P = ACCESS_PLATFORMS[p.platform];
+    if (!P) throw M.bad('platform debe ser linux o windows');
+    const grants = store.accessOfVisitor(m.id);
+    store.event(m.id, 'accesos_descargados', `${p.platform} · ${grants.length} acceso${grants.length === 1 ? '' : 's'}`, 0);
+    return [200, P.build(m, grants, M.accessToml(m, grants)), {
+      'content-type': P.type,
+      'content-disposition': `attachment; filename="accesos-${m.id}.${P.ext}"`,
+    }];
+  });
+
+  route('GET', '/api/access/:id/rdp', async (req, p) => {
+    const a = mustAccess(p.id);
+    const user = (new URL(req.url, 'http://x').searchParams.get('user') || '').replace(/[^\w.@\\-]/g, '').slice(0, 64);
+    return [200, M.rdpFile(a, user), {
+      'content-type': 'application/x-rdp; charset=utf-8',
+      'content-disposition': `attachment; filename="${a.owner_id}-${a.service}.rdp"`,
+    }];
   });
 
   route('GET', '/api/alerts/settings', async () => [200, A.publicSettings(A.loadSettings(store))]);
@@ -418,8 +540,8 @@ function main() {
   const ai = new AIService({ store, frps, config, machineView });
   monitor.ai = ai;
   const bot = new TelegramBot({ store, ai, frps, apiBase: config.telegramApiBase });
-  const api = createApi(store, frps, monitor, ai);
   const plugin = createPluginHandler(store, frps);
+  const api = createApi(store, frps, monitor, ai, plugin);
 
   const app = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');

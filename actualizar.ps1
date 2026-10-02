@@ -114,7 +114,7 @@ for ($i = 0; $i -lt 20; $i++) {
 # ---------- 3. copiar ----------
 Paso "Copiando sobre $root"
 # robocopy: /E subcarpetas · /XD y /XF excluyen lo que nunca debe pisarse · códigos < 8 = éxito
-robocopy $origen $root /E /NFL /NDL /NJH /NJS /NP /XD frp data .git node_modules /XF .env *.db frpc-*.toml instalar-* | Out-Null
+robocopy $origen $root /E /NFL /NDL /NJH /NJS /NP /XD frp data .git node_modules /XF .env *.db frpc-*.toml instalar-* accesos-* *.rdp | Out-Null
 $codigo = $LASTEXITCODE
 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 if ($codigo -ge 8) { Falla "robocopy terminó con error $codigo" }

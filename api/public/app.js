@@ -52,6 +52,7 @@ const EVENT_STYLE = {
   desconectada: 'bad', reconectada: 'good', servidor_caido: 'bad', servidor_recuperado: 'good',
   alerta_enviada: 'info', alerta_fallida: 'bad', alertas_configuradas: 'info',
   alertas_activadas: 'info', alertas_desactivadas: 'warn', instalador_generado: 'info',
+  acceso_otorgado: 'info', acceso_revocado: 'warn', clave_rotada: 'warn', reconexion: 'info', accesos_descargados: 'info',
 };
 const EVENT_LABEL = {
   conectada: 'Conectada', servicio_activo: 'Servicio activo', habilitada: 'Habilitada', registrada: 'Registrada',
@@ -61,7 +62,12 @@ const EVENT_LABEL = {
   desconectada: 'Desconectada', reconectada: 'Reconectada', servidor_caido: 'Servidor frps caído', servidor_recuperado: 'Servidor frps recuperado',
   alerta_enviada: 'Alerta enviada', alerta_fallida: 'Alerta no enviada', alertas_configuradas: 'Alertas configuradas',
   alertas_activadas: 'Alertas activadas', alertas_desactivadas: 'Alertas desactivadas', instalador_generado: 'Instalador generado',
+  acceso_otorgado: 'Acceso privado otorgado', acceso_revocado: 'Acceso privado revocado', clave_rotada: 'Clave privada rotada',
+  reconexion: 'Reconexión pedida por el hub', accesos_descargados: 'Accesos descargados',
 };
+const TYPE_LABEL = { stcp: 'privado' };
+const typeTag = (t) => `<span class="tag ${t}">${TYPE_LABEL[t] || t}</span>`;
+const plural = (n, s, p = s + 's') => `${n} ${n === 1 ? s : p}`;
 
 function toast(msg, err = false) {
   const t = document.createElement('div');
@@ -163,12 +169,20 @@ function filtered() {
 
 function serviceLine(s) {
   const live = s.status === 'online';
+  if (s.private) {
+    return `<div class="svc">
+    ${typeTag(s.type)}
+    <span class="name">${esc(s.name)}</span>
+    <span class="url ${live ? '' : 'off'}">🔒 :${s.localPort} · ${plural(s.access.length, 'acceso')}</span>
+    <span class="tag state-${s.status}">${SVC_LABEL[s.status] || s.status}</span>
+  </div>`;
+  }
   const url = s.type === 'tcp' ? s.publicUrl.replace('tcp://', '') : s.publicUrl;
   const link = live && s.type !== 'tcp'
     ? `<a class="url" href="${esc(s.publicUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(url)}</a>`
     : `<span class="url ${live ? '' : 'off'}">${esc(url)}</span>`;
   return `<div class="svc">
-    <span class="tag ${s.type}">${s.type}</span>
+    ${typeTag(s.type)}
     <span class="name">${esc(s.name)}</span>
     ${link}
     <span class="tag state-${s.status}">${SVC_LABEL[s.status] || s.status}</span>
@@ -201,7 +215,8 @@ function renderMachines() {
         </div>
       </div>
       <div class="meta">${conn}</div>
-      ${m.services.length ? m.services.map(serviceLine).join('') : '<div class="no-svc">Sin servicios publicados</div>'}
+      ${m.services.length ? m.services.map(serviceLine).join('') : (m.visits.length ? '' : '<div class="no-svc">Sin servicios publicados</div>')}
+      ${m.visits.length ? `<div class="visits-line">🔑 Entra a ${plural(m.visits.length, 'servicio privado', 'servicios privados')}</div>` : ''}
     </article>`;
   }).join('');
 }
@@ -283,27 +298,35 @@ async function renderDrawer() {
       ${m.services.length ? `<table>
         <thead><tr><th>Servicio</th><th class="hide-sm">Local</th><th>Público</th><th class="hide-sm">Hoy</th><th></th></tr></thead>
         <tbody>${m.services.map((s) => `<tr>
-          <td><span class="tag ${s.type}">${s.type}</span> ${esc(s.name)}<br><span class="tag state-${s.status}" style="margin-top:4px;display:inline-block">${SVC_LABEL[s.status] || s.status}</span></td>
+          <td>${typeTag(s.type)} ${esc(s.name)}<br><span class="tag state-${s.status}" style="margin-top:4px;display:inline-block">${SVC_LABEL[s.status] || s.status}</span></td>
           <td class="hide-sm" style="font-family:var(--code);font-size:11px">${esc(s.localIp)}:${s.localPort}${s.tlsMode ? `<br><span style="color:var(--dim)">TLS ${s.tlsMode === 'local' ? 'en la máquina' : 'del servicio'}</span>` : ''}</td>
-          <td class="url"><a href="#" data-copy-text="${esc(s.publicUrl)}" title="Copiar">${esc(s.publicUrl)}</a></td>
+          <td class="url">${s.private ? privateCell(m, s) : `<a href="#" data-copy-text="${esc(s.publicUrl)}" title="Copiar">${esc(s.publicUrl)}</a>`}</td>
           <td class="hide-sm" style="white-space:nowrap">↓ ${bytes(s.trafficInToday)}<br>↑ ${bytes(s.trafficOutToday)}</td>
           <td><button class="btn icon small danger" data-del-svc="${esc(s.name)}" title="Eliminar servicio">✕</button></td>
         </tr>`).join('')}</tbody></table>` : '<div style="color:var(--dim)">Sin servicios.</div>'}
 
       <form id="add-svc-form" style="margin-top:14px">
         <label>Agregar servicio</label>
+        <div class="presets">Atajos privados:
+          <button type="button" class="btn small" data-preset="ssh">SSH :22</button>
+          <button type="button" class="btn small" data-preset="rdp">Escritorio remoto :3389</button>
+          <button type="button" class="btn small" data-preset="vnc">VNC :5900</button>
+        </div>
         <div class="svc-row" style="grid-template-columns:1fr 1fr 1fr 1fr">
           <div><label>Nombre</label><input name="name" required maxlength="20" pattern="[a-z0-9]([a-z0-9\\-]*[a-z0-9])?" placeholder="web"></div>
-          <div><label>Tipo</label><select name="type"><option value="http">http</option><option value="https">https (SNI)</option><option value="tcp">tcp</option></select></div>
+          <div><label>Tipo</label><select name="type"><option value="http">http</option><option value="https">https (SNI)</option><option value="tcp">tcp</option><option value="stcp">privado (stcp)</option></select></div>
           <div><label>IP local</label><input name="localIp" value="127.0.0.1"></div>
           <div><label>Puerto</label><input name="localPort" type="number" min="1" max="65535" required placeholder="1880"></div>
           <div style="grid-column:1/3"><label>Subdominio / puerto remoto</label><input name="extra" placeholder="automático"></div>
           <div><label>TLS (https)</label><select name="tlsMode"><option value="local">en la máquina</option><option value="passthrough">del servicio</option></select></div>
           <div style="align-self:end"><button class="btn primary small" type="submit" style="width:100%;justify-content:center">Agregar</button></div>
         </div>
-        <div class="hint">Después de agregar o quitar servicios, descargue el frpc.toml de nuevo y conserve el token actual en la línea metadatas.token.</div>
+        <div class="hint">Después de agregar o quitar servicios, descargue el frpc.toml de nuevo y conserve el token actual en la línea metadatas.token.
+          Los <b>privados</b> no abren puertos en internet: solo entran las máquinas a las que les dé acceso.</div>
       </form>
     </section>
+
+    ${visitsSection(m)}
 
     <section>
       <h4>🤖 Inteligencia artificial</h4>
@@ -331,6 +354,15 @@ $('#drawer').addEventListener('click', async (e) => {
   if (!m) return;
   const copyEl = e.target.closest('[data-copy-text]');
   if (copyEl) { e.preventDefault(); return copy(copyEl.dataset.copyText); }
+  const preset = e.target.closest('[data-preset]');
+  if (preset) {
+    const p = PRESETS[preset.dataset.preset];
+    const f = $('#add-svc-form');
+    f.elements.name.value = p.name; f.elements.type.value = 'stcp'; f.elements.localIp.value = '127.0.0.1'; f.elements.localPort.value = p.port; f.elements.extra.value = '';
+    return;
+  }
+  const acc = e.target.closest('[data-acc]');
+  if (acc) return accessAction(m, acc.dataset.acc, acc.dataset);
   const del = e.target.closest('[data-del-svc]');
   if (del) {
     if (!confirm(`¿Eliminar el servicio "${del.dataset.delSvc}"? La máquina deberá actualizar su frpc.toml.`)) return;
@@ -374,7 +406,7 @@ $('#drawer').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = Object.fromEntries(new FormData(e.target));
   const body = { name: f.name.trim(), type: f.type, localIp: f.localIp.trim(), localPort: Number(f.localPort) };
-  if (f.extra.trim()) { if (f.type === 'tcp') body.remotePort = Number(f.extra); else body.subdomain = f.extra.trim(); }
+  if (f.extra.trim() && f.type !== 'stcp') { if (f.type === 'tcp') body.remotePort = Number(f.extra); else body.subdomain = f.extra.trim(); }
   if (f.type === 'https') body.tlsMode = f.tlsMode;
   try {
     await api('POST', `/machines/${state.openId}/services`, body);
@@ -384,9 +416,174 @@ $('#drawer').addEventListener('submit', async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 
+// ---------- servicios privados (stcp) y accesos ----------
+
+const PRESETS = { ssh: { name: 'ssh', port: 22 }, rdp: { name: 'rdp', port: 3389 }, vnc: { name: 'vnc', port: 5900 } };
+
+/** Celda "Público" de un servicio privado: quién tiene acceso y acciones. */
+function privateCell(m, s) {
+  const chips = s.access.map((a) => `<span class="chip" title="Puerto local ${a.bindPort} en ${esc(a.visitor)}">
+      <span class="dot ${a.visitorOnline ? 'online' : 'offline'}" style="margin:0"></span>${esc(a.visitor)}<small>:${a.bindPort}</small>
+      <button data-acc="revoke" data-id="${a.id}" title="Quitar acceso">✕</button></span>`).join('');
+  return `<div class="private-cell">
+      <span class="lock">🔒 Privado · sin puerto público</span>
+      <div class="chips">${chips || '<span style="color:var(--dim)">Nadie tiene acceso todavía</span>'}</div>
+      <div class="actions">
+        <button class="btn small primary" data-acc="grant" data-svc="${esc(m.id)}/${esc(s.name)}">+ Acceso</button>
+        <button class="btn small" data-acc="rotate" data-svc="${esc(s.name)}" title="Genera una clave nueva: los visitantes deben actualizar sus accesos">Rotar clave</button>
+      </div>
+    </div>`;
+}
+
+/** Sección "Accesos privados desde esta máquina": a qué servicios privados de otras máquinas entra. */
+function visitsSection(m) {
+  const anyPrivate = state.machines.some((x) => x.id !== m.id && x.services.some((s) => s.private));
+  if (!m.visits.length && !anyPrivate) return '';
+  const rows = m.visits.map((a) => `<tr>
+      <td><b>${esc(a.machine)}</b> / ${esc(a.service)}<br><span class="tag state-${a.serviceOnline ? 'online' : 'offline'}" style="margin-top:4px;display:inline-block">${a.serviceOnline ? 'activo' : 'sin conectar'}</span></td>
+      <td class="hide-sm" style="font-family:var(--code);font-size:11px;white-space:nowrap">127.0.0.1:${a.bindPort}<br><span style="color:var(--dim)">${esc(a.kind)}</span></td>
+      <td class="url"><a href="#" data-copy-text="${esc(a.connect)}" title="Copiar">${esc(a.connect)}</a></td>
+      <td class="row-btns">${a.kind === 'Escritorio remoto' ? `<button class="btn small" data-acc="rdp" data-id="${a.id}" title="Descargar archivo .rdp">.rdp</button> ` : ''}<button class="btn icon small danger" data-acc="revoke" data-id="${a.id}" title="Quitar acceso">✕</button></td>
+    </tr>`).join('');
+  return `<section>
+      <h4>🔑 Accesos privados desde esta máquina</h4>
+      ${m.visits.length ? `<table>
+        <thead><tr><th>Servicio</th><th class="hide-sm">En este equipo</th><th>Conectar</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>` : '<div style="color:var(--dim)">Esta máquina no entra a ningún servicio privado.</div>'}
+      <div class="actions" style="margin-top:12px">
+        ${anyPrivate ? `<button class="btn small primary" data-acc="grant" data-visitor="${esc(m.id)}">+ Dar acceso a un servicio privado</button>` : ''}
+        ${m.visits.length ? `<button class="btn small" data-acc="files" data-visitor="${esc(m.id)}">Descargar accesos para este equipo</button>` : ''}
+      </div>
+      <div class="hint">Cada vez que cambien los accesos, ejecute el script de accesos <b>en este equipo</b>: guarda las claves y reinicia frpc.</div>
+    </section>`;
+}
+
+const ACCESS_FILES = {
+  windows: { file: (id) => `accesos-${id}.ps1`, icon: '🪟', name: 'Windows', desc: 'Script: guarda y reinicia frpc' },
+  linux: { file: (id) => `accesos-${id}.sh`, icon: '🐧', name: 'Linux', desc: 'Script: guarda y reinicia frpc' },
+  toml: { file: (id) => `accesos-${id}.toml`, icon: '⚙', name: 'Solo el archivo', desc: 'Junto al frpc.toml; reinicie frpc' },
+};
+
+function accessFilesHtml(visitorId, title) {
+  return `<div class="ok-title" style="color:var(--green);margin-bottom:10px">${title}</div>
+    <div class="sub" style="margin-bottom:12px">Descargue los accesos y ejecútelos en el equipo <b>${esc(visitorId)}</b>:</div>
+    <div class="installers">${Object.entries(ACCESS_FILES).map(([k, f]) => `<button class="installer" data-acc-file="${k}" data-visitor="${esc(visitorId)}">
+      <span class="i-icon">${f.icon}</span><span class="i-name">${f.name}</span><span class="i-desc">${f.desc}</span></button>`).join('')}</div>
+    <div class="install-help hidden" data-acc-help></div>
+    <div class="hint" style="margin-top:10px">⚠ Contiene las claves de acceso: no lo comparta. El dueño del servicio se reconecta solo (unos 15 s) para aplicar el cambio.</div>`;
+}
+
+function accessHelp(platform, id) {
+  const file = ACCESS_FILES[platform].file(id);
+  const cmd = (c) => `<code title="Clic para copiar">${esc(c)}</code>`;
+  const steps = {
+    windows: [`Copie ${esc(file)} al equipo y ejecute en PowerShell (como administrador si frpc se instaló así): ${cmd(`powershell -ExecutionPolicy Bypass -File .\\${file}`)}`,
+      `Si ejecuta frpc a mano, ponga el script en la carpeta de frpc.exe y reinicie frpc al terminar.`],
+    linux: [`Copie ${esc(file)} al equipo y ejecútelo: ${cmd(`sudo bash ${file}`)}`],
+    toml: [`Guárdelo con ese nombre en la carpeta desde donde ejecuta frpc (o la de instalación: /etc/iit-frpc o %ProgramData%\\iit-frpc).`, `Reinicie frpc.`],
+  }[platform];
+  return `<div class="ok-title">✔ ${esc(file)} descargado</div><ol>${steps.map((x) => `<li>${x}</li>`).join('')}</ol>`;
+}
+
+async function downloadAccess(platform, visitorId) {
+  const path = platform === 'toml' ? `/machines/${encodeURIComponent(visitorId)}/accesos.toml` : `/machines/${encodeURIComponent(visitorId)}/accesos/${platform}`;
+  let text = await api('GET', path);
+  if (platform === 'windows' && !text.startsWith('\uFEFF')) text = '\uFEFF' + text; // fetch() quita el BOM
+  download(ACCESS_FILES[platform].file(visitorId), text, platform === 'linux' ? 'text/x-shellscript' : 'text/plain');
+  return accessHelp(platform, visitorId);
+}
+
+function openAccessModal({ svc, visitor } = {}) {
+  const f = $('#access-form');
+  f.reset();
+  $('#access-error').textContent = '';
+  f.classList.remove('hidden');
+  $('#access-next').classList.add('hidden');
+  const targets = state.machines.flatMap((m) => m.services.filter((s) => s.private).map((s) => ({ m, s })));
+  f.elements.target.innerHTML = targets.map(({ m, s }) =>
+    `<option value="${esc(m.id)}/${esc(s.name)}">${esc(m.name)} · ${esc(s.name)} (puerto ${s.localPort})</option>`).join('');
+  if (svc) f.elements.target.value = svc;
+  const fillVisitors = () => {
+    const owner = f.elements.target.value.split('/')[0];
+    const cur = f.elements.visitor.value || visitor;
+    f.elements.visitor.innerHTML = state.machines.filter((m) => m.id !== owner)
+      .map((m) => `<option value="${esc(m.id)}">${esc(m.name)}${m.client ? ' · ' + esc(m.client) : ''} (${esc(m.id)})</option>`).join('');
+    if (cur) f.elements.visitor.value = cur;
+  };
+  f.elements.target.onchange = fillVisitors;
+  fillVisitors();
+  $('#access-modal').classList.remove('hidden');
+}
+
+$('#access-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const [machine, service] = f.elements.target.value.split('/');
+  const body = { machine, service, visitor: f.elements.visitor.value };
+  if (f.elements.bindPort.value) body.bindPort = Number(f.elements.bindPort.value);
+  $('#access-error').textContent = '';
+  try {
+    const a = await api('POST', '/access', body);
+    f.classList.add('hidden');
+    const next = $('#access-next');
+    next.innerHTML = `<h2>Acceso otorgado</h2>
+      <div class="sub">${esc(a.visitor)} entrará a <b>${esc(a.machine)}/${esc(a.service)}</b> en <b>127.0.0.1:${a.bindPort}</b> · ${esc(a.kind)}: <code>${esc(a.connect)}</code></div>
+      ${accessFilesHtml(a.visitor, 'Siguiente paso')}
+      <div class="modal-actions"><button class="btn" data-close>Listo</button></div>`;
+    next.classList.remove('hidden');
+    refresh();
+  } catch (err) { $('#access-error').textContent = err.message; }
+});
+
+$('#access-modal').addEventListener('click', async (e) => {
+  const code = e.target.closest('.install-help code');
+  if (code) return copy(code.textContent);
+  const b = e.target.closest('[data-acc-file]');
+  if (!b) return;
+  try {
+    const help = $('[data-acc-help]', $('#access-modal'));
+    help.innerHTML = await downloadAccess(b.dataset.accFile, b.dataset.visitor);
+    help.classList.remove('hidden');
+  } catch (err) { toast(err.message, true); }
+});
+
+async function accessAction(m, act, d) {
+  try {
+    if (act === 'grant') return openAccessModal({ svc: d.svc, visitor: d.visitor });
+    if (act === 'files') {
+      const f = $('#access-form');
+      f.classList.add('hidden');
+      const next = $('#access-next');
+      next.innerHTML = `<h2>Accesos de ${esc(d.visitor)}</h2>${accessFilesHtml(d.visitor, '')}<div class="modal-actions"><button class="btn" data-close>Listo</button></div>`;
+      next.classList.remove('hidden');
+      $('#access-modal').classList.remove('hidden');
+      return;
+    }
+    if (act === 'revoke') {
+      if (!confirm('¿Quitar este acceso? El dueño del servicio se reconecta en unos segundos y el visitante deja de entrar.')) return;
+      await api('DELETE', `/access/${d.id}`);
+      toast('Acceso revocado');
+      return refresh();
+    }
+    if (act === 'rotate') {
+      if (!confirm(`¿Rotar la clave de "${d.svc}"? Todos los visitantes deberán descargar y ejecutar sus accesos de nuevo.`)) return;
+      const r = await api('POST', `/machines/${m.id}/services/${encodeURIComponent(d.svc)}/rotate-secret`);
+      toast(r.visitors.length ? `Clave rotada. Actualice los accesos en: ${r.visitors.join(', ')}` : 'Clave rotada');
+      return refresh();
+    }
+    if (act === 'rdp') {
+      const text = await api('GET', `/access/${d.id}/rdp`);
+      const a = m.visits.find((x) => String(x.id) === d.id);
+      download(`${a ? `${a.machine}-${a.service}` : 'acceso'}.rdp`, text, 'application/x-rdp');
+      toast('Abra el .rdp en este equipo con frpc y los accesos aplicados');
+    }
+  } catch (err) { toast(err.message, true); }
+}
+
 // ---------- registrar máquina ----------
 
 function extraFor(type) {
+  if (type === 'stcp') return `<label>Acceso</label><div class="hint" style="margin:0;padding:8px 0">🔒 Privado, sin puerto público</div>`;
   if (type === 'tcp') return `<label>Puerto remoto</label><input data-k="remotePort" type="number" placeholder="automático">`;
   if (type === 'https') return `<label>Subdominio · TLS</label><div style="display:flex;gap:6px"><input data-k="subdomain" placeholder="auto"><select data-k="tlsMode" style="width:auto" title="Dónde termina el TLS"><option value="local">máquina</option><option value="passthrough">servicio</option></select></div>`;
   return `<label>Subdominio</label><input data-k="subdomain" placeholder="automático">`;

@@ -2,7 +2,7 @@
 // Instaladores autocontenidos por máquina: llevan la configuración y el token incrustados,
 // descargan frpc para la arquitectura del equipo y lo dejan como servicio.
 
-const { frpcToml } = require('./machines');
+const { frpcToml, accessFileName } = require('./machines');
 
 const FRP_VERSION = '0.71.0';
 const RELEASES = `https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}`;
@@ -18,9 +18,10 @@ function header(machine, comment) {
 
 // ---------- Linux: Raspberry Pi, tarjetas ARM, PC, servidores ----------
 
-function linuxInstaller(machine, services, frps, token, serverAddr) {
-  const toml = frpcToml(machine, services, frps, token, { serverAddr, certDir: '/etc/iit-frpc/certs' });
-  if (toml.split('\n').some((l) => l.trim() === 'IIT_FRPC_TOML')) throw new Error('marcador reservado en la configuración');
+function linuxInstaller(machine, services, frps, token, serverAddr, access = '') {
+  const accessPath = accessFileName(machine.id, '/etc/iit-frpc/');
+  const toml = frpcToml(machine, services, frps, token, { serverAddr, certDir: '/etc/iit-frpc/certs', accessFile: accessPath });
+  if ([toml, access].some((x) => x.split('\n').some((l) => ['IIT_FRPC_TOML', 'IIT_ACCESOS'].includes(l.trim())))) throw new Error('marcador reservado en la configuración');
 
   return `#!/usr/bin/env bash
 ${header(machine, '#')}
@@ -104,7 +105,12 @@ ${toml.trimEnd()}
 IIT_FRPC_TOML
 chmod 600 "$DIR/frpc.toml"
 ok "Configuración en $DIR/frpc.toml"
-
+${access ? `cat > "${accessPath}" <<'IIT_ACCESOS'
+${access.trimEnd()}
+IIT_ACCESOS
+chmod 600 "${accessPath}"
+ok "Accesos privados en ${accessPath}"
+` : ''}
 "$BIN" verify -c "$DIR/frpc.toml" >/dev/null || { err "La configuración no es válida"; exit 1; }
 START="$(date '+%Y-%m-%d %H:%M:%S')"
 
@@ -165,13 +171,14 @@ exit 1
 
 // ---------- Windows: PC, servidores, mini PC ----------
 
-function windowsInstaller(machine, services, frps, token, serverAddr) {
+function windowsInstaller(machine, services, frps, token, serverAddr, access = '') {
   const toml = frpcToml(machine, services, frps, token, {
     serverAddr,
     certDir: '__IIT_DIR__\\certs',
     extra: [`log.to = '__IIT_DIR__\\frpc.log'`, `log.maxDays = 3`],
+    accessFile: accessFileName(machine.id, '__IIT_DIR__\\'),
   });
-  if (toml.split('\n').some((l) => l.startsWith("'@"))) throw new Error('secuencia reservada en la configuración');
+  if ([toml, access].some((x) => x.split('\n').some((l) => l.startsWith("'@")))) throw new Error('secuencia reservada en la configuración');
 
   // BOM UTF-8: Windows PowerShell 5.1 lee los .ps1 sin BOM como ANSI y rompe los caracteres
   return `\uFEFF${header(machine, '#')}
@@ -260,7 +267,12 @@ ${toml.trimEnd()}
 $toml = $toml.Replace("__IIT_DIR__", $Dir)
 [IO.File]::WriteAllText($Conf, $toml, (New-Object Text.UTF8Encoding $false))
 Ok "Configuración en $Conf"
-
+${access ? `$accesos = @'
+${access.trimEnd()}
+'@
+[IO.File]::WriteAllText((Join-Path $Dir "${accessFileName(machine.id)}"), $accesos, (New-Object Text.UTF8Encoding $false))
+Ok "Accesos privados en $(Join-Path $Dir "${accessFileName(machine.id)}")"
+` : ''}
 & $Exe verify -c $Conf | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "La configuración no es válida"; exit 1 }
 Remove-Item $Log -ErrorAction SilentlyContinue
@@ -301,9 +313,131 @@ exit 1
 `;
 }
 
+// ---------- Accesos privados (stcp): actualiza solo el archivo de accesos de una máquina visitante ----------
+
+/** Cómo conectarse a cada acceso, según el puerto del servicio en la máquina remota. */
+function howToConnect(a) {
+  if (a.local_port === 22) return { kind: 'SSH', cmd: `ssh -p ${a.bind_port} USUARIO@127.0.0.1` };
+  if (a.local_port === 3389) return { kind: 'Escritorio remoto', cmd: `mstsc /v:127.0.0.1:${a.bind_port}` };
+  if (a.local_port === 5900) return { kind: 'VNC', cmd: `127.0.0.1:${a.bind_port} (en el visor VNC)` };
+  return { kind: 'TCP', cmd: `127.0.0.1:${a.bind_port}` };
+}
+
+function linuxAccess(visitor, grants, access) {
+  if (access.split('\n').some((l) => l.trim() === 'IIT_ACCESOS')) throw new Error('marcador reservado');
+  const file = accessFileName(visitor.id, '/etc/iit-frpc/');
+  const list = grants.map((a) => { const h = howToConnect(a); return `echo "   ${a.owner_id}/${a.service} · ${h.kind}:  ${h.cmd}"`; }).join('\n');
+  return `#!/usr/bin/env bash
+# Accesos privados de IIT Tunnel Hub para ${visitor.name} (${visitor.id})
+# Generado: ${new Date().toISOString()}
+# ⚠ Contiene las claves de los servicios privados: no lo comparta.
+# Uso:  sudo bash accesos-${visitor.id}.sh
+set -euo pipefail
+DIR=/etc/iit-frpc
+BIN=/usr/local/bin/iit-frpc
+FILE="${file}"
+ok()  { printf '\\033[32m✔\\033[0m %s\\n' "$*"; }
+err() { printf '\\033[31m✘\\033[0m %s\\n' "$*" >&2; }
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then exec sudo bash "$0" "$@"; fi
+  err "Ejecute como root:  sudo bash $0"; exit 1
+fi
+if [ ! -f "$DIR/frpc.toml" ]; then
+  err "Este equipo no tiene IIT frpc instalado ($DIR/frpc.toml). Ejecute primero el instalador de la máquina ${visitor.id}."
+  exit 1
+fi
+if ! grep -q "accesos-${visitor.id}.toml" "$DIR/frpc.toml"; then
+  err "La configuración instalada es anterior a los accesos privados: genere e instale un instalador nuevo desde el panel."
+  exit 1
+fi
+umask 077
+cat > "$FILE" <<'IIT_ACCESOS'
+${access.trimEnd()}
+IIT_ACCESOS
+chmod 600 "$FILE"
+"$BIN" verify -c "$DIR/frpc.toml" >/dev/null || { err "La configuración resultante no es válida"; exit 1; }
+ok "Accesos guardados en $FILE"
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && systemctl is-enabled iit-frpc >/dev/null 2>&1; then
+  systemctl restart iit-frpc
+else
+  pkill -f "$BIN -c $DIR/frpc.toml" 2>/dev/null || true
+  nohup "$BIN" -c "$DIR/frpc.toml" > "$DIR/frpc.log" 2>&1 &
+fi
+ok "frpc reiniciado"
+echo
+echo "Conéctese desde este equipo:"
+${list || 'echo "   (sin accesos: se quitaron todos)"'}
+`;
+}
+
+function windowsAccess(visitor, grants, access) {
+  if (access.split('\n').some((l) => l.startsWith("'@"))) throw new Error('secuencia reservada');
+  const name = accessFileName(visitor.id);
+  const list = grants.map((a) => { const h = howToConnect(a); return `Write-Host "   ${a.owner_id}/${a.service} · ${h.kind}:  ${h.cmd}"`; }).join('\n');
+  return `\uFEFF# Accesos privados de IIT Tunnel Hub para ${visitor.name} (${visitor.id})
+# Generado: ${new Date().toISOString()}
+# ⚠ Contiene las claves de los servicios privados: no lo comparta.
+# Uso:  powershell -ExecutionPolicy Bypass -File .\\accesos-${visitor.id}.ps1
+#   - Equipo instalado con el instalador: actualiza los accesos y reinicia la tarea "IIT frpc"
+#   - frpc ejecutado a mano: guarde este script en la carpeta de frpc.exe y reinicie frpc al terminar
+
+$ErrorActionPreference = "Stop"
+$TaskName = "IIT frpc"
+function Ok($m)   { Write-Host "  ✔ $m" -ForegroundColor Green }
+function Fail($m) { Write-Host "  ✘ $m" -ForegroundColor Red }
+
+$Dir = @((Join-Path $env:ProgramData "iit-frpc"), (Join-Path $env:LOCALAPPDATA "iit-frpc")) |
+  Where-Object { Test-Path (Join-Path $_ "frpc.toml") } | Select-Object -First 1
+$manual = -not $Dir
+if ($manual) {
+  $Dir = $PSScriptRoot
+  if (-not (Test-Path (Join-Path $Dir "frpc.exe"))) {
+    Fail "No encontré IIT frpc instalado ni frpc.exe junto a este script."
+    Fail "Ejecute primero el instalador de la máquina ${visitor.id}, o copie este script a la carpeta de frpc.exe."
+    exit 1
+  }
+} else {
+  $conf = Get-Content (Join-Path $Dir "frpc.toml") -Raw
+  if ($conf -notmatch [regex]::Escape("${name}")) {
+    Fail "La configuración instalada es anterior a los accesos privados: genere e instale un instalador nuevo desde el panel."
+    exit 1
+  }
+}
+
+$accesos = @'
+${access.trimEnd()}
+'@
+$file = Join-Path $Dir "${name}"
+try { [IO.File]::WriteAllText($file, $accesos, (New-Object Text.UTF8Encoding $false)) }
+catch { Fail "No se pudo escribir $file. Ejecute PowerShell como administrador."; exit 1 }
+Ok "Accesos guardados en $file"
+
+if ($manual) {
+  Write-Host "  ! Reinicie frpc en esta carpeta para aplicarlos (Ctrl+C y vuelva a ejecutarlo)." -ForegroundColor Yellow
+} elseif (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+  try {
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Get-Process frpc -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $Dir "frpc.exe") } | Stop-Process -Force
+    Start-Sleep -Milliseconds 500
+    Start-ScheduledTask -TaskName $TaskName
+    Ok "frpc reiniciado"
+  } catch { Fail "No se pudo reiniciar la tarea '$TaskName'. Ejecute PowerShell como administrador."; exit 1 }
+}
+
+Write-Host ""
+Write-Host "Conéctese desde este equipo:"
+${list || 'Write-Host "   (sin accesos: se quitaron todos)"'}
+`;
+}
+
+const ACCESS_PLATFORMS = {
+  linux: { ext: 'sh', build: linuxAccess, type: 'text/x-shellscript; charset=utf-8' },
+  windows: { ext: 'ps1', build: windowsAccess, type: 'text/plain; charset=utf-8' },
+};
+
 const PLATFORMS = {
   linux: { ext: 'sh', build: linuxInstaller, type: 'text/x-shellscript; charset=utf-8' },
   windows: { ext: 'ps1', build: windowsInstaller, type: 'text/plain; charset=utf-8' },
 };
 
-module.exports = { PLATFORMS, FRP_VERSION };
+module.exports = { PLATFORMS, ACCESS_PLATFORMS, FRP_VERSION, howToConnect };
