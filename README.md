@@ -121,25 +121,26 @@ Tipos de servicio:
 | `https` · TLS del servicio | `https://…` | El servicio local ya habla HTTPS (NVR, UPS con panel HTTPS…). |
 | `tcp` | `servidor:20000` | Puerto público asignado del rango. |
 
-### Instalar frpc en la máquina
+### Instalar en el equipo (instalador generado)
 
-**Linux** (gateway, Raspberry Pi, mini PC):
+En la ventana de credenciales (al registrar, o con **Generar instalador** en el detalle de la máquina) indique la **dirección del servidor tal como la ve el equipo** y descargue el instalador. Cada instalador lleva incrustados la configuración y el token, descarga frpc para la arquitectura del equipo, lo deja como servicio y confirma la conexión.
 
-```bash
-sudo ./deploy/frpc-install.sh frpc-<maquina>.toml
-```
+| Equipo | Instalador | Ejecutar | Arranque automático |
+|---|---|---|---|
+| Raspberry Pi, tarjetas ARM, PC o servidor Linux | `instalar-<maquina>.sh` | `sudo bash instalar-<maquina>.sh` | systemd (`iit-frpc`); sin systemd, cron `@reboot` |
+| PC o servidor Windows | `instalar-<maquina>.ps1` | `powershell -ExecutionPolicy Bypass -File .\instalar-<maquina>.ps1` | Tarea programada `IIT frpc`: al encender (como administrador) o al iniciar sesión |
 
-**Windows**: descargue `frp_0.71.0_windows_amd64.zip` de [GitHub](https://github.com/fatedier/frp/releases), copie `frpc.exe` y el toml a `C:\frp\` y regístrelo como servicio con [NSSM](https://nssm.cc):
+- Para desvincular el equipo: `--desinstalar` (Linux) o `-Desinstalar` (Windows).
+- En Windows, ejecutado como administrador agrega la exclusión de Defender para su carpeta (`C:\ProgramData\iit-frpc`).
+- Si el servidor rechaza el token, el instalador detiene frpc y lo indica.
+- **El instalador contiene el token de la máquina**: trátelo como una contraseña.
+- Como el hub solo guarda el hash del token, **Generar instalador** crea un token nuevo; un equipo ya instalado queda desconectado hasta ejecutar el instalador nuevo.
 
-```powershell
-nssm install frpc C:\frp\frpc.exe -c C:\frp\frpc.toml
-nssm set frpc AppDirectory C:\frp
-nssm start frpc
-```
+Instalación manual (equipos especiales): descargue **Solo frpc.toml** y ejecute `frpc -c frpc-<maquina>.toml`, o en Linux `sudo ./deploy/frpc-install.sh frpc-<maquina>.toml`.
 
 ### Certificados para HTTPS con TLS en la máquina
 
-El `frpc.toml` espera `./certs/fullchain.pem` y `./certs/privkey.pem` (en Linux: `/etc/frp/certs/`). Como el servicio no está expuesto por HTTP, use el reto **DNS-01** con la API de Cloudflare, por ejemplo con [lego](https://go-acme.github.io/lego/):
+El `frpc.toml` espera `fullchain.pem` y `privkey.pem` en la carpeta `certs` de la instalación (`/etc/iit-frpc/certs/` en Linux, `C:\ProgramData\iit-frpc\certs\` en Windows). Como el servicio no está expuesto por HTTP, use el reto **DNS-01** con la API de Cloudflare, por ejemplo con [lego](https://go-acme.github.io/lego/):
 
 ```bash
 CLOUDFLARE_DNS_API_TOKEN=xxxx lego --email soporte@infraestructura-it.com --dns cloudflare \
@@ -164,6 +165,7 @@ Todas las rutas requieren `Authorization: Bearer <ADMIN_TOKEN>`.
 | DELETE | `/api/machines/:id` | Eliminar (corta su tráfico) |
 | POST | `/api/machines/:id/rotate-token` | Nuevo token y frpc.toml |
 | GET | `/api/machines/:id/frpc.toml` | Configuración actual, sin el token |
+| POST | `/api/machines/:id/installer` | Instalador: `{platform: linux\|windows\|toml, token, serverAddr?}`. Exige el token vigente (403 si no coincide) |
 | POST | `/api/machines/:id/services` | Agregar servicio |
 | DELETE | `/api/machines/:id/services/:nombre` | Quitar servicio |
 | GET | `/api/events?machine=:id&limit=100` | Actividad (logins, rechazos, servicios) |
@@ -203,7 +205,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 34 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, y rotación de token.
+Levanta frps, el hub y frpc reales en localhost y verifica 41 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token y generación de instaladores.
 
 ## Límites conocidos
 

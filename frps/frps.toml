@@ -27,6 +27,7 @@ transport.heartbeatTimeout = 45
 
 log.to = "console"
 log.level = "info"
+log.disablePrintColor = true
 
 # El hub autoriza logins, servicios, cada conexión entrante y cada latido
 [[httpPlugins]]

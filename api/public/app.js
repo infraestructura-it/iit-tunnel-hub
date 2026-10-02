@@ -70,9 +70,9 @@ async function copy(text) {
   catch { toast('No se pudo copiar', true); }
 }
 
-function download(name, text) {
+function download(name, text, type = 'text/plain') {
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([text], { type: 'application/toml' }));
+  a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
@@ -243,8 +243,8 @@ async function renderDrawer() {
     ${m.description ? `<p style="color:var(--muted);margin-top:0">${esc(m.description)}</p>` : ''}
     <div class="actions">
       <button class="btn small" data-act="toggle">${m.enabled ? 'Deshabilitar' : 'Habilitar'}</button>
+      <button class="btn small primary" data-act="install">Generar instalador</button>
       <button class="btn small" data-act="rotate">Rotar token</button>
-      <button class="btn small" data-act="toml">Descargar frpc.toml</button>
       <button class="btn small danger" data-act="delete">Eliminar</button>
     </div>
 
@@ -320,12 +320,14 @@ $('#drawer').addEventListener('click', async (e) => {
       toast(m.enabled ? 'Máquina deshabilitada: tráfico cortado' : 'Máquina habilitada');
       refresh();
     }
-    if (act === 'rotate') {
-      if (!confirm('El token actual dejará de servir en la próxima conexión. ¿Rotar?')) return;
+    if (act === 'rotate' || act === 'install') {
+      const msg = act === 'install'
+        ? 'Para generar el instalador se crea un token nuevo.\nSi el equipo ya estaba instalado, quedará desconectado hasta que ejecute el instalador nuevo.\n\n¿Continuar?'
+        : 'El token actual dejará de servir en la próxima conexión. ¿Rotar?';
+      if (!confirm(msg)) return;
       const r = await api('POST', `/machines/${m.id}/rotate-token`);
-      showCreds(m, r.token, r.frpcToml, 'Token rotado');
+      showCreds(m, r.token, r.frpcToml, act === 'install' ? 'Instalador de la máquina' : 'Token rotado');
     }
-    if (act === 'toml') download(`frpc-${m.id}.toml`, await api('GET', `/machines/${m.id}/frpc.toml`));
     if (act === 'delete') {
       if (prompt(`Para eliminar escriba el id de la máquina: ${m.id}`) !== m.id) return;
       await api('DELETE', `/machines/${m.id}`);
@@ -405,19 +407,84 @@ $('#create-form').addEventListener('submit', async (e) => {
   }
 });
 
+const SERVER_KEY = 'iit-hub-server-addr';
+let creds = null; // { machine, token } — solo en memoria mientras el modal está abierto
+
 function showCreds(m, token, toml, title) {
+  creds = { machine: m, token };
   $('#creds-title').textContent = title;
   $('#creds-sub').textContent = `${m.name}${m.client ? ' · ' + m.client : ''} · usuario frp: ${m.id}`;
   $('#creds-token').textContent = token;
   $('#creds-toml').textContent = toml;
-  $('#creds-download').onclick = () => download(`frpc-${m.id}.toml`, toml);
+  $('#creds-error').textContent = '';
+  $('#install-help').classList.add('hidden');
+  let saved = '';
+  try { saved = localStorage.getItem(SERVER_KEY) || ''; } catch {}
+  $('#creds-server').value = saved || state.summary?.frps?.publicAddr || '';
   $('#creds-modal').classList.remove('hidden');
 }
+
+const INSTALL_FILE = { linux: (id) => `instalar-${id}.sh`, windows: (id) => `instalar-${id}.ps1`, toml: (id) => `frpc-${id}.toml` };
+
+function installHelp(platform, id, server) {
+  const file = INSTALL_FILE[platform](id);
+  const cmd = (c) => `<code title="Clic para copiar">${esc(c)}</code>`;
+  const steps = {
+    linux: [
+      `Copie el archivo al equipo (USB, o desde esta PC): ${cmd(`scp ${file} usuario@IP-DEL-EQUIPO:~`)}`,
+      `En el equipo, ejecútelo como root: ${cmd(`sudo bash ${file}`)}`,
+      `Descarga frpc según la arquitectura (Raspberry, ARM o x86), lo instala como servicio y confirma la conexión.`,
+      `Para desvincular el equipo: ${cmd(`sudo bash ${file} --desinstalar`)}`,
+    ],
+    windows: [
+      `Copie el archivo al equipo Windows.`,
+      `Abra PowerShell <b>como administrador</b> en esa carpeta y ejecute: ${cmd(`powershell -ExecutionPolicy Bypass -File .\\${file}`)}`,
+      `Como administrador arranca con el equipo; sin administrador, al iniciar sesión el usuario.`,
+      `Para desvincular el equipo: ${cmd(`powershell -ExecutionPolicy Bypass -File .\\${file} -Desinstalar`)}`,
+    ],
+    toml: [
+      `Copie el archivo junto al ejecutable frpc del equipo.`,
+      `Ejecute: ${cmd(`frpc -c ${file}`)}`,
+    ],
+  }[platform];
+  return `<div class="ok-title">✔ ${esc(file)} descargado · servidor ${esc(server)}</div><ol>${steps.map((x) => `<li>${x}</li>`).join('')}</ol>
+    <div class="hint" style="margin-top:10px">⚠ El archivo contiene el token de la máquina: no lo comparta ni lo suba a repositorios.</div>`;
+}
+
+$('#creds-modal').addEventListener('click', async (e) => {
+  const code = e.target.closest('.install-help code');
+  if (code) return copy(code.textContent);
+  const btn = e.target.closest('.installer');
+  if (!btn || !creds) return;
+  const platform = btn.dataset.platform;
+  const serverAddr = $('#creds-server').value.trim();
+  $('#creds-error').textContent = '';
+  $$('.installer').forEach((b) => { b.disabled = true; });
+  try {
+    let text = await api('POST', `/machines/${encodeURIComponent(creds.machine.id)}/installer`, { platform, token: creds.token, serverAddr });
+    // fetch().text() descarta el BOM; Windows PowerShell 5.1 lo necesita para leer el .ps1 como UTF-8
+    if (platform === 'windows' && !text.startsWith('\uFEFF')) text = '\uFEFF' + text;
+    const file = INSTALL_FILE[platform](creds.machine.id);
+    download(file, text, platform === 'linux' ? 'text/x-shellscript' : 'text/plain');
+    try { if (serverAddr) localStorage.setItem(SERVER_KEY, serverAddr); } catch {}
+    const help = $('#install-help');
+    help.innerHTML = installHelp(platform, creds.machine.id, serverAddr || state.summary?.frps?.publicAddr || '');
+    help.classList.remove('hidden');
+  } catch (err) {
+    $('#creds-error').textContent = err.message;
+  } finally {
+    $$('.installer').forEach((b) => { b.disabled = false; });
+  }
+});
 
 // ---------- modales genéricos ----------
 
 document.addEventListener('click', (e) => {
-  if (e.target.matches('[data-close]')) e.target.closest('.overlay').classList.add('hidden');
+  if (e.target.matches('[data-close]')) {
+    const ov = e.target.closest('.overlay');
+    ov.classList.add('hidden');
+    if (ov.id === 'creds-modal') creds = null;
+  }
   const c = e.target.closest('[data-copy]');
   if (c) copy($('#' + c.dataset.copy).textContent);
 });

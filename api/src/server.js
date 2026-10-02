@@ -14,6 +14,7 @@ const { open } = require('./db');
 const { FrpsClient } = require('./frps');
 const { createPluginHandler } = require('./plugin');
 const M = require('./machines');
+const { PLATFORMS } = require('./installers');
 
 const VERSION = '1.0.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -250,6 +251,29 @@ function createApi(store, frps) {
     const m = mustMachine(p.id);
     const toml = M.frpcToml(m, store.servicesOf(m.id), config.frps, null);
     return [200, toml, { 'content-type': 'application/toml; charset=utf-8', 'content-disposition': `attachment; filename="frpc-${m.id}.toml"` }];
+  });
+
+  // Instalador autocontenido. Requiere el token vigente de la máquina (el hub no lo guarda en claro).
+  route('POST', '/api/machines/:id/installer', async (req, p) => {
+    const m = mustMachine(p.id);
+    const body = await readJson(req);
+    const platform = String(body.platform || '');
+    if (platform !== 'toml' && !PLATFORMS[platform]) throw M.bad('platform debe ser linux, windows o toml');
+    if (!M.tokenMatches(body.token, m.token_hash)) throw new M.HttpError(403, 'el token no corresponde a esta máquina (rótelo si lo perdió)');
+    const serverAddr = M.normalizeServerAddr(body.serverAddr, config.frps.publicAddr);
+    const services = store.servicesOf(m.id);
+    if (platform === 'toml') {
+      return [200, M.frpcToml(m, services, config.frps, body.token, { serverAddr }), {
+        'content-type': 'application/toml; charset=utf-8',
+        'content-disposition': `attachment; filename="frpc-${m.id}.toml"`,
+      }];
+    }
+    const P = PLATFORMS[platform];
+    store.event(m.id, 'instalador_generado', `${platform} · servidor ${serverAddr}`, 0);
+    return [200, P.build(m, services, config.frps, body.token, serverAddr), {
+      'content-type': P.type,
+      'content-disposition': `attachment; filename="instalar-${m.id}.${P.ext}"`,
+    }];
   });
 
   route('POST', '/api/machines/:id/services', async (req, p) => {

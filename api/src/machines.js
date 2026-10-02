@@ -142,14 +142,31 @@ function publicUrl(svc, frps) {
 // ---------- frpc.toml ----------
 
 const q = (s) => JSON.stringify(String(s)); // cadena TOML básica (compatible con JSON escapado)
+// Rutas: cadena literal TOML (comillas simples) para no escapar las barras invertidas de Windows
+const tq = (s) => (String(s).includes("'") ? q(s) : `'${s}'`);
 
-function frpcToml(machine, services, frps, token) {
+const HOSTNAME_RE = /^(?=.{1,253}$)[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+/** Valida la dirección del servidor que se escribirá en la configuración de una máquina. */
+function normalizeServerAddr(v, fallback) {
+  if (v === undefined || v === null || String(v).trim() === '') return fallback;
+  const s = String(v).trim();
+  if (!IPV4_RE.test(s) && !HOSTNAME_RE.test(s)) throw bad('serverAddr debe ser una IP o un nombre de host válido');
+  return s;
+}
+
+/**
+ * opts.serverAddr: dirección del servidor para esta máquina (por defecto FRPS_PUBLIC_ADDR)
+ * opts.certDir:    carpeta de certificados para https con TLS local (por defecto ./certs)
+ * opts.extra:      líneas adicionales de configuración global (p. ej. log.to)
+ */
+function frpcToml(machine, services, frps, token, opts = {}) {
+  const certDir = opts.certDir || './certs';
   const lines = [
     `# frpc.toml generado por IIT Tunnel Hub`,
     `# Máquina: ${machine.name}${machine.client ? ' · Cliente: ' + machine.client : ''}`,
     `# Guarde este archivo junto a frpc y ejecute:  frpc -c frpc.toml`,
     ``,
-    `serverAddr = ${q(frps.publicAddr)}`,
+    `serverAddr = ${q(opts.serverAddr || frps.publicAddr)}`,
     `serverPort = ${frps.bindPort}`,
     `user = ${q(machine.id)}`,
     `loginFailExit = false`,
@@ -158,6 +175,7 @@ function frpcToml(machine, services, frps, token) {
   ];
   if (frps.authToken) lines.push(`auth.token = ${q(frps.authToken)}`);
   lines.push(`metadatas.token = ${q(token || 'PEGUE_AQUI_EL_TOKEN_DE_LA_MAQUINA')}`);
+  for (const l of opts.extra || []) lines.push(l);
 
   for (const s of services) {
     lines.push('', `[[proxies]]`, `name = ${q(s.name)}`, `type = ${q(s.type)}`);
@@ -168,8 +186,8 @@ function frpcToml(machine, services, frps, token) {
         `[proxies.plugin]`,
         `type = "https2http"`,
         `localAddr = ${q(`${s.local_ip}:${s.local_port}`)}`,
-        `crtPath = "./certs/fullchain.pem"   # certificado para ${s.subdomain}.${frps.subdomainHost}`,
-        `keyPath = "./certs/privkey.pem"`,
+        `crtPath = ${tq(certDir + '/fullchain.pem')}   # certificado para ${s.subdomain}.${frps.subdomainHost}`,
+        `keyPath = ${tq(certDir + '/privkey.pem')}`,
         `hostHeaderRewrite = ${q(s.local_ip)}`,
       );
     } else {
@@ -183,5 +201,5 @@ function frpcToml(machine, services, frps, token) {
 }
 
 module.exports = {
-  HttpError, bad, newToken, hashToken, tokenMatches, normalizeMachine, normalizeService, publicUrl, frpcToml, ID_RE,
+  HttpError, bad, newToken, hashToken, tokenMatches, normalizeMachine, normalizeService, publicUrl, frpcToml, normalizeServerAddr, ID_RE,
 };

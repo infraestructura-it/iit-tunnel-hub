@@ -88,19 +88,48 @@
   </form>
 </div>
 
-<!-- Credenciales (se muestran una sola vez) -->
+<!-- Credenciales e instaladores (el token se muestra una sola vez) -->
 <div id="creds-modal" class="overlay hidden">
   <div class="modal">
     <h2 id="creds-title">Credenciales de la máquina</h2>
     <div class="sub" id="creds-sub"></div>
+
     <label>Token</label>
     <div class="secret"><span id="creds-token"></span><button class="btn small" data-copy="creds-token">Copiar</button></div>
-    <div class="warning">⚠ Este token no se vuelve a mostrar. Si se pierde, rote el token desde el detalle de la máquina.</div>
-    <label>frpc.toml</label>
-    <pre class="code" id="creds-toml"></pre>
+    <div class="warning">⚠ El token no se vuelve a mostrar. Descargue ahora el instalador; si lo pierde, use "Generar instalador" en el detalle de la máquina.</div>
+
+    <h4 class="section-title">Instalar en el equipo</h4>
+    <div class="field">
+      <label for="creds-server">Dirección del servidor (como la ve el equipo)</label>
+      <input id="creds-server" placeholder="tuneles.infraestructura-it.com o 10.147.19.57">
+      <div class="hint">Dominio o IP pública del VPS; en pruebas, la IP de LAN o ZeroTier del PC donde corre frps.</div>
+    </div>
+    <div class="installers">
+      <button class="installer" data-platform="linux">
+        <span class="i-icon">🐧</span>
+        <span class="i-name">Linux · Raspberry Pi</span>
+        <span class="i-desc">Raspberry, tarjetas ARM, PC o servidor Linux</span>
+      </button>
+      <button class="installer" data-platform="windows">
+        <span class="i-icon">🪟</span>
+        <span class="i-name">Windows</span>
+        <span class="i-desc">PC, mini PC o servidor Windows</span>
+      </button>
+      <button class="installer" data-platform="toml">
+        <span class="i-icon">⚙</span>
+        <span class="i-name">Solo frpc.toml</span>
+        <span class="i-desc">Instalación manual o equipos especiales</span>
+      </button>
+    </div>
+    <div id="install-help" class="install-help hidden"></div>
+    <div class="error" id="creds-error"></div>
+
+    <details class="toml-preview">
+      <summary>Ver frpc.toml</summary>
+      <pre class="code" id="creds-toml"></pre>
+    </details>
+
     <div class="modal-actions">
-      <button class="btn" data-copy="creds-toml">Copiar frpc.toml</button>
-      <button class="btn primary" id="creds-download">Descargar frpc.toml</button>
       <button class="btn" data-close>Listo</button>
     </div>
   </div>
