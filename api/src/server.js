@@ -19,6 +19,8 @@ const A = require('./alerts');
 const { AIService, AIError, viewMessages } = require('./ai');
 const SC = require('./ai-scope');
 const { TelegramBot } = require('./telegram');
+const AU = require('./auth');
+const { requestContext } = require('./context');
 
 const VERSION = '1.0.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -142,12 +144,26 @@ function serviceView(s, machineId, status, access = NO_ACCESS) {
   };
 }
 
+/** Vista para el rol cliente: estado y servicios, sin datos internos de IIT (IA, accesos privados). */
+function clientMachineView(v) {
+  return {
+    id: v.id, name: v.name, client: v.client, description: v.description, enabled: v.enabled, online: v.online,
+    stateSince: v.stateSince, connection: v.connection, lastLogin: v.lastLogin, createdAt: v.createdAt,
+    services: v.services.map((s) => ({
+      name: s.name, type: s.type, private: s.private, publicUrl: s.publicUrl, localPort: s.localPort, status: s.status,
+      trafficInToday: s.trafficInToday, trafficOutToday: s.trafficOutToday,
+    })),
+    visits: [],
+  };
+}
+
 function machineView(m, services, status, access = NO_ACCESS) {
   const live = status.clients.get(m.id);
   return {
     id: m.id,
     name: m.name,
     client: m.client,
+    clientId: m.client_id ?? null,
     description: m.description,
     enabled: !!m.enabled,
     alerts: !!m.alerts,
@@ -175,39 +191,87 @@ function machineView(m, services, status, access = NO_ACCESS) {
   };
 }
 
+// ---------- permisos ----------
+
+/** Alcance de un usuario: admin ve todo; técnico, sus clientes asignados; cliente, el suyo. */
+function accessFor(store, u, via) {
+  const clientIds = u.role === 'admin' ? null
+    : new Set(u.role === 'tecnico' ? store.userClientIds(u.id) : (u.client_id ? [u.client_id] : []));
+  return new AU.Access({ user: u, role: u.role, clientIds, via });
+}
+
 // ---------- rutas de la API ----------
 
 function createApi(store, frps, monitor, ai, plugin) {
   const routes = [];
-  const route = (method, pattern, handler) => {
+  /**
+   * perm: 'public' (sin sesión) · 'session' (cualquier usuario, incluso con cambio de contraseña pendiente)
+   *       'any' (cualquier rol) · 'staff' (admin y técnico, por defecto) · 'admin'
+   */
+  const route = (method, pattern, handler, perm = 'staff') => {
     const keys = [];
     const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
-    routes.push({ method, re, keys, handler });
+    routes.push({ method, re, keys, handler, perm });
   };
 
-  const mustMachine = (id) => {
+  /** Máquina visible para quien pregunta (404 si no la ve) y, si write, que pueda operarla (403). */
+  const mustMachine = (id, ctx, { write = true } = {}) => {
     const m = store.getMachine(id);
-    if (!m) throw new M.HttpError(404, `no existe la máquina "${id}"`);
+    if (!m || !ctx.canSee(m)) throw new M.HttpError(404, `no existe la máquina "${id}"`);
+    if (write && !ctx.canWrite(m)) throw new M.HttpError(403, 'su usuario solo puede consultar esta máquina');
     return m;
   };
+  const visibleMachines = (ctx) => store.listMachines().filter((m) => ctx.canSee(m));
+  const visibleIds = (ctx) => new Set(visibleMachines(ctx).map((m) => m.id));
 
   const access = () => accessIndex(store.listAccess());
-  const view = async (m) => machineView(m, store.servicesOf(m.id), await frps.status(), access());
+  const shape = (ctx, v) => (ctx.role === 'cliente' ? clientMachineView(v) : v);
+  const view = async (m, ctx) => shape(ctx, machineView(m, store.servicesOf(m.id), await frps.status(), access()));
+
+  /** Resuelve el cliente de una máquina: por clientId o por nombre. El admin crea clientes nuevos al vuelo. */
+  const resolveClient = (body, ctx) => {
+    if (body.clientId !== undefined && body.clientId !== null && body.clientId !== '') {
+      const c = store.getClient(String(body.clientId));
+      if (!c || !ctx.canUseClient(c.id)) throw new M.HttpError(404, `no existe el cliente "${body.clientId}"`);
+      return c;
+    }
+    const name = String(body.client ?? '').trim().slice(0, 80);
+    if (!name) {
+      if (!ctx.isAdmin) throw M.bad('elija el cliente de la máquina');
+      return null;
+    }
+    const c = store.clientByName(name);
+    if (c) {
+      if (!ctx.canUseClient(c.id)) throw new M.HttpError(403, `no tiene asignado el cliente "${name}"`);
+      return c;
+    }
+    if (!ctx.isAdmin) throw new M.HttpError(403, `el cliente "${name}" no existe o no lo tiene asignado`);
+    const nc = store.createClient(name);
+    store.event(null, 'cliente_creado', nc.name, 0);
+    return nc;
+  };
   // Las máquinas dueñas de servicios privados se reconectan para que frps tome la clave y los visitantes nuevos
   const reload = (ids) => { for (const id of new Set(ids)) plugin?.requestReload(id); };
 
-  route('GET', '/api/health', async () => [200, { ok: true, version: VERSION }]);
+  route('GET', '/api/health', async () => [200, { ok: true, version: VERSION }], 'public');
 
-  route('GET', '/api/summary', async () => {
+  route('GET', '/api/summary', async (_req, _p, ctx) => {
     const status = await frps.status();
-    const machines = store.listMachines();
-    const services = store.listServices();
-    return [200, {
+    const machines = visibleMachines(ctx);
+    const ids = new Set(machines.map((m) => m.id));
+    const services = store.listServices().filter((s) => ids.has(s.machine_id));
+    const base = {
       machines: machines.length,
       enabled: machines.filter((m) => m.enabled).length,
       online: machines.filter((m) => status.clients.has(m.id)).length,
       services: services.length,
-      ai: (() => { const a = ai.settings(); return { enabled: a.enabled, ready: ai.ready(), pending: ai.pending().length }; })(),
+    };
+    if (ctx.role === 'cliente') {
+      return [200, { ...base, frps: { reachable: status.reachable, version: status.server?.version ?? null, subdomainHost: config.frps.subdomainHost } }];
+    }
+    return [200, {
+      ...base,
+      ai: (() => { const a = ai.settings(); return { enabled: a.enabled, ready: ai.ready(), pending: ai.pending().filter((x) => ids.has(x.machine_id)).length }; })(),
       alerts: (() => { const a = A.loadSettings(store); return { telegram: !!(a.telegram.botToken && a.telegram.chatId), webhooks: a.webhooks.length, graceSeconds: a.graceSeconds }; })(),
       frps: {
         reachable: status.reachable,
@@ -222,9 +286,9 @@ function createApi(store, frps, monitor, ai, plugin) {
         tcpPortRange: [config.frps.tcpPortMin, config.frps.tcpPortMax],
       },
     }];
-  });
+  }, 'any');
 
-  route('GET', '/api/machines', async () => {
+  route('GET', '/api/machines', async (_req, _p, ctx) => {
     const status = await frps.status();
     const byMachine = new Map();
     for (const s of store.listServices()) {
@@ -232,15 +296,16 @@ function createApi(store, frps, monitor, ai, plugin) {
       byMachine.get(s.machine_id).push(s);
     }
     const idx = access();
-    return [200, store.listMachines().map((m) => machineView(m, byMachine.get(m.id) || [], status, idx))];
-  });
+    return [200, visibleMachines(ctx).map((m) => shape(ctx, machineView(m, byMachine.get(m.id) || [], status, idx)))];
+  }, 'any');
 
-  route('POST', '/api/machines', async (req) => {
+  route('POST', '/api/machines', async (req, _p, ctx) => {
     const body = await readJson(req);
     const token = M.newToken();
     const created = store.transaction(() => {
-      const data = M.normalizeMachine(body, store);
-      store.createMachine({ ...data, tokenHash: M.hashToken(token) });
+      const client = resolveClient(body, ctx);
+      const data = M.normalizeMachine({ ...body, client: client ? client.name : '' }, store);
+      store.createMachine({ ...data, clientId: client ? client.id : null, tokenHash: M.hashToken(token) });
       for (const s of Array.isArray(body.services) ? body.services : []) {
         store.createService(data.id, M.normalizeService(s, data.id, store, config.frps));
       }
@@ -257,19 +322,23 @@ function createApi(store, frps, monitor, ai, plugin) {
     }];
   });
 
-  route('GET', '/api/machines/:id', async (_req, p) => {
-    return [200, await view(mustMachine(p.id))];
-  });
+  route('GET', '/api/machines/:id', async (_req, p, ctx) => {
+    return [200, await view(mustMachine(p.id, ctx, { write: false }), ctx)];
+  }, 'any');
 
-  route('PATCH', '/api/machines/:id', async (req, p) => {
-    mustMachine(p.id);
+  route('PATCH', '/api/machines/:id', async (req, p, ctx) => {
+    mustMachine(p.id, ctx);
     const body = await readJson(req);
     const fields = {};
     if (body.name !== undefined) {
       fields.name = String(body.name).trim().slice(0, 80);
       if (!fields.name) throw M.bad('name no puede quedar vacío');
     }
-    if (body.client !== undefined) fields.client = String(body.client).trim().slice(0, 80);
+    if (body.client !== undefined || body.clientId !== undefined) {
+      const c = resolveClient(body, ctx);
+      fields.client = c ? c.name : '';
+      fields.client_id = c ? c.id : null;
+    }
     if (body.description !== undefined) fields.description = String(body.description).trim().slice(0, 500);
     if (body.enabled !== undefined) {
       if (typeof body.enabled !== 'boolean') throw M.bad('enabled debe ser true o false');
@@ -282,11 +351,12 @@ function createApi(store, frps, monitor, ai, plugin) {
     const m = store.updateMachine(p.id, fields);
     if (fields.enabled !== undefined) store.event(p.id, fields.enabled ? 'habilitada' : 'deshabilitada', '', 0);
     if (fields.alerts !== undefined) store.event(p.id, fields.alerts ? 'alertas_activadas' : 'alertas_desactivadas', '', 0);
-    return [200, await view(m)];
+    if (fields.client_id !== undefined) store.event(p.id, 'cliente_cambiado', fields.client || 'sin cliente', 0);
+    return [200, await view(m, ctx)];
   });
 
-  route('DELETE', '/api/machines/:id', async (_req, p) => {
-    mustMachine(p.id);
+  route('DELETE', '/api/machines/:id', async (_req, p, ctx) => {
+    mustMachine(p.id, ctx);
     // Si era visitante de servicios privados, sus dueños se reconectan para retirarla de allowUsers
     const owners = store.accessOfVisitor(p.id).map((a) => a.owner_id);
     store.deleteMachine(p.id);
@@ -295,23 +365,23 @@ function createApi(store, frps, monitor, ai, plugin) {
     return [200, { deleted: p.id }];
   });
 
-  route('POST', '/api/machines/:id/rotate-token', async (_req, p) => {
-    const m = mustMachine(p.id);
+  route('POST', '/api/machines/:id/rotate-token', async (_req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
     const token = M.newToken();
     store.setTokenHash(m.id, M.hashToken(token));
     store.event(m.id, 'token_rotado', 'el token anterior deja de funcionar en el próximo login', 0);
     return [200, { token, frpcToml: M.frpcToml(m, store.servicesOf(m.id), config.frps, token) }];
   });
 
-  route('GET', '/api/machines/:id/frpc.toml', async (_req, p) => {
-    const m = mustMachine(p.id);
+  route('GET', '/api/machines/:id/frpc.toml', async (_req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
     const toml = M.frpcToml(m, store.servicesOf(m.id), config.frps, null);
     return [200, toml, { 'content-type': 'application/toml; charset=utf-8', 'content-disposition': `attachment; filename="frpc-${m.id}.toml"` }];
   });
 
   // Instalador autocontenido. Requiere el token vigente de la máquina (el hub no lo guarda en claro).
-  route('POST', '/api/machines/:id/installer', async (req, p) => {
-    const m = mustMachine(p.id);
+  route('POST', '/api/machines/:id/installer', async (req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
     const body = await readJson(req);
     const platform = String(body.platform || '');
     if (platform !== 'toml' && !PLATFORMS[platform]) throw M.bad('platform debe ser linux, windows o toml');
@@ -333,16 +403,16 @@ function createApi(store, frps, monitor, ai, plugin) {
     }];
   });
 
-  route('POST', '/api/machines/:id/services', async (req, p) => {
-    const m = mustMachine(p.id);
+  route('POST', '/api/machines/:id/services', async (req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
     const body = await readJson(req);
     const s = store.createService(m.id, M.normalizeService(body, m.id, store, config.frps));
     store.event(m.id, 'servicio_agregado', `${s.name} (${s.type === 'stcp' ? 'privado' : s.type})`, 0);
     return [201, serviceView(s, m.id, await frps.status(), access())];
   });
 
-  route('DELETE', '/api/machines/:id/services/:name', async (_req, p) => {
-    mustMachine(p.id);
+  route('DELETE', '/api/machines/:id/services/:name', async (_req, p, ctx) => {
+    mustMachine(p.id, ctx);
     const s = store.getService(p.id, p.name);
     if (!s || !store.deleteService(p.id, p.name)) throw new M.HttpError(404, `no existe el servicio "${p.name}"`);
     store.event(p.id, 'servicio_eliminado', p.name, 0);
@@ -358,14 +428,18 @@ function createApi(store, frps, monitor, ai, plugin) {
     if (s.type !== 'stcp') throw M.bad(`el servicio "${name}" no es privado (stcp)`);
     return s;
   };
-  const mustAccess = (id) => {
+  /** Acceso visible si se ve el dueño o el visitante; para cambiarlo hay que poder operar el dueño. */
+  const mustAccess = (id, ctx, { write = true } = {}) => {
     const a = store.getAccess(id);
-    if (!a) throw new M.HttpError(404, 'no existe ese acceso');
+    const owner = a && store.getMachine(a.owner_id);
+    const visitor = a && store.getMachine(a.visitor_id);
+    if (!a || !(ctx.canSee(owner) || ctx.canSee(visitor))) throw new M.HttpError(404, 'no existe ese acceso');
+    if (write && !ctx.canWrite(owner)) throw new M.HttpError(403, 'no puede cambiar accesos de servicios de otro cliente');
     return a;
   };
 
-  route('POST', '/api/machines/:id/services/:name/rotate-secret', async (_req, p) => {
-    mustMachine(p.id);
+  route('POST', '/api/machines/:id/services/:name/rotate-secret', async (_req, p, ctx) => {
+    mustMachine(p.id, ctx);
     const s = mustStcp(p.id, p.name);
     store.setServiceSecret(s.id, M.newSecret());
     const visitors = store.accessForService(s.id).map((a) => a.visitor_id);
@@ -374,13 +448,18 @@ function createApi(store, frps, monitor, ai, plugin) {
     return [200, { rotated: p.name, visitors }];
   });
 
-  route('GET', '/api/access', async () => {
+  route('GET', '/api/access', async (_req, _p, ctx) => {
     const status = await frps.status();
-    return [200, store.listAccess().map((a) => accessView(a, status))];
+    const ids = visibleIds(ctx);
+    return [200, store.listAccess().filter((a) => ids.has(a.owner_id) || ids.has(a.visitor_id)).map((a) => accessView(a, status))];
   });
 
-  route('POST', '/api/access', async (req) => {
-    const r = M.normalizeAccess(await readJson(req), store);
+  route('POST', '/api/access', async (req, _p, ctx) => {
+    const body = await readJson(req);
+    // El técnico debe poder operar las dos máquinas: la del servicio y la que entra
+    mustMachine(String(body.machine || ''), ctx);
+    mustMachine(String(body.visitor || ''), ctx);
+    const r = M.normalizeAccess(body, store);
     const a = store.createAccess(r.svc.id, r.visitor.id, r.bindPort);
     store.event(r.owner.id, 'acceso_otorgado', `${r.svc.name} → ${r.visitor.id} (puerto ${r.bindPort})`, 0);
     store.event(r.visitor.id, 'acceso_otorgado', `${r.owner.id}/${r.svc.name} en 127.0.0.1:${r.bindPort}`, 0);
@@ -388,8 +467,8 @@ function createApi(store, frps, monitor, ai, plugin) {
     return [201, accessView(a, await frps.status())];
   });
 
-  route('DELETE', '/api/access/:id', async (_req, p) => {
-    const a = mustAccess(p.id);
+  route('DELETE', '/api/access/:id', async (_req, p, ctx) => {
+    const a = mustAccess(p.id, ctx);
     store.deleteAccess(a.id);
     store.event(a.owner_id, 'acceso_revocado', `${a.service} → ${a.visitor_id}`, 0);
     store.event(a.visitor_id, 'acceso_revocado', `${a.owner_id}/${a.service}`, 0);
@@ -398,16 +477,16 @@ function createApi(store, frps, monitor, ai, plugin) {
   });
 
   // Archivo de accesos de una máquina visitante (no lleva el token de la máquina)
-  route('GET', '/api/machines/:id/accesos.toml', async (_req, p) => {
-    const m = mustMachine(p.id);
+  route('GET', '/api/machines/:id/accesos.toml', async (_req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
     return [200, M.accessToml(m, store.accessOfVisitor(m.id)), {
       'content-type': 'application/toml; charset=utf-8',
       'content-disposition': `attachment; filename="${M.accessFileName(m.id)}"`,
     }];
   });
 
-  route('GET', '/api/machines/:id/accesos/:platform', async (_req, p) => {
-    const m = mustMachine(p.id);
+  route('GET', '/api/machines/:id/accesos/:platform', async (_req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
     const P = ACCESS_PLATFORMS[p.platform];
     if (!P) throw M.bad('platform debe ser linux o windows');
     const grants = store.accessOfVisitor(m.id);
@@ -418,8 +497,9 @@ function createApi(store, frps, monitor, ai, plugin) {
     }];
   });
 
-  route('GET', '/api/access/:id/rdp', async (req, p) => {
-    const a = mustAccess(p.id);
+  route('GET', '/api/access/:id/rdp', async (req, p, ctx) => {
+    const a = mustAccess(p.id, ctx, { write: false });
+    mustMachine(a.visitor_id, ctx, { write: false });
     const user = (new URL(req.url, 'http://x').searchParams.get('user') || '').replace(/[^\w.@\\-]/g, '').slice(0, 64);
     return [200, M.rdpFile(a, user), {
       'content-type': 'application/x-rdp; charset=utf-8',
@@ -427,90 +507,398 @@ function createApi(store, frps, monitor, ai, plugin) {
     }];
   });
 
-  route('GET', '/api/alerts/settings', async () => [200, A.publicSettings(A.loadSettings(store))]);
+  route('GET', '/api/alerts/settings', async () => [200, A.publicSettings(A.loadSettings(store))], 'admin');
 
-  route('PUT', '/api/alerts/settings', async (req) => {
+  route('PUT', '/api/alerts/settings', async (req, _p, ctx) => {
     const body = await readJson(req);
     const s = A.updateSettings(store, body, M.bad);
     store.event(null, 'alertas_configuradas', `gracia ${s.graceSeconds} s · Telegram ${s.telegram.botToken && s.telegram.chatId ? 'sí' : 'no'} · webhooks ${s.webhooks.length}`, 0);
     return [200, A.publicSettings(s)];
-  });
+  }, 'admin');
 
-  route('POST', '/api/alerts/test', async () => {
+  route('POST', '/api/alerts/test', async (_req, _p, ctx) => {
     const results = await monitor.notify({ type: 'test', at: Math.floor(Date.now() / 1000) });
     if (results.length === 0) throw M.bad('no hay canales configurados (Telegram o webhooks)');
     return [200, { results }];
-  });
+  }, 'admin');
 
   // ---------- IA ----------
 
-  // Conversaciones del panel: "general" o "m-<maquina>"
-  const panelConv = (cid) => {
-    if (cid === 'general') return { id: 'panel:general', machineId: null };
+  // Conversaciones del panel: "general" (una por usuario) o "m-<maquina>" (compartida por quienes operan la máquina)
+  const panelConv = (cid, ctx) => {
+    if (cid === 'general') return { id: ctx.user ? `panel:general:u:${ctx.user.id}` : 'panel:general', machineId: null };
     const m = /^m-(.+)$/.exec(cid);
-    if (m) { mustMachine(m[1]); return { id: `panel:m:${m[1]}`, machineId: m[1] }; }
+    if (m) { mustMachine(m[1], ctx); return { id: `panel:m:${m[1]}`, machineId: m[1] }; }
     throw new M.HttpError(404, 'conversación no encontrada');
   };
+  /** ¿Puede esta persona leer la conversación? (para no devolver chats ajenos al aprobar acciones) */
+  const convVisible = (convId, ctx) => {
+    if (convId === `panel:general:u:${ctx.user?.id}`) return true;
+    if (convId === 'panel:general') return ctx.via === 'token';
+    const m = /^panel:m:(.+)$/.exec(convId);
+    if (m) return ctx.canWrite(store.getMachine(m[1]));
+    return ctx.isAdmin;
+  };
+  // La IA de una conversación general solo ve las máquinas de su dueño
+  ai.allowFor = (conv) => {
+    const m = /^panel:general:u:(\d+)$/.exec(conv.id || '');
+    if (!m) return null;
+    const u = store.getUser(Number(m[1]));
+    if (!u || !u.enabled) return () => false;
+    const a = accessFor(store, u, 'sesion');
+    return (machine) => a.canWrite(machine);
+  };
+  const mustAction = (id, ctx) => {
+    const a = store.getAction(Number(id));
+    if (!a || !ctx.canSee(store.getMachine(a.machine_id))) throw new M.HttpError(404, 'no existe la acción');
+    if (!ctx.canWrite(store.getMachine(a.machine_id))) throw new M.HttpError(403, 'no puede decidir acciones de esta máquina');
+    return a;
+  };
+  const decided = (r, ctx) => (convVisible(r.action.conversation_id, ctx)
+    ? { ...r, ...convView(r.action.conversation_id) }
+    : { action: r.action, reply: null, messages: [], actions: [] });
   const convView = (id) => {
     const c = store.getConversation(id);
     return { messages: c ? viewMessages(c.messages) : [], actions: store.conversationActions(id) };
   };
 
-  route('GET', '/api/ai/settings', async () => [200, ai.publicSettings()]);
-  route('PUT', '/api/ai/settings', async (req) => {
+  route('GET', '/api/ai/settings', async () => [200, ai.publicSettings()], 'admin');
+  route('PUT', '/api/ai/settings', async (req, _p, ctx) => {
     const r = ai.updateSettings(await readJson(req));
     store.event(null, 'ia_configurada', `${r.enabled ? 'activa' : 'inactiva'} · ${r.model} · diagnóstico ${r.analyzeAlerts ? 'sí' : 'no'} · Telegram ${r.telegramBot ? 'sí' : 'no'}`, 0);
     return [200, r];
-  });
-  route('GET', '/api/ai/ssh-key', async () => [200, { publicKey: await ai.publicKey() }]);
+  }, 'admin');
+  route('GET', '/api/ai/ssh-key', async (_req, _p, ctx) => [200, { publicKey: await ai.publicKey() }]);
 
-  route('GET', '/api/machines/:id/ai-scope', async (_req, p) => {
-    mustMachine(p.id);
+  route('GET', '/api/machines/:id/ai-scope', async (_req, p, ctx) => {
+    mustMachine(p.id, ctx);
     return [200, SC.scopeForPanel(store.getScope(p.id))];
   });
-  route('PUT', '/api/machines/:id/ai-scope', async (req, p) => {
-    mustMachine(p.id);
+  route('PUT', '/api/machines/:id/ai-scope', async (req, p, ctx) => {
+    mustMachine(p.id, ctx);
     const scope = SC.normalizeScope(await readJson(req, 128 * 1024), store.servicesOf(p.id), store.getScope(p.id), M.bad);
     store.setScope(p.id, scope);
     store.event(p.id, 'ia_alcance', `${scope.enabled ? 'habilitada' : 'deshabilitada'} · ${scope.http.length} consultas · ${scope.commands.length} comandos`, 0);
     return [200, SC.scopeForPanel(scope)];
   });
 
-  route('GET', '/api/ai/conversations/:cid', async (_req, p) => [200, convView(panelConv(p.cid).id)]);
-  route('DELETE', '/api/ai/conversations/:cid', async (_req, p) => { ai.reset(panelConv(p.cid).id); return [200, { ok: true }]; });
-  route('POST', '/api/ai/conversations/:cid/messages', async (req, p) => {
-    const c = panelConv(p.cid);
+  route('GET', '/api/ai/conversations/:cid', async (_req, p, ctx) => [200, convView(panelConv(p.cid, ctx).id)]);
+  route('DELETE', '/api/ai/conversations/:cid', async (_req, p, ctx) => { ai.reset(panelConv(p.cid, ctx).id); return [200, { ok: true }]; });
+  route('POST', '/api/ai/conversations/:cid/messages', async (req, p, ctx) => {
+    const c = panelConv(p.cid, ctx);
     const body = await readJson(req);
     const r = await ai.chat(c.id, { machineId: c.machineId, channel: 'panel' }, body.text);
     return [200, { reply: r.reply, ...convView(c.id) }];
   });
 
-  route('GET', '/api/ai/actions', async () => [200, ai.pending()]);
-  route('POST', '/api/ai/actions/:id/approve', async (_req, p) => {
-    const r = await ai.approve(Number(p.id), 'panel');
-    return [200, { ...r, ...convView(r.action.conversation_id) }];
+  route('GET', '/api/ai/actions', async (_req, _p, ctx) => [200, ai.pending().filter((a) => ctx.canWrite(store.getMachine(a.machine_id)))]);
+  route('POST', '/api/ai/actions/:id/approve', async (_req, p, ctx) => {
+    mustAction(p.id, ctx);
+    return [200, decided(await ai.approve(Number(p.id), ctx.actor), ctx)];
   });
-  route('POST', '/api/ai/actions/:id/reject', async (_req, p) => {
-    const r = await ai.reject(Number(p.id), 'panel');
-    return [200, { ...r, ...convView(r.action.conversation_id) }];
+  route('POST', '/api/ai/actions/:id/reject', async (_req, p, ctx) => {
+    mustAction(p.id, ctx);
+    return [200, decided(await ai.reject(Number(p.id), ctx.actor), ctx)];
   });
 
-  route('GET', '/api/events', async (req) => {
+  route('GET', '/api/events', async (req, _p, ctx) => {
     const u = new URL(req.url, 'http://x');
     const limit = Number(u.searchParams.get('limit')) || 100;
     const machineId = u.searchParams.get('machine') || undefined;
-    return [200, store.events({ machineId, limit })];
+    if (machineId) mustMachine(machineId, ctx, { write: false });
+    if (ctx.clientIds === null) return [200, store.events({ machineId, limit })];
+    const ids = visibleIds(ctx);
+    return [200, store.events({ machineId, limit, visible: (id) => ids.has(id) })];
+  }, 'any');
+
+  // ---------- sesión y cuenta propia ----------
+
+  const secureCookie = (req) => config.cookieSecure || req.headers['x-forwarded-proto'] === 'https';
+  const clientIp = (req) => String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+  const ipFails = new Map(); // ip → [marcas de tiempo de intentos fallidos]
+  const ipBlocked = (ip) => {
+    const since = Date.now() - 15 * 60 * 1000;
+    const list = (ipFails.get(ip) || []).filter((x) => x > since);
+    ipFails.set(ip, list);
+    return list.length >= 20;
+  };
+
+  async function startSession(req, user) {
+    const token = AU.newSessionToken();
+    store.createSession(AU.hashSession(token), user.id, { ip: clientIp(req), userAgent: req.headers['user-agent'] || '', hours: AU.SESSION_HOURS });
+    store.updateUser(user.id, { failed_count: 0, locked_until: null, last_login_at: Math.floor(Date.now() / 1000) });
+    return { 'set-cookie': AU.sessionCookie(token, { secure: secureCookie(req) }) };
+  }
+
+  route('GET', '/api/auth/state', async () => [200, { needsSetup: store.countUsers() === 0 }], 'public');
+
+  // Primer administrador: solo mientras no haya usuarios y con el ADMIN_TOKEN del servidor
+  route('POST', '/api/auth/setup', async (req) => {
+    const body = await readJson(req);
+    if (store.countUsers() > 0) throw new M.HttpError(409, 'ya hay usuarios: inicie sesión');
+    if (!body.adminToken || !safeEqual(body.adminToken, config.adminToken)) throw new M.HttpError(403, 'el token de administración no es correcto');
+    const u = await newUser({ username: body.username, name: body.name, role: 'admin', password: body.password }, { mustChange: false });
+    requestContext.getStore().actor = u.username;
+    store.event(null, 'usuario_creado', `${u.username} (administrador inicial)`, 0);
+    return [201, { user: userView(u) }, await startSession(req, u)];
+  }, 'public');
+
+  route('POST', '/api/auth/login', async (req) => {
+    const body = await readJson(req);
+    const ip = clientIp(req);
+    const username = String(body.username || '').trim().toLowerCase();
+    const generic = new M.HttpError(401, 'usuario o contraseña incorrectos');
+    if (ipBlocked(ip)) throw new M.HttpError(429, 'demasiados intentos desde esta dirección; espere 15 minutos');
+    const u = store.userByName(username);
+    const nowS = Math.floor(Date.now() / 1000);
+    const ok = await AU.verifyPassword(String(body.password || ''), u?.password_hash);
+    const fail = (reason) => {
+      ipFails.set(ip, [...(ipFails.get(ip) || []), Date.now()]);
+      if (u) {
+        const n = u.failed_count + 1;
+        store.updateUser(u.id, { failed_count: n, locked_until: n >= AU.MAX_FAILS ? nowS + AU.LOCK_MINUTES * 60 : u.locked_until });
+        requestContext.getStore().actor = u.username;
+        store.event(null, 'login_fallido', `${u.username} · ${reason} · ${ip}`, 0);
+      } else {
+        store.event(null, 'login_fallido', `usuario desconocido "${username.slice(0, 40)}" · ${ip}`, 60);
+      }
+    };
+    if (u && u.locked_until && u.locked_until > nowS) {
+      throw new M.HttpError(423, `usuario bloqueado por intentos fallidos; intente en ${Math.ceil((u.locked_until - nowS) / 60)} min`);
+    }
+    if (!u || !ok) { fail('contraseña incorrecta'); throw generic; }
+    if (!u.enabled) { fail('usuario deshabilitado'); throw generic; }
+    if (u.totp_enabled) {
+      if (!body.code) return [401, { error: 'ingrese el código de su app de autenticación', needCode: true }];
+      const step = AU.verifyTotp(u.totp_secret, body.code, u.totp_last_step);
+      if (!step) { fail('código 2FA incorrecto'); throw new M.HttpError(401, 'código incorrecto o vencido'); }
+      store.updateUser(u.id, { totp_last_step: step });
+    }
+    requestContext.getStore().actor = u.username;
+    store.event(null, 'sesion_iniciada', `${u.username} · ${ip}`, 0);
+    return [200, { user: userView(store.getUser(u.id)) }, await startSession(req, u)];
+  }, 'public');
+
+  route('POST', '/api/auth/logout', async (req, _p, ctx) => {
+    if (ctx.sessionId) store.deleteSession(ctx.sessionId);
+    return [200, { ok: true }, { 'set-cookie': AU.sessionCookie('', { secure: secureCookie(req), maxAge: 0 }) }];
+  }, 'session');
+
+  route('GET', '/api/auth/me', async (_req, _p, ctx) => [200, {
+    user: ctx.user ? userView(ctx.user) : { username: 'token-api', name: 'Token de administración', role: 'admin', via: 'token' },
+    clients: (ctx.clientIds === null ? store.listClients() : store.listClients().filter((c) => ctx.clientIds.has(c.id))).map((c) => ({ id: c.id, name: c.name })),
+  }], 'session');
+
+  const mustSessionUser = (ctx) => {
+    if (!ctx.user) throw M.bad('el token de administración no tiene cuenta: inicie sesión con un usuario');
+    return store.getUser(ctx.user.id);
+  };
+
+  route('POST', '/api/auth/password', async (req, _p, ctx) => {
+    const u = mustSessionUser(ctx);
+    const body = await readJson(req);
+    if (!(await AU.verifyPassword(String(body.current || ''), u.password_hash))) throw new M.HttpError(403, 'la contraseña actual no es correcta');
+    const pw = AU.checkPasswordPolicy(body.password, M.bad);
+    if (pw === body.current) throw M.bad('la contraseña nueva debe ser distinta a la actual');
+    store.updateUser(u.id, { password_hash: await AU.hashPassword(pw), must_change: 0 });
+    store.deleteUserSessions(u.id, ctx.sessionId); // cierra sus otras sesiones
+    store.event(null, 'contrasena_cambiada', u.username, 0);
+    return [200, { user: userView(store.getUser(u.id)) }];
+  }, 'session');
+
+  route('POST', '/api/auth/totp/setup', async (_req, _p, ctx) => {
+    const u = mustSessionUser(ctx);
+    if (u.totp_enabled) throw new M.HttpError(409, 'el segundo factor ya está activo');
+    const secret = AU.newTotpSecret();
+    store.updateUser(u.id, { totp_secret: secret, totp_enabled: 0 });
+    return [200, { secret, uri: AU.totpUri(secret, u.username) }];
+  }, 'session');
+
+  route('POST', '/api/auth/totp/enable', async (req, _p, ctx) => {
+    const u = mustSessionUser(ctx);
+    const body = await readJson(req);
+    if (u.totp_enabled) throw new M.HttpError(409, 'el segundo factor ya está activo');
+    const step = AU.verifyTotp(u.totp_secret, body.code, 0);
+    if (!u.totp_secret || !step) throw M.bad('el código no coincide: revise la hora del teléfono y vuelva a intentar');
+    store.updateUser(u.id, { totp_enabled: 1, totp_last_step: step });
+    store.event(null, '2fa_activado', u.username, 0);
+    return [200, { user: userView(store.getUser(u.id)) }];
+  }, 'session');
+
+  route('POST', '/api/auth/totp/disable', async (req, _p, ctx) => {
+    const u = mustSessionUser(ctx);
+    const body = await readJson(req);
+    if (!(await AU.verifyPassword(String(body.password || ''), u.password_hash))) throw new M.HttpError(403, 'la contraseña no es correcta');
+    store.updateUser(u.id, { totp_enabled: 0, totp_secret: null, totp_last_step: 0 });
+    store.event(null, '2fa_desactivado', u.username, 0);
+    return [200, { user: userView(store.getUser(u.id)) }];
+  }, 'session');
+
+  // ---------- usuarios y clientes (administrador) ----------
+
+  const userView = (u) => ({
+    id: u.id, username: u.username, name: u.name, role: u.role, roleLabel: AU.ROLE_LABEL[u.role],
+    client: u.client_id, clients: u.role === 'tecnico' ? store.userClientIds(u.id) : [],
+    enabled: !!u.enabled, mustChangePassword: !!u.must_change, totp: !!u.totp_enabled,
+    locked: !!(u.locked_until && u.locked_until > Math.floor(Date.now() / 1000)),
+    createdAt: u.created_at, lastLoginAt: u.last_login_at,
   });
 
+  /** Valida rol y clientes de un usuario. */
+  const roleFields = (body, current = null) => {
+    const role = body.role !== undefined ? String(body.role) : current?.role;
+    if (!AU.ROLES.includes(role)) throw M.bad('role debe ser admin, tecnico o cliente');
+    let clientId = null; let clients = [];
+    if (role === 'cliente') {
+      clientId = body.client !== undefined ? String(body.client || '') : current?.client_id;
+      if (!clientId || !store.getClient(clientId)) throw M.bad('un usuario cliente debe tener un cliente válido');
+    }
+    if (role === 'tecnico') {
+      clients = body.clients !== undefined ? body.clients : (current ? store.userClientIds(current.id) : []);
+      if (!Array.isArray(clients)) throw M.bad('clients debe ser una lista de ids de cliente');
+      for (const c of clients) if (!store.getClient(String(c))) throw M.bad(`no existe el cliente "${c}"`);
+      clients = clients.map(String);
+    }
+    return { role, clientId, clients };
+  };
+
+  async function newUser(body, { mustChange = true } = {}) {
+    const username = String(body.username || '').trim().toLowerCase();
+    if (!AU.USERNAME_RE.test(username)) throw M.bad('el usuario admite a-z, 0-9, punto, guion y guion bajo (2 a 32 caracteres)');
+    if (store.userByName(username)) throw new M.HttpError(409, `ya existe el usuario "${username}"`);
+    const name = String(body.name || '').trim().slice(0, 80);
+    const r = roleFields(body);
+    const password = AU.checkPasswordPolicy(body.password, M.bad);
+    const u = store.createUser({ username, name, role: r.role, clientId: r.clientId, passwordHash: await AU.hashPassword(password), mustChange });
+    if (r.role === 'tecnico') store.setUserClients(u.id, r.clients);
+    return u;
+  }
+
+  route('GET', '/api/users', async () => [200, store.listUsers().map(userView)], 'admin');
+
+  route('POST', '/api/users', async (req) => {
+    const body = await readJson(req);
+    const generated = !body.password;
+    if (generated) body.password = AU.tempPassword();
+    const u = await newUser(body);
+    store.event(null, 'usuario_creado', `${u.username} · ${AU.ROLE_LABEL[u.role]}`, 0);
+    return [201, { user: userView(u), tempPassword: generated ? body.password : undefined }];
+  }, 'admin');
+
+  route('PATCH', '/api/users/:id', async (req, p, ctx) => {
+    const u = store.getUser(p.id);
+    if (!u) throw new M.HttpError(404, 'no existe el usuario');
+    const body = await readJson(req);
+    const self = ctx.user?.id === u.id;
+    const fields = {};
+    if (body.name !== undefined) fields.name = String(body.name).trim().slice(0, 80);
+    if (body.enabled !== undefined) {
+      if (typeof body.enabled !== 'boolean') throw M.bad('enabled debe ser true o false');
+      if (self && !body.enabled) throw M.bad('no puede deshabilitar su propio usuario');
+      fields.enabled = body.enabled ? 1 : 0;
+      if (body.enabled) { fields.failed_count = 0; fields.locked_until = null; }
+    }
+    if (body.role !== undefined || body.client !== undefined || body.clients !== undefined) {
+      const r = roleFields(body, u);
+      if (self && r.role !== 'admin') throw M.bad('no puede quitarse a sí mismo el rol de administrador');
+      fields.role = r.role;
+      fields.client_id = r.clientId;
+      if (r.role === 'tecnico') store.setUserClients(u.id, r.clients); else store.setUserClients(u.id, []);
+    }
+    if (u.role === 'admin' && (fields.role && fields.role !== 'admin' || fields.enabled === 0) && store.countAdmins(u.id) === 0) {
+      throw M.bad('debe quedar al menos un administrador habilitado');
+    }
+    let tempPassword;
+    if (body.resetPassword) {
+      tempPassword = AU.tempPassword();
+      fields.password_hash = await AU.hashPassword(tempPassword);
+      fields.must_change = 1; fields.failed_count = 0; fields.locked_until = null;
+    }
+    if (body.resetTotp) { fields.totp_enabled = 0; fields.totp_secret = null; fields.totp_last_step = 0; }
+    const updated = store.updateUser(u.id, fields);
+    // Cambios de permisos o credenciales: se cierran sus sesiones abiertas
+    if (fields.enabled === 0 || fields.role !== undefined || body.resetPassword) store.deleteUserSessions(u.id, self ? ctx.sessionId : '');
+    const what = [fields.enabled !== undefined && (fields.enabled ? 'habilitado' : 'deshabilitado'), fields.role && `rol ${AU.ROLE_LABEL[fields.role]}`,
+      body.resetPassword && 'contraseña restablecida', body.resetTotp && '2FA restablecido'].filter(Boolean).join(' · ');
+    store.event(null, 'usuario_modificado', `${u.username}${what ? ' · ' + what : ''}`, 0);
+    return [200, { user: userView(updated), tempPassword }];
+  }, 'admin');
+
+  route('DELETE', '/api/users/:id', async (_req, p, ctx) => {
+    const u = store.getUser(p.id);
+    if (!u) throw new M.HttpError(404, 'no existe el usuario');
+    if (ctx.user?.id === u.id) throw M.bad('no puede eliminar su propio usuario');
+    if (u.role === 'admin' && store.countAdmins(u.id) === 0) throw M.bad('debe quedar al menos un administrador habilitado');
+    store.deleteUser(u.id);
+    store.event(null, 'usuario_eliminado', u.username, 0);
+    return [200, { deleted: u.id }];
+  }, 'admin');
+
+  route('GET', '/api/clients', async (_req, _p, ctx) => [200, store.listClients().filter((c) => ctx.canUseClient(c.id))], 'any');
+
+  route('POST', '/api/clients', async (req) => {
+    const name = String((await readJson(req)).name || '').trim().slice(0, 80);
+    if (!name) throw M.bad('el nombre del cliente es obligatorio');
+    if (store.clientByName(name)) throw new M.HttpError(409, `ya existe el cliente "${name}"`);
+    const c = store.createClient(name);
+    store.event(null, 'cliente_creado', c.name, 0);
+    return [201, c];
+  }, 'admin');
+
+  route('PATCH', '/api/clients/:id', async (req, p) => {
+    const c = store.getClient(p.id);
+    if (!c) throw new M.HttpError(404, 'no existe el cliente');
+    const name = String((await readJson(req)).name || '').trim().slice(0, 80);
+    if (!name) throw M.bad('el nombre del cliente es obligatorio');
+    const other = store.clientByName(name);
+    if (other && other.id !== c.id) throw new M.HttpError(409, `ya existe el cliente "${name}"`);
+    store.event(null, 'cliente_renombrado', `${c.name} → ${name}`, 0);
+    return [200, store.renameClient(c.id, name)];
+  }, 'admin');
+
+  route('DELETE', '/api/clients/:id', async (_req, p) => {
+    const c = store.listClients().find((x) => x.id === p.id);
+    if (!c) throw new M.HttpError(404, 'no existe el cliente');
+    if (c.machines > 0) throw new M.HttpError(409, `el cliente tiene ${c.machines} máquina(s): muévalas o elimínelas primero`);
+    store.deleteClient(c.id);
+    store.event(null, 'cliente_eliminado', c.name, 0);
+    return [200, { deleted: c.id }];
+  }, 'admin');
+
+  /** Identifica a quien llama: token de API (Bearer) o cookie de sesión. Devuelve null si no hay credencial válida. */
+  function authenticate(req) {
+    if (isAdmin(req)) return new AU.Access({ role: 'admin', via: 'token' });
+    const token = AU.parseCookies(req.headers.cookie)[AU.COOKIE];
+    if (!token) return null;
+    const sid = AU.hashSession(token);
+    const s = store.getSession(sid);
+    const u = s && store.getUser(s.user_id);
+    if (!u || !u.enabled) return null;
+    const a = accessFor(store, u, 'sesion');
+    a.sessionId = sid;
+    return a;
+  }
+
   return async function handleApi(req, res, pathname) {
-    if (!isAdmin(req)) return send(res, 401, { error: 'no autorizado: envíe Authorization: Bearer <ADMIN_TOKEN>' });
     for (const r of routes) {
       if (r.method !== req.method) continue;
       const match = r.re.exec(pathname);
       if (!match) continue;
       const params = {};
       r.keys.forEach((k, i) => { params[k] = decodeURIComponent(match[i + 1]); });
-      const [status, data, headers] = await r.handler(req, params);
+
+      const ctx = r.perm === 'public' ? null : authenticate(req);
+      if (r.perm !== 'public') {
+        if (!ctx) return send(res, 401, { error: 'no autorizado: inicie sesión' });
+        // Con sesión de navegador, las peticiones que cambian algo deben venir del panel (protección CSRF)
+        if (ctx.via === 'sesion' && req.method !== 'GET' && req.headers['x-requested-with'] !== 'iit-panel') {
+          return send(res, 403, { error: 'petición rechazada: falta la cabecera X-Requested-With' });
+        }
+        if (ctx.user?.must_change && r.perm !== 'session') return send(res, 403, { error: 'debe cambiar su contraseña antes de continuar', mustChangePassword: true });
+        if (r.perm === 'admin' && !ctx.isAdmin) return send(res, 403, { error: 'solo un administrador puede hacer esto' });
+        if (r.perm === 'staff' && !ctx.isStaff) return send(res, 403, { error: 'su usuario solo puede consultar' });
+      }
+      const [status, data, headers] = await requestContext.run({ actor: ctx ? ctx.actor : null }, () => r.handler(req, params, ctx));
       return send(res, status, data, headers);
     }
     const exists = routes.some((r) => r.re.test(pathname));

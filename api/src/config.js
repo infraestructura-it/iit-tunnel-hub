@@ -18,6 +18,8 @@ const config = {
   host: env.HOST || '0.0.0.0',
   port: int('PORT', 8080),
   adminToken: env.ADMIN_TOKEN || '',
+  // Cookie de sesión con Secure (solo HTTPS). Detrás de un proxy HTTPS se activa sola con X-Forwarded-Proto.
+  cookieSecure: env.COOKIE_SECURE === '1',
 
   // Endpoint que consulta frps (server plugin). Nunca debe quedar expuesto a Internet.
   pluginHost: env.PLUGIN_HOST || '127.0.0.1',

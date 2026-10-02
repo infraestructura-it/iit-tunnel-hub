@@ -88,7 +88,9 @@ Por defecto el panel escucha en `127.0.0.1:8080`. Ábralo con un túnel SSH:
 ssh -L 8080:127.0.0.1:8080 usuario@servidor     # luego http://localhost:8080
 ```
 
-O ponga `HOST` con la IP de ZeroTier del servidor para abrirlo desde su red privada. Si lo publica en Internet, hágalo detrás de un proxy con HTTPS.
+O ponga `HOST` con la IP de ZeroTier del servidor para abrirlo desde su red privada. Si lo publica en Internet, hágalo detrás de un proxy con HTTPS (la cookie de sesión se marca `Secure` sola cuando el proxy envía `X-Forwarded-Proto: https`, o con `COOKIE_SECURE=1`).
+
+La primera vez el panel pide crear el **primer administrador** con el `ADMIN_TOKEN`. Desde entonces cada persona entra con su usuario (ver [Usuarios, roles y clientes](#usuarios-roles-y-clientes)).
 
 ### Si el servidor ya tiene Nginx en el puerto 443
 
@@ -205,6 +207,24 @@ No avisan las máquinas que nunca se han conectado, las deshabilitadas ni las qu
 
 **Guardar y enviar prueba** muestra el resultado de cada canal. Los envíos fallidos quedan en la actividad como "Alerta no enviada".
 
+## Usuarios, roles y clientes
+
+| Rol | Ve | Puede |
+|---|---|---|
+| **Administrador** | Todo | Todo, más usuarios, clientes, alertas y ajustes de la IA |
+| **Técnico** | Solo las máquinas de los **clientes asignados** | Registrar y operar esas máquinas, servicios, instaladores, accesos privados, alcance de la IA, chat y **aprobar acciones** de la IA |
+| **Cliente** | Solo las máquinas de **su cliente** | Consultar: estado, servicios con su enlace e historial. Sin tokens, instaladores, accesos privados ni IA |
+
+- **Clientes**: el campo "cliente" de cada máquina es un cliente real (👥 Usuarios → Clientes). Al actualizar, las máquinas existentes se enlazan solas por el nombre. Al registrar una máquina con un cliente nuevo, el administrador lo crea al vuelo; un técnico solo puede elegir los suyos.
+- Una máquina de otro cliente **no existe** para un técnico o un cliente (404). Las máquinas sin cliente solo las ve el administrador.
+- **Ingreso**: usuario y contraseña (mín. 10 caracteres, guardada con scrypt), sesión con cookie `HttpOnly` y `SameSite=Strict` de 12 h. Contraseña temporal y cambio obligatorio en el primer ingreso.
+- **Verificación en dos pasos** (Mi cuenta): Google Authenticator, Microsoft Authenticator, Authy… El QR se genera en el propio hub. Si alguien pierde el teléfono, el administrador usa **Quitar 2FA**.
+- **Bloqueo**: 5 contraseñas o códigos errados bloquean el usuario 15 min (el administrador lo desbloquea); además, máximo 20 fallos por IP cada 15 min.
+- **Auditoría**: cada evento guarda quién lo hizo ("· por maria"), y las aprobaciones de la IA quedan a nombre de la persona.
+- **IA**: el chat general es de cada usuario y solo ve las máquinas que esa persona puede operar.
+- Deshabilitar un usuario, cambiarle el rol o restablecer su contraseña cierra sus sesiones.
+- El **`ADMIN_TOKEN`** sigue sirviendo para la API (`Authorization: Bearer`) y como llave de emergencia ("Entrar con el token de administración").
+
 ## Inteligencia artificial (Claude)
 
 Botón **🤖 IA** del panel. En **Ajustes** se pega la clave de API de Claude (console.anthropic.com) y se elige el modelo (por defecto `claude-sonnet-5-5`).
@@ -236,15 +256,25 @@ Botón **🤖 IA** del panel. En **Ajustes** se pega la clave de API de Claude (
 
 ## API
 
-Todas las rutas requieren `Authorization: Bearer <ADMIN_TOKEN>`.
+Las rutas aceptan `Authorization: Bearer <ADMIN_TOKEN>` (acceso total) o la cookie de sesión del panel; con cookie, las peticiones que cambian algo deben llevar `X-Requested-With: iit-panel` (protección CSRF). Cada ruta aplica el rol y los clientes de quien llama.
 
 | Método | Ruta | Descripción |
 |---|---|---|
+| GET | `/api/auth/state` | `{needsSetup}`: si aún no hay usuarios (público) |
+| POST | `/api/auth/setup` | Primer administrador: `{adminToken, username, name, password}` (público, solo sin usuarios) |
+| POST | `/api/auth/login` · `/api/auth/logout` | Sesión: `{username, password, code?}`. Con 2FA sin `code` responde 401 `{needCode:true}` |
+| GET | `/api/auth/me` | Usuario actual y sus clientes |
+| POST | `/api/auth/password` | `{current, password}` |
+| POST | `/api/auth/totp/setup` · `/enable` · `/disable` | 2FA: genera la clave, la confirma con `{code}`, la desactiva con `{password}` |
+| GET / POST | `/api/users` | Usuarios (admin). POST `{username, name, role, clients[] \| client, password?}`; sin `password` devuelve `tempPassword` |
+| PATCH / DELETE | `/api/users/:id` | `name`, `role`, `clients`, `client`, `enabled`, `resetPassword`, `resetTotp` (admin) |
+| GET / POST | `/api/clients` | Clientes visibles · crear (admin) |
+| PATCH / DELETE | `/api/clients/:id` | Renombrar (actualiza sus máquinas) · eliminar si no tiene máquinas (admin) |
 | GET | `/api/summary` | Totales y estado de frps |
 | GET | `/api/machines` | Máquinas con servicios y estado en vivo |
 | POST | `/api/machines` | Registrar (devuelve token y frpc.toml) |
 | GET | `/api/machines/:id` | Detalle |
-| PATCH | `/api/machines/:id` | Cambiar `name`, `client`, `description`, `enabled`, `alerts` |
+| PATCH | `/api/machines/:id` | Cambiar `name`, `client` (nombre) o `clientId`, `description`, `enabled`, `alerts` |
 | DELETE | `/api/machines/:id` | Eliminar (corta su tráfico) |
 | POST | `/api/machines/:id/rotate-token` | Nuevo token y frpc.toml |
 | GET | `/api/machines/:id/frpc.toml` | Configuración actual, sin el token |
@@ -304,11 +334,12 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 104 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores.
+Levanta frps, el hub y frpc reales en localhost y verifica 141 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría.
 
 ## Límites conocidos
 
-- Un solo token de administración; no hay usuarios ni roles.
+- Los permisos son por rol y cliente; no hay permisos finos por máquina ni roles personalizados.
+- El bot de Telegram responde al chat configurado en Alertas con permisos de administrador.
 - `node:sqlite` aún está marcado como experimental en Node 22 (estable en uso, se oculta el aviso).
 - La expulsión por latido depende de que frpc cierre la sesión; un frpc modificado podría mantener la conexión, pero no recibiría tráfico tcp ni https (NewUserConn) ni nuevas conexiones de trabajo.
 - El tipo `http` no cifra entre el visitante y frps: para paneles con contraseña use `https`.

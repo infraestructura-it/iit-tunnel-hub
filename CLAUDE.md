@@ -36,9 +36,13 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | Ruta | Qué hace |
 |---|---|
 | `api/src/server.js` | Rutas REST, servidor del plugin, estáticos, arranque |
+| `api/src/auth.js` | Contraseñas (scrypt), TOTP (RFC 6238), sesiones/cookies y la clase `Access` (rol + clientes visibles) |
+| `api/src/context.js` | `AsyncLocalStorage` con el actor de la petición: `store.event()` lo guarda en `events.actor` |
+| `api/public/users.js` | Panel: mi cuenta (contraseña, 2FA con QR) y administración de usuarios y clientes |
+| `api/public/vendor/qrcode.js` | qrcode-generator 1.4.4 (MIT), servido localmente para el QR del 2FA |
 | `api/src/plugin.js` | Lógica del server plugin (Login, NewProxy, CloseProxy, NewUserConn, NewWorkConn, Ping) |
 | `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml`, accesos stcp (`normalizeAccess`, `accessToml`, `rdpFile`) |
-| `api/src/db.js` | Esquema SQLite (`machines`, `services`, `service_access`, `events`, `settings`, `ai_*`), migraciones y consultas |
+| `api/src/db.js` | Esquema SQLite (`machines`, `services`, `service_access`, `clients`, `users`, `user_clients`, `sessions`, `events`, `settings`, `ai_*`), migraciones y consultas |
 | `api/src/alerts.js` | Monitor de estado (cada `ALERT_CHECK_SECONDS`) y envío de alertas por Telegram y webhooks; configuración en la tabla `settings` |
 | `api/src/ai.js` | Agente Claude: herramientas, bucle tool_use, conversaciones, aprobaciones, diagnóstico de alertas, uso |
 | `api/src/ai-scope.js` | Alcance de IA por máquina: validación, vistas sin secretos, ejecución HTTP por frps y SSH con clave del hub |
@@ -55,7 +59,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (104 casos) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (141 casos) |
 
 ## Comandos
 
@@ -75,7 +79,7 @@ cd frp; .\frpc.exe -c .\frpc-<maquina>.toml                   # conectar una má
 powershell -ExecutionPolicy Bypass -File .\actualizar.ps1     # aplica el iit-tunnel-hub*.zip más reciente de C:\descargas o Descargas
 ```
 
-Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios http: `http://<servicio>-<maquina>.localhost:8081` (Chrome/Edge resuelven `*.localhost`).
+Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el token `prueba-local-1234567890`; después, usuario y contraseña. Servicios http: `http://<servicio>-<maquina>.localhost:8081` (Chrome/Edge resuelven `*.localhost`).
 
 ## Reglas de seguridad (no romper)
 
@@ -88,6 +92,18 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 - Ante error interno el plugin **rechaza** (falla cerrado). Mantenerlo así.
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
+
+## Usuarios y permisos: reglas (no romper)
+
+- Cada ruta declara su permiso en `route(método, ruta, handler, perm)`: `public`, `session` (permitida con cambio de contraseña pendiente), `any`, `staff` (por defecto) o `admin`. Los handlers reciben `ctx` (`Access`).
+- Máquinas: siempre `mustMachine(id, ctx, { write })`: **404** si no la ve (no revelar que existe), 403 si la ve pero no puede operarla. Listas: `visibleMachines(ctx)`; eventos con `visible`.
+- Visibilidad: admin y token de API → todo (`clientIds = null`); técnico → `user_clients`; cliente → su `client_id`. Máquinas sin cliente: solo admin.
+- Rol cliente: vistas con `clientMachineView` (sin `ai`, accesos ni datos internos) y resumen sin `ai`/`alerts`.
+- Sesión: cookie `iit_sesion` (`HttpOnly`, `SameSite=Strict`, `Secure` con `COOKIE_SECURE=1` o `X-Forwarded-Proto: https`); en la base solo el SHA-256 del token. Con cookie, todo método ≠ GET exige `X-Requested-With: iit-panel`.
+- Login: mensaje genérico para usuario/contraseña; `verifyPassword` contra hash de relleno si el usuario no existe. 5 fallos → `locked_until` 15 min; 20 fallos por IP en 15 min → 429. TOTP con ±1 intervalo y `totp_last_step` contra reuso.
+- Siempre debe quedar un admin habilitado; nadie se deshabilita, elimina ni quita el rol admin a sí mismo. Cambios de rol, deshabilitar o restablecer contraseña borran sus sesiones.
+- IA: `ai.allowFor(conv)` filtra herramientas en `panel:general:u:<id>`; aprobar exige poder operar la máquina y la respuesta solo incluye la conversación si `convVisible`.
+- Auditoría: no pasar el usuario a mano; `requestContext.run({ actor })` lo pone el servidor y `store.event` lo lee.
 
 ## Servicios privados (stcp): reglas (no romper)
 
@@ -150,7 +166,8 @@ Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios
 
 ## Pendientes / ideas
 
-- Usuarios y roles (hoy un solo `ADMIN_TOKEN`); las aprobaciones de IA registran "panel" o "telegram", no la persona.
+- Permisos finos por máquina o roles personalizados; usuarios de Telegram (hoy el chat configurado actúa como admin).
+- Portal de cliente con alertas propias (Telegram/webhook por cliente).
 - Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
 - Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
 - Que el hub sea visitante stcp para que la IA use SSH privado.

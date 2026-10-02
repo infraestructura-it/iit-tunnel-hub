@@ -13,15 +13,50 @@
 
 <!-- Acceso -->
 <div id="login" class="login hidden">
-  <form class="login-card" id="login-form">
+  <div class="login-card">
     <div class="brand">IIT <span>//</span> Tunnel Hub<small>Infraestructura-IT</small></div>
-    <div class="field">
-      <label for="admin-token">Token de administración</label>
-      <input id="admin-token" type="password" autocomplete="current-password" required placeholder="ADMIN_TOKEN">
-    </div>
-    <button class="btn primary" type="submit" style="width:100%;justify-content:center">Entrar</button>
-    <div class="error" id="login-error"></div>
-  </form>
+
+    <!-- Usuario y contraseña (+ código 2FA si lo tiene activo) -->
+    <form id="login-form" autocomplete="on">
+      <div class="field"><label for="login-user">Usuario</label>
+        <input id="login-user" name="username" autocomplete="username" required autocapitalize="none" spellcheck="false"></div>
+      <div class="field"><label for="login-pass">Contraseña</label>
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" required></div>
+      <div class="field hidden" id="login-code-row"><label for="login-code">Código de su app de autenticación</label>
+        <input id="login-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="123456"></div>
+      <button class="btn primary" type="submit" style="width:100%;justify-content:center">Entrar</button>
+      <div class="error" id="login-error"></div>
+      <a href="#" class="login-alt" data-login-mode="token">Entrar con el token de administración</a>
+    </form>
+
+    <!-- Token de administración (API y emergencias) -->
+    <form id="token-form" class="hidden">
+      <div class="field">
+        <label for="admin-token">Token de administración</label>
+        <input id="admin-token" type="password" autocomplete="off" required placeholder="ADMIN_TOKEN">
+        <div class="hint">Para emergencias o automatizaciones. Las personas deberían entrar con su usuario.</div>
+      </div>
+      <button class="btn primary" type="submit" style="width:100%;justify-content:center">Entrar</button>
+      <div class="error" id="token-error"></div>
+      <a href="#" class="login-alt" data-login-mode="user">Entrar con usuario y contraseña</a>
+    </form>
+
+    <!-- Primer administrador: solo cuando aún no hay usuarios -->
+    <form id="setup-form" class="hidden">
+      <div class="sub" style="margin-bottom:14px">Aún no hay usuarios. Cree el <b>primer administrador</b> con el <code>ADMIN_TOKEN</code> del servidor.</div>
+      <div class="field"><label>Token de administración</label><input name="adminToken" type="password" required autocomplete="off"></div>
+      <div class="row">
+        <div class="field"><label>Usuario</label><input name="username" required autocapitalize="none" spellcheck="false" placeholder="jairo"></div>
+        <div class="field"><label>Nombre</label><input name="name" placeholder="Jairo Sepúlveda"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Contraseña</label><input name="password" type="password" required minlength="10" autocomplete="new-password"></div>
+        <div class="field"><label>Repetir</label><input name="password2" type="password" required minlength="10" autocomplete="new-password"></div>
+      </div>
+      <button class="btn primary" type="submit" style="width:100%;justify-content:center">Crear administrador y entrar</button>
+      <div class="error" id="setup-error"></div>
+    </form>
+  </div>
 </div>
 
 <!-- Aplicación -->
@@ -30,8 +65,10 @@
     <div class="brand">IIT <span>//</span> Tunnel Hub</div>
     <div class="spacer"></div>
     <span class="pill" id="frps-pill"><span class="dot"></span> frps</span>
-    <button class="btn small ai-btn" id="ai-btn" title="Asistente IA">🤖<span class="lbl"> IA</span> <span class="badge hidden" id="ai-badge"></span></button>
-    <button class="btn small bell" id="alerts-btn" title="Alertas">🔔<span class="lbl"> Alertas</span></button>
+    <button class="btn small ai-btn staff-only" id="ai-btn" title="Asistente IA">🤖<span class="lbl"> IA</span> <span class="badge hidden" id="ai-badge"></span></button>
+    <button class="btn small bell admin-only" id="alerts-btn" title="Alertas">🔔<span class="lbl"> Alertas</span></button>
+    <button class="btn small admin-only" id="users-btn" title="Usuarios y clientes">👥<span class="lbl"> Usuarios</span></button>
+    <button class="btn small user-btn" id="user-btn" title="Mi cuenta">👤<span class="lbl" id="user-label"></span></button>
     <button class="btn small" id="logout">Salir</button>
   </header>
 
@@ -54,7 +91,7 @@
             <option value="disabled">Deshabilitadas</option>
           </select>
           <div class="spacer"></div>
-          <button class="btn primary" id="new-machine">+ Registrar máquina</button>
+          <button class="btn primary staff-only" id="new-machine">+ Registrar máquina</button>
         </div>
         <div id="machines" class="grid"></div>
       </div>
@@ -73,7 +110,7 @@
     <div class="sub">Se genera un token único y el frpc.toml listo para instalar en el equipo.</div>
     <div class="row">
       <div class="field"><label>Nombre *</label><input name="name" required maxlength="80" placeholder="Node-RED Planta"></div>
-      <div class="field"><label>Cliente</label><input name="client" maxlength="80" placeholder="Clínica Norte"></div>
+      <div class="field"><label>Cliente</label><input name="client" maxlength="80" placeholder="Clínica Norte" list="client-options" autocomplete="off"><datalist id="client-options"></datalist></div>
     </div>
     <div class="row">
       <div class="field"><label>Id (opcional)</label><input name="id" maxlength="32" pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" placeholder="se genera solo"><div class="hint">Será el usuario frp y parte de los subdominios.</div></div>
@@ -157,6 +194,89 @@
       </div>
     </form>
     <div id="access-next" class="hidden"></div>
+  </div>
+</div>
+
+<!-- Mi cuenta: contraseña y segundo factor -->
+<div id="account-modal" class="overlay hidden">
+  <div class="modal">
+    <h2>Mi cuenta</h2>
+    <div class="sub" id="account-sub"></div>
+    <div class="warning hidden" id="account-forced">🔑 Debe cambiar su contraseña antes de continuar.</div>
+
+    <form id="password-form">
+      <h4 class="section-title">Cambiar contraseña</h4>
+      <div class="field"><label>Contraseña actual</label><input name="current" type="password" required autocomplete="current-password"></div>
+      <div class="row">
+        <div class="field"><label>Nueva (mín. 10 caracteres)</label><input name="password" type="password" required minlength="10" autocomplete="new-password"></div>
+        <div class="field"><label>Repetir</label><input name="password2" type="password" required minlength="10" autocomplete="new-password"></div>
+      </div>
+      <div class="error" id="password-error"></div>
+      <button class="btn primary small" type="submit">Cambiar contraseña</button>
+    </form>
+
+    <div id="totp-section">
+      <h4 class="section-title">Verificación en dos pasos</h4>
+      <div id="totp-body"></div>
+      <div class="error" id="totp-error"></div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn" data-close id="account-close">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Usuarios y clientes (administrador) -->
+<div id="users-modal" class="overlay hidden">
+  <div class="modal users-modal">
+    <div class="ai-head">
+      <div style="flex:1;min-width:0">
+        <h2>Usuarios y clientes</h2>
+        <div class="sub">Los técnicos operan solo los clientes asignados; los usuarios de cliente consultan sus equipos.</div>
+      </div>
+      <button class="btn icon" data-close title="Cerrar">✕</button>
+    </div>
+    <div class="tabs" id="users-tabs">
+      <button class="tab active" data-utab="users">Usuarios</button>
+      <button class="tab" data-utab="clients">Clientes</button>
+    </div>
+    <div data-upanel="users">
+      <div id="users-list"></div>
+      <form id="user-form" class="user-form">
+        <h4 class="section-title" id="user-form-title">Nuevo usuario</h4>
+        <input type="hidden" name="id">
+        <div class="row">
+          <div class="field"><label>Usuario</label><input name="username" required autocapitalize="none" spellcheck="false" pattern="[a-z0-9][a-z0-9._\-]{1,31}" placeholder="maria.gomez"></div>
+          <div class="field"><label>Nombre</label><input name="name" placeholder="María Gómez"></div>
+          <div class="field"><label>Rol</label><select name="role">
+            <option value="tecnico">Técnico</option><option value="cliente">Cliente</option><option value="admin">Administrador</option>
+          </select></div>
+        </div>
+        <div class="field" data-role-field="tecnico"><label>Clientes asignados</label><div class="checks" id="user-clients"></div></div>
+        <div class="field hidden" data-role-field="cliente"><label>Cliente</label><select name="client" id="user-client"></select></div>
+        <div class="field" id="user-password-row"><label>Contraseña inicial</label><input name="password" type="password" minlength="10" autocomplete="new-password" placeholder="vacío = se genera una temporal">
+          <div class="hint">El usuario deberá cambiarla en su primer ingreso.</div></div>
+        <div class="error" id="user-error"></div>
+        <div id="user-temp" class="hidden"></div>
+        <div class="actions">
+          <button class="btn primary small" type="submit" id="user-submit">Crear usuario</button>
+          <button class="btn small hidden" type="button" data-uact="reset-password">Restablecer contraseña</button>
+          <button class="btn small hidden" type="button" data-uact="reset-totp">Quitar 2FA</button>
+          <button class="btn small hidden" type="button" data-uact="toggle"></button>
+          <button class="btn small danger hidden" type="button" data-uact="delete">Eliminar</button>
+          <button class="btn small hidden" type="button" data-uact="new">Cancelar edición</button>
+        </div>
+      </form>
+    </div>
+    <div data-upanel="clients" class="hidden">
+      <div id="clients-list"></div>
+      <form id="client-form" class="row" style="margin-top:12px;align-items:end">
+        <div class="field" style="margin:0"><label>Nuevo cliente</label><input name="name" required maxlength="80" placeholder="Hotel Sur"></div>
+        <div style="flex:none"><button class="btn primary small" type="submit">Agregar</button></div>
+      </form>
+      <div class="error" id="client-error"></div>
+    </div>
   </div>
 </div>
 
@@ -324,5 +444,6 @@
 
 <script src="app.js"></script>
 <script src="ai.js"></script>
+<script src="users.js"></script>
 </body>
 </html>

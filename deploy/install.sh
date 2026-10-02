@@ -52,7 +52,8 @@ if [ "${CREATED_ENV:-0}" = 1 ]; then
   echo "Edite FRPS_PUBLIC_ADDR y FRPS_SUBDOMAIN_HOST y luego arranque:"
   echo "  sudo systemctl start iit-hub iit-frps"
   echo
-  echo "Token del panel:  $(grep ^ADMIN_TOKEN= "$PREFIX/.env" | cut -d= -f2-)"
+  echo "Token de administración (API y creación del primer administrador en el panel):"
+  echo "  $(grep ^ADMIN_TOKEN= "$PREFIX/.env" | cut -d= -f2-)"
 else
   systemctl restart iit-hub iit-frps
   echo "Servicios reiniciados."

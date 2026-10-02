@@ -401,7 +401,85 @@ kill $OWNPID $VISPID 2>/dev/null
 for m in $OWN $VIS $INT; do api DELETE /machines/$m >/dev/null; done
 check "eliminar máquinas borra sus accesos" '[ "$(api GET /access | jq length)" = 0 ]'
 
-echo "11. Configuración y limpieza"
+echo "11. Usuarios, roles y clientes"
+# sapi <usuario> <método> <ruta> [curl args]: petición con la cookie de sesión de ese usuario
+sapi() { local jar="$WORK/$1.jar" m="$2" p="$3"; shift 3; curl -s -b "$jar" -c "$jar" -X "$m" -H "Content-Type: application/json" -H "X-Requested-With: iit-panel" "$API$p" "$@"; }
+scode() { local jar="$WORK/$1.jar" m="$2" p="$3"; shift 3; curl -s -o /dev/null -w "%{http_code}" -b "$jar" -c "$jar" -X "$m" -H "Content-Type: application/json" -H "X-Requested-With: iit-panel" "$API$p" "$@"; }
+login() { jq -n --arg u "$2" --arg p "$3" --arg c "${4:-}" '{username:$u,password:$p} + (if $c != "" then {code:$c} else {} end)' | sapi "$1" POST /auth/login --data @-; }
+totp() { node -e "console.log(require('$ROOT/api/src/auth.js').totpCode(process.argv[1], Date.now() + Number(process.argv[2] || 0)))" "$1" "${2:-0}"; }
+
+api POST /machines -d '{"name":"Recepcion","client":"Hotel Sur"}' > "$WORK/hotel.json"
+HOT=$(jq -r .machine.id "$WORK/hotel.json")
+check "el cliente nuevo se crea al registrar la máquina" '[ "$(api GET /clients | jq -r ".[] | select(.name==\"Hotel Sur\") | .machines")" = 1 ]'
+check "las máquinas existentes quedaron enlazadas a su cliente" '[ "$(api GET /machines/$ID | jq -r .clientId)" = "clinica-norte" ]'
+
+check "sin usuarios, el panel pide crear el administrador" '[ "$(curl -s $API/auth/state | jq -r .needsSetup)" = true ]'
+check "crear administrador con token incorrecto → 403" '[ "$(scode admin POST /auth/setup -d "{\"adminToken\":\"malo\",\"username\":\"jairo\",\"password\":\"clave-admin-segura-1\"}")" = 403 ]'
+check "primer administrador creado con el ADMIN_TOKEN" '[ "$(sapi admin POST /auth/setup -d "{\"adminToken\":\"$ADMIN_TOKEN\",\"username\":\"jairo\",\"name\":\"Jairo\",\"password\":\"clave-admin-segura-1\"}" | jq -r .user.role)" = admin ]'
+check "no se puede repetir la creación inicial" '[ "$(scode otro POST /auth/setup -d "{\"adminToken\":\"$ADMIN_TOKEN\",\"username\":\"x\",\"password\":\"clave-admin-segura-1\"}")" = 409 ]'
+check "la cookie de sesión es HttpOnly y SameSite=Strict" 'curl -s -i -X POST -H "Content-Type: application/json" $API/auth/login -d "{\"username\":\"jairo\",\"password\":\"clave-admin-segura-1\"}" | grep -i "^set-cookie" | grep -qi "httponly.*samesite=strict"'
+check "con sesión, cambios sin X-Requested-With → 403 (CSRF)" '[ "$(curl -s -o /dev/null -w "%{http_code}" -b "$WORK/admin.jar" -X POST -H "Content-Type: application/json" $API/clients -d "{\"name\":\"X\"}")" = 403 ]'
+
+sapi admin POST /users -d '{"username":"tec1","name":"Técnico Uno","role":"tecnico","clients":["clinica-norte"]}' > "$WORK/tec.json"
+TECPW=$(jq -r .tempPassword "$WORK/tec.json")
+check "técnico creado con contraseña temporal" '[ ${#TECPW} -ge 14 ]'
+check "contraseña corta rechazada" '[ "$(scode admin POST /users -d "{\"username\":\"corta\",\"role\":\"admin\",\"password\":\"123\"}")" = 400 ]'
+sapi admin POST /users -d '{"username":"hotel","name":"Gerencia Hotel","role":"cliente","client":"hotel-sur","password":"clave-hotel-inicial"}' >/dev/null
+
+check "primer ingreso del técnico exige cambiar la contraseña" '[ "$(login tec1 tec1 "$TECPW" | jq -r .user.mustChangePassword)" = true ] && [ "$(scode tec1 GET /machines)" = 403 ]'
+sapi tec1 POST /auth/password -d "{\"current\":\"$TECPW\",\"password\":\"clave-tecnico-nueva-1\"}" >/dev/null
+check "tras cambiarla, el técnico entra" '[ "$(scode tec1 GET /machines)" = 200 ]'
+check "el técnico solo ve las máquinas de sus clientes" '[ "$(sapi tec1 GET /machines | jq -r "[.[].id] | join(\",\")")" = "$ID" ]'
+check "máquina de otro cliente → 404 (no sabe que existe)" '[ "$(scode tec1 GET /machines/$HOT)" = 404 ] && [ "$(scode tec1 PATCH /machines/$HOT -d "{\"enabled\":false}")" = 404 ]'
+check "el técnico no administra alertas, IA ni usuarios" '[ "$(scode tec1 GET /alerts/settings)" = 403 ] && [ "$(scode tec1 GET /ai/settings)" = 403 ] && [ "$(scode tec1 GET /users)" = 403 ]'
+check "el técnico no registra máquinas en clientes ajenos" '[ "$(scode tec1 POST /machines -d "{\"name\":\"x\",\"client\":\"Hotel Sur\"}")" = 403 ] && [ "$(scode tec1 POST /machines -d "{\"name\":\"x\"}")" = 400 ]'
+sapi tec1 POST /machines -d '{"name":"Camaras","client":"Clínica Norte"}' > "$WORK/tecm.json"
+TM=$(jq -r .machine.id "$WORK/tecm.json")
+check "el técnico registra en su cliente y queda auditado" '[ "$(api GET "/events?machine=$TM" | jq -r ".[] | select(.kind==\"registrada\") | .actor")" = tec1 ]'
+check "el técnico solo ve eventos de sus máquinas" '[ "$(sapi tec1 GET "/events?limit=200" | jq "[.[] | select(.machine_id != \"$ID\" and .machine_id != \"$TM\")] | length")" = 0 ]'
+
+# IA: el chat general del técnico solo ve sus máquinas; las aprobaciones quedan a su nombre
+api PUT /machines/$ID/ai-scope --data @"$WORK/scope.json" >/dev/null
+tsay() { jq -n --arg t "$3" '{text:$t}' | sapi "$1" POST "/ai/conversations/$2/messages" --data @- ; }
+tsay tec1 general "$(tool listar_maquinas "{}")" > "$WORK/tai.json"
+check "la IA del técnico no lista máquinas de otros clientes" 'jq -r .reply "$WORK/tai.json" | grep -q "$ID" && ! jq -r .reply "$WORK/tai.json" | grep -q "$HOT"'
+check "la IA del técnico no consulta máquinas de otros clientes" 'tsay tec1 general "$(tool estado_maquina "{\"maquina_id\":\"$HOT\"}")" | jq -r .reply | grep -q "no existe la máquina"'
+tsay tec1 m-$ID "$(tool consultar_http "{\"maquina_id\":\"$ID\",\"consulta_id\":\"encender\",\"parametros\":{\"entidad\":\"light.tec\"},\"motivo\":\"rol\"}")" > "$WORK/tr.json"
+TAID=$(jq -r '.actions[-1].id' "$WORK/tr.json")
+check "la aprobación queda a nombre del técnico" '[ "$(sapi tec1 POST /ai/actions/$TAID/approve | jq -r .action.decided_by)" = tec1 ] && grep -q light.tec "$WORK/machine.log"'
+
+check "el cliente entra y ve solo sus equipos" '[ "$(login hotel hotel clave-hotel-inicial | jq -r .user.role)" = cliente ] && sapi hotel POST /auth/password -d "{\"current\":\"clave-hotel-inicial\",\"password\":\"clave-hotel-nueva-1\"}" >/dev/null && [ "$(sapi hotel GET /machines | jq -r "[.[].id] | join(\",\")")" = "$HOT" ]'
+check "el cliente no ve datos internos (IA, accesos)" '[ "$(sapi hotel GET /machines/$HOT | jq "has(\"ai\")")" = false ] && [ "$(sapi hotel GET /summary | jq "has(\"ai\")")" = false ]'
+check "el cliente es solo lectura" '[ "$(scode hotel PATCH /machines/$HOT -d "{\"enabled\":false}")" = 403 ] && [ "$(scode hotel POST /machines -d "{\"name\":\"y\",\"client\":\"Hotel Sur\"}")" = 403 ] && [ "$(scode hotel GET /ai/actions)" = 403 ]'
+check "el cliente no ve máquinas de otros clientes" '[ "$(scode hotel GET /machines/$ID)" = 404 ]'
+
+SECRET=$(sapi tec1 POST /auth/totp/setup | jq -r .secret)
+check "activar 2FA exige un código válido" '[ "$(scode tec1 POST /auth/totp/enable -d "{\"code\":\"000000\"}")" = 400 ] && [ "$(sapi tec1 POST /auth/totp/enable -d "{\"code\":\"$(totp $SECRET)\"}" | jq -r .user.totp)" = true ]'
+cp "$WORK/tec1.jar" "$WORK/vieja.jar"
+sapi tec1 POST /auth/logout >/dev/null
+check "cerrar sesión invalida la cookie" '[ "$(scode vieja GET /machines)" = 401 ]'
+check "con 2FA, la contraseña sola no basta" '[ "$(login tec1 tec1 clave-tecnico-nueva-1 | jq -r .needCode)" = true ] && [ "$(scode tec1 GET /machines)" = 401 ]'
+check "con contraseña y código, entra" '[ "$(login tec1 tec1 clave-tecnico-nueva-1 "$(totp $SECRET 30000)" | jq -r .user.username)" = tec1 ]'
+check "un código ya usado no se acepta otra vez" '[ "$(login t2 tec1 clave-tecnico-nueva-1 "$(totp $SECRET 30000)" | jq -r .error)" != null ]'
+
+for i in 1 2 3 4 5; do login h2 hotel malamala-clave >/dev/null; done
+check "5 intentos fallidos bloquean el usuario" '[ "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" $API/auth/login -d "{\"username\":\"hotel\",\"password\":\"clave-hotel-nueva-1\"}")" = 423 ]'
+HID=$(sapi admin GET /users | jq -r '.[] | select(.username=="hotel") | .id')
+sapi admin PATCH /users/$HID -d '{"enabled":true}' >/dev/null
+check "el administrador desbloquea" '[ "$(login h3 hotel clave-hotel-nueva-1 | jq -r .user.username)" = hotel ]'
+check "eventos de seguridad con su autor" '[ "$(api GET "/events?limit=200" | jq "[.[] | select(.kind==\"login_fallido\" and .actor==\"hotel\")] | length")" -ge 5 ]'
+
+JID=$(sapi admin GET /users | jq -r '.[] | select(.username=="jairo") | .id')
+check "el único administrador no puede quitarse el rol" '[ "$(scode admin PATCH /users/$JID -d "{\"role\":\"tecnico\",\"clients\":[]}")" = 400 ]'
+check "no se elimina un cliente con máquinas" '[ "$(scode admin DELETE /clients/hotel-sur)" = 409 ]'
+sapi admin PATCH /clients/hotel-sur -d '{"name":"Hotel Sur Plaza"}' >/dev/null
+check "renombrar el cliente actualiza sus máquinas" '[ "$(api GET /machines/$HOT | jq -r .client)" = "Hotel Sur Plaza" ]'
+TID=$(sapi admin GET /users | jq -r '.[] | select(.username=="tec1") | .id')
+sapi admin PATCH /users/$TID -d '{"enabled":false}' >/dev/null
+check "deshabilitar un usuario cierra su sesión" '[ "$(scode tec1 GET /machines)" = 401 ]'
+for m in $HOT $TM; do api DELETE /machines/$m >/dev/null; done
+
+echo "12. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
 check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"extra\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
 check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/extra | jq -r .deleted)" = "extra" ]'
@@ -409,7 +487,7 @@ check "eliminar máquina" '[ "$(api DELETE /machines/$ID | jq -r .deleted)" = "$
 check "máquina eliminada ya no recibe tráfico" 'http_blocked'
 check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \"\$(curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq length)\" = 0 ]"'
 
-echo "12. Servidor frps caído"
+echo "13. Servidor frps caído"
 : > "$WORK/hooks.log"
 kill $FRPS_PID 2>/dev/null
 check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'

@@ -311,15 +311,19 @@ class AIService {
 
   async #status() { return this.frps.status(); }
 
+  /** Filtro de máquinas visibles para la conversación (lo define el servidor según el usuario); null = todas. */
+  #allow(conv) { return (this.allowFor && this.allowFor(conv)) || null; }
+
   async #runTool(conv, name, input) {
     const mid = input?.maquina_id;
+    const allow = this.#allow(conv);
     if (conv.machine_id && mid && mid !== conv.machine_id) {
       throw bad(`esta conversación solo puede operar sobre la máquina ${conv.machine_id}`);
     }
     switch (name) {
       case 'listar_maquinas': {
         const status = await this.#status();
-        return this.store.listMachines().map((m) => ({
+        return this.store.listMachines().filter((m) => !allow || allow(m)).map((m) => ({
           id: m.id, nombre: m.name, cliente: m.client, habilitada: !!m.enabled,
           en_linea: status.clients.has(m.id),
           sin_conexion_desde: !status.clients.has(m.id) && m.state_since && m.last_login_at ? new Date(m.state_since * 1000).toISOString() : null,
@@ -328,7 +332,7 @@ class AIService {
         }));
       }
       case 'estado_maquina': {
-        const m = this.#machine(mid);
+        const m = this.#machine(mid, allow);
         const v = this.machineView(m, this.store.servicesOf(m.id), await this.#status());
         return {
           ...v,
@@ -337,9 +341,10 @@ class AIService {
         };
       }
       case 'eventos': {
-        if (mid) this.#machine(mid);
+        if (mid) this.#machine(mid, allow);
         const limit = Math.min(Math.max(Number(input?.limite) || 30, 1), 100);
-        return this.store.events({ machineId: mid, limit }).map((e) => ({ hora: new Date(e.ts * 1000).toISOString(), maquina: e.machine_id, tipo: e.kind, detalle: e.detail }));
+        const visible = allow ? (id) => { const m = this.store.getMachine(id); return !!m && allow(m); } : null;
+        return this.store.events({ machineId: mid, limit, visible }).map((e) => ({ hora: new Date(e.ts * 1000).toISOString(), maquina: e.machine_id, tipo: e.kind, detalle: e.detail }));
       }
       case 'consultar_http':
       case 'ejecutar_comando':
@@ -349,16 +354,16 @@ class AIService {
     }
   }
 
-  #machine(id) {
+  #machine(id, allow = null) {
     if (!id || typeof id !== 'string') throw bad('falta maquina_id');
     const m = this.store.getMachine(id);
-    if (!m) throw bad(`no existe la máquina "${id}"`);
+    if (!m || (allow && !allow(m))) throw bad(`no existe la máquina "${id}"`);
     return m;
   }
 
   /** Resuelve y valida una consulta/comando del alcance. Lanza error legible si no está permitido. */
-  #resolve(machineId, kind, itemId, params) {
-    const m = this.#machine(machineId);
+  #resolve(machineId, kind, itemId, params, allow = null) {
+    const m = this.#machine(machineId, allow);
     if (!m.enabled) throw bad('la máquina está deshabilitada');
     const scope = this.store.getScope(m.id);
     if (!scope?.enabled) throw bad('la IA no está habilitada para esta máquina (alcance desactivado)');
@@ -393,7 +398,7 @@ class AIService {
 
   async #runScopeItem(conv, kind, input) {
     const itemId = kind === 'http' ? input?.consulta_id : input?.comando_id;
-    const r = this.#resolve(input?.maquina_id, kind, itemId, kind === 'http' ? input?.parametros : undefined);
+    const r = this.#resolve(input?.maquina_id, kind, itemId, kind === 'http' ? input?.parametros : undefined, this.#allow(conv));
     const reason = String(input?.motivo || '').slice(0, 500);
 
     if (r.item.mode === 'read') {

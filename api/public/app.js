@@ -5,23 +5,34 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const state = { token: null, machines: [], summary: null, events: [], openId: null, timer: null };
+const state = { token: null, me: null, machines: [], summary: null, events: [], openId: null, timer: null };
 const TOKEN_KEY = 'iit-hub-admin-token';
 
 // ---------- API ----------
 
-async function api(method, path, body) {
+// Con sesión de usuario la cookie viaja sola; con el token de administración se envía como Bearer.
+// X-Requested-With identifica al panel (el servidor rechaza cambios sin ella: protección CSRF).
+async function api(method, path, body, { quiet401 = false } = {}) {
   const res = await fetch('/api' + path, {
     method,
-    headers: { authorization: 'Bearer ' + state.token, ...(body ? { 'content-type': 'application/json' } : {}) },
+    credentials: 'same-origin',
+    headers: {
+      'x-requested-with': 'iit-panel',
+      ...(state.token ? { authorization: 'Bearer ' + state.token } : {}),
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401) { logout(); throw new Error('Sesión no válida'); }
   const isJson = (res.headers.get('content-type') || '').includes('json');
   const data = isJson ? await res.json() : await res.text();
-  if (!res.ok) throw new Error(data?.error || `Error ${res.status}`);
+  if (res.status === 401 && !quiet401 && !path.startsWith('/auth/')) { endSession(); throw new Error('La sesión terminó: ingrese de nuevo'); }
+  if (res.status === 403 && data?.mustChangePassword) { openAccount(true); }
+  if (!res.ok) { const e = new Error(data?.error || `Error ${res.status}`); e.status = res.status; e.data = data; throw e; }
   return data;
 }
+
+const role = () => state.me?.user?.role || 'cliente';
+const isStaff = () => role() === 'admin' || role() === 'tecnico';
 
 // ---------- formato ----------
 
@@ -52,6 +63,9 @@ const EVENT_STYLE = {
   desconectada: 'bad', reconectada: 'good', servidor_caido: 'bad', servidor_recuperado: 'good',
   alerta_enviada: 'info', alerta_fallida: 'bad', alertas_configuradas: 'info',
   alertas_activadas: 'info', alertas_desactivadas: 'warn', instalador_generado: 'info',
+  usuario_creado: 'info', usuario_modificado: 'info', usuario_eliminado: 'warn', cliente_creado: 'info', cliente_renombrado: 'info',
+  cliente_eliminado: 'warn', cliente_cambiado: 'info', sesion_iniciada: 'good', login_fallido: 'bad', contrasena_cambiada: 'info',
+  '2fa_activado': 'good', '2fa_desactivado': 'warn',
   acceso_otorgado: 'info', acceso_revocado: 'warn', clave_rotada: 'warn', reconexion: 'info', accesos_descargados: 'info',
 };
 const EVENT_LABEL = {
@@ -64,6 +78,10 @@ const EVENT_LABEL = {
   alertas_activadas: 'Alertas activadas', alertas_desactivadas: 'Alertas desactivadas', instalador_generado: 'Instalador generado',
   acceso_otorgado: 'Acceso privado otorgado', acceso_revocado: 'Acceso privado revocado', clave_rotada: 'Clave privada rotada',
   reconexion: 'Reconexión pedida por el hub', accesos_descargados: 'Accesos descargados',
+  usuario_creado: 'Usuario creado', usuario_modificado: 'Usuario modificado', usuario_eliminado: 'Usuario eliminado',
+  cliente_creado: 'Cliente creado', cliente_renombrado: 'Cliente renombrado', cliente_eliminado: 'Cliente eliminado',
+  cliente_cambiado: 'Cambio de cliente', sesion_iniciada: 'Sesión iniciada', login_fallido: 'Ingreso fallido',
+  contrasena_cambiada: 'Contraseña cambiada', '2fa_activado': '2FA activado', '2fa_desactivado': '2FA desactivado',
 };
 const TYPE_LABEL = { stcp: 'privado' };
 const typeTag = (t) => `<span class="tag ${t}">${TYPE_LABEL[t] || t}</span>`;
@@ -92,30 +110,103 @@ function download(name, text, type = 'text/plain') {
 
 // ---------- sesión ----------
 
-function showLogin() { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); $('#admin-token').focus(); }
+function loginMode(mode) {
+  for (const [id, m] of [['#login-form', 'user'], ['#token-form', 'token'], ['#setup-form', 'setup']]) $(id).classList.toggle('hidden', m !== mode);
+  const focus = { user: '#login-user', token: '#admin-token', setup: '#setup-form [name="adminToken"]' }[mode];
+  setTimeout(() => $(focus)?.focus(), 0);
+}
+
+async function showLogin() {
+  $('#app').classList.add('hidden');
+  $('#login').classList.remove('hidden');
+  $$('.overlay').forEach((o) => o.classList.add('hidden'));
+  let needsSetup = false;
+  try { needsSetup = (await api('GET', '/auth/state')).needsSetup; } catch {}
+  loginMode(needsSetup ? 'setup' : 'user');
+}
 function showApp() { $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); }
 
-function logout() {
+/** Termina la sesión en el navegador (la cookie la invalida el servidor en /auth/logout). */
+function endSession() {
   state.token = null;
+  state.me = null;
   try { sessionStorage.removeItem(TOKEN_KEY); } catch {}
   clearInterval(state.timer);
+  closeDrawer();
   showLogin();
 }
 
+async function logout() {
+  if (!state.token) { try { await api('POST', '/auth/logout'); } catch {} }
+  endSession();
+}
+
+$('#login').addEventListener('click', (e) => {
+  const a = e.target.closest('[data-login-mode]');
+  if (a) { e.preventDefault(); loginMode(a.dataset.loginMode); }
+});
+
 $('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  state.token = $('#admin-token').value.trim();
   $('#login-error').textContent = '';
+  const body = { username: $('#login-user').value.trim().toLowerCase(), password: $('#login-pass').value };
+  const code = $('#login-code').value.trim();
+  if (code) body.code = code;
   try {
-    await api('GET', '/summary');
-    try { sessionStorage.setItem(TOKEN_KEY, state.token); } catch {}
+    state.token = null;
+    await api('POST', '/auth/login', body);
+    $('#login-pass').value = ''; $('#login-code').value = '';
+    $('#login-code-row').classList.add('hidden');
     start();
-  } catch {
-    $('#login-error').textContent = 'Token incorrecto';
-    showLogin();
+  } catch (err) {
+    if (err.data?.needCode) {
+      $('#login-code-row').classList.remove('hidden');
+      $('#login-code').focus();
+      return;
+    }
+    $('#login-error').textContent = err.message;
+    if ($('#login-code-row').classList.contains('hidden')) $('#login-pass').select(); else { $('#login-code').value = ''; $('#login-code').focus(); }
   }
 });
+
+$('#token-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  state.token = $('#admin-token').value.trim();
+  $('#token-error').textContent = '';
+  try {
+    await api('GET', '/auth/me');
+    try { sessionStorage.setItem(TOKEN_KEY, state.token); } catch {}
+    $('#admin-token').value = '';
+    start();
+  } catch {
+    state.token = null;
+    $('#token-error').textContent = 'Token incorrecto';
+  }
+});
+
+$('#setup-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = Object.fromEntries(new FormData(e.target));
+  $('#setup-error').textContent = '';
+  if (f.password !== f.password2) { $('#setup-error').textContent = 'Las contraseñas no coinciden'; return; }
+  try {
+    await api('POST', '/auth/setup', { adminToken: f.adminToken, username: f.username.trim().toLowerCase(), name: f.name, password: f.password });
+    e.target.reset();
+    start();
+  } catch (err) { $('#setup-error').textContent = err.message; }
+});
+
 $('#logout').addEventListener('click', logout);
+
+/** Ajusta la interfaz al rol: el CSS oculta .admin-only y .staff-only según data-role. */
+function applyRole() {
+  const u = state.me.user;
+  document.body.dataset.role = u.role;
+  $('#user-label').textContent = ' ' + (u.name || u.username);
+  $('#user-btn').title = `${u.name || u.username} · ${u.roleLabel || 'Administrador'}${u.via === 'token' ? ' (token de administración)' : ''}`;
+  $('#client-options').innerHTML = state.me.clients.map((c) => `<option value="${esc(c.name)}">`).join('');
+  $('#create-form [name="client"]').required = role() !== 'admin';
+}
 
 // ---------- carga y render ----------
 
@@ -140,12 +231,20 @@ function renderSummary() {
   $('#t-online').textContent = s.online;
   $('#t-online-s').textContent = s.enabled ? `${Math.round((s.online / s.enabled) * 100)}% de las habilitadas` : 'sin máquinas';
   $('#t-services').textContent = s.services;
-  $('#t-traffic').textContent = s.frps.reachable ? bytes((s.frps.totalTrafficIn || 0) + (s.frps.totalTrafficOut || 0)) : '–';
+  if (s.frps.totalTrafficIn === undefined) {
+    // Rol cliente: tráfico de hoy de sus servicios (el total de frps es de toda la plataforma)
+    const today = state.machines.flatMap((m) => m.services).reduce((n, x) => n + (x.trafficInToday || 0) + (x.trafficOutToday || 0), 0);
+    $('#t-traffic').textContent = bytes(today);
+    $('#t-traffic').nextElementSibling.textContent = 'hoy en sus servicios';
+  } else {
+    $('#t-traffic').textContent = s.frps.reachable ? bytes((s.frps.totalTrafficIn || 0) + (s.frps.totalTrafficOut || 0)) : '–';
+  }
   const pill = $('#frps-pill');
   pill.innerHTML = s.frps.reachable
     ? `<span class="dot online" style="margin:0"></span> frps ${esc(s.frps.version)} · ${esc(s.frps.publicAddr)}:${s.frps.bindPort}`
     : `<span class="dot" style="margin:0;background:var(--red)"></span> frps sin respuesta`;
   pill.title = s.frps.reachable ? `Dominio: *.${s.frps.subdomainHost}` : s.frps.error || '';
+  if (!s.ai) return; // rol cliente: sin IA ni alertas
   const aiBtn = $('#ai-btn');
   aiBtn.classList.toggle('on', !!s.ai?.ready);
   $('#ai-badge').textContent = s.ai?.pending || '';
@@ -173,7 +272,7 @@ function serviceLine(s) {
     return `<div class="svc">
     ${typeTag(s.type)}
     <span class="name">${esc(s.name)}</span>
-    <span class="url ${live ? '' : 'off'}">🔒 :${s.localPort} · ${plural(s.access.length, 'acceso')}</span>
+    <span class="url ${live ? '' : 'off'}">🔒 :${s.localPort}${s.access ? ' · ' + plural(s.access.length, 'acceso') : ' · privado'}</span>
     <span class="tag state-${s.status}">${SVC_LABEL[s.status] || s.status}</span>
   </div>`;
   }
@@ -209,14 +308,14 @@ function renderMachines() {
       <div class="card-head">
         <span class="dot ${st}"></span>
         <div class="card-title">
-          <h3>${esc(m.name)}${m.alerts ? '' : ' <span class="muted-bell" title="Alertas desactivadas">🔕</span>'}</h3>
+          <h3>${esc(m.name)}${m.alerts !== false ? '' : ' <span class="muted-bell" title="Alertas desactivadas">🔕</span>'}</h3>
           ${m.client ? `<div class="client">${esc(m.client)}</div>` : ''}
           <div class="id">${esc(m.id)}</div>
         </div>
       </div>
       <div class="meta">${conn}</div>
-      ${m.services.length ? m.services.map(serviceLine).join('') : (m.visits.length ? '' : '<div class="no-svc">Sin servicios publicados</div>')}
-      ${m.visits.length ? `<div class="visits-line">🔑 Entra a ${plural(m.visits.length, 'servicio privado', 'servicios privados')}</div>` : ''}
+      ${m.services.length ? m.services.map(serviceLine).join('') : (m.visits?.length ? '' : '<div class="no-svc">Sin servicios publicados</div>')}
+      ${m.visits?.length ? `<div class="visits-line">🔑 Entra a ${plural(m.visits.length, 'servicio privado', 'servicios privados')}</div>` : ''}
     </article>`;
   }).join('');
 }
@@ -225,7 +324,7 @@ function eventItem(e, withMachine = true) {
   return `<li class="${EVENT_STYLE[e.kind] || ''}">
     <div class="ev-kind">${esc(EVENT_LABEL[e.kind] || e.kind)}${withMachine && e.machine_id ? ` · <span style="color:var(--purple)">${esc(e.machine_id)}</span>` : ''}</div>
     ${e.detail ? `<div class="ev-detail">${esc(e.detail)}</div>` : ''}
-    <div class="ev-meta" title="${esc(dateTime(e.ts))}">${ago(e.ts)}</div>
+    <div class="ev-meta" title="${esc(dateTime(e.ts))}">${ago(e.ts)}${e.actor ? ` · por <b>${esc(e.actor)}</b>` : ''}</div>
   </li>`;
 }
 
@@ -271,13 +370,13 @@ async function renderDrawer() {
       <button class="btn icon" data-act="close" title="Cerrar">✕</button>
     </div>
     ${m.description ? `<p style="color:var(--muted);margin-top:0">${esc(m.description)}</p>` : ''}
-    <div class="actions">
+    ${isStaff() ? `<div class="actions">
       <button class="btn small" data-act="toggle">${m.enabled ? 'Deshabilitar' : 'Habilitar'}</button>
       <button class="btn small" data-act="alerts" title="Avisar si esta máquina se desconecta">${m.alerts ? '🔔 Alertas activadas' : '🔕 Alertas apagadas'}</button>
       <button class="btn small primary" data-act="install">Generar instalador</button>
       <button class="btn small" data-act="rotate">Rotar token</button>
       <button class="btn small danger" data-act="delete">Eliminar</button>
-    </div>
+    </div>` : ''}
 
     <section>
       <h4>Conexión</h4>
@@ -299,13 +398,16 @@ async function renderDrawer() {
         <thead><tr><th>Servicio</th><th class="hide-sm">Local</th><th>Público</th><th class="hide-sm">Hoy</th><th></th></tr></thead>
         <tbody>${m.services.map((s) => `<tr>
           <td>${typeTag(s.type)} ${esc(s.name)}<br><span class="tag state-${s.status}" style="margin-top:4px;display:inline-block">${SVC_LABEL[s.status] || s.status}</span></td>
-          <td class="hide-sm" style="font-family:var(--code);font-size:11px">${esc(s.localIp)}:${s.localPort}${s.tlsMode ? `<br><span style="color:var(--dim)">TLS ${s.tlsMode === 'local' ? 'en la máquina' : 'del servicio'}</span>` : ''}</td>
-          <td class="url">${s.private ? privateCell(m, s) : `<a href="#" data-copy-text="${esc(s.publicUrl)}" title="Copiar">${esc(s.publicUrl)}</a>`}</td>
+          <td class="hide-sm" style="font-family:var(--code);font-size:11px">${esc(s.localIp || '')}${s.localIp ? ':' : 'puerto '}${s.localPort}${s.tlsMode ? `<br><span style="color:var(--dim)">TLS ${s.tlsMode === 'local' ? 'en la máquina' : 'del servicio'}</span>` : ''}</td>
+          <td class="url">${s.private ? (isStaff() ? privateCell(m, s) : '<span class="lock" style="color:var(--amber)">🔒 Privado · acceso solo para soporte</span>')
+            : (s.type === 'http' || s.type === 'https') && !isStaff()
+              ? `<a href="${esc(s.publicUrl)}" target="_blank" rel="noopener">${esc(s.publicUrl)}</a>`
+              : `<a href="#" data-copy-text="${esc(s.publicUrl)}" title="Copiar">${esc(s.publicUrl)}</a>`}</td>
           <td class="hide-sm" style="white-space:nowrap">↓ ${bytes(s.trafficInToday)}<br>↑ ${bytes(s.trafficOutToday)}</td>
-          <td><button class="btn icon small danger" data-del-svc="${esc(s.name)}" title="Eliminar servicio">✕</button></td>
+          <td>${isStaff() ? `<button class="btn icon small danger" data-del-svc="${esc(s.name)}" title="Eliminar servicio">✕</button>` : ''}</td>
         </tr>`).join('')}</tbody></table>` : '<div style="color:var(--dim)">Sin servicios.</div>'}
 
-      <form id="add-svc-form" style="margin-top:14px">
+      ${isStaff() ? `<form id="add-svc-form" style="margin-top:14px">
         <label>Agregar servicio</label>
         <div class="presets">Atajos privados:
           <button type="button" class="btn small" data-preset="ssh">SSH :22</button>
@@ -323,19 +425,19 @@ async function renderDrawer() {
         </div>
         <div class="hint">Después de agregar o quitar servicios, descargue el frpc.toml de nuevo y conserve el token actual en la línea metadatas.token.
           Los <b>privados</b> no abren puertos en internet: solo entran las máquinas a las que les dé acceso.</div>
-      </form>
+      </form>` : ''}
     </section>
 
-    ${visitsSection(m)}
+    ${isStaff() ? visitsSection(m) : ''}
 
-    <section>
+    ${isStaff() ? `<section>
       <h4>🤖 Inteligencia artificial</h4>
       <div class="ai-summary" id="ai-summary">${m.ai ? 'Alcance habilitado' : 'La IA no tiene alcance sobre esta máquina'}</div>
       <div class="actions" style="margin-top:10px">
         <button class="btn small primary" data-ai-act="chat">Abrir asistente</button>
         <button class="btn small" data-ai-act="scope">Configurar alcance</button>
       </div>
-    </section>
+    </section>` : ''}
 
     <section>
       <h4>Actividad de la máquina</h4>
@@ -346,7 +448,7 @@ async function renderDrawer() {
     const f = $('#add-svc-form', d);
     for (const [k, v] of Object.entries(formValues)) if (f.elements[k]) f.elements[k].value = v;
   }
-  if (typeof aiDrawerSummary === 'function') aiDrawerSummary(m);
+  if (isStaff() && typeof aiDrawerSummary === 'function') aiDrawerSummary(m);
 }
 
 $('#drawer').addEventListener('click', async (e) => {
@@ -780,17 +882,26 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const open = $$('.overlay').find((o) => !o.classList.contains('hidden'));
+  if (open?.dataset.locked) return; // cambio de contraseña obligatorio
   if (open) open.classList.add('hidden'); else if (state.openId) closeDrawer();
 });
 
 // ---------- arranque ----------
 
-function start() {
+async function start() {
+  try { state.me = await api('GET', '/auth/me'); }
+  catch { return endSession(); }
+  applyRole();
   showApp();
+  if (state.me.user.mustChangePassword) openAccount(true);
   refresh();
   clearInterval(state.timer);
   state.timer = setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 }
 
+// Arranque: token guardado en esta pestaña, o la cookie de sesión si sigue vigente
 try { state.token = sessionStorage.getItem(TOKEN_KEY); } catch {}
-if (state.token) start(); else showLogin();
+(async () => {
+  try { state.me = await api('GET', '/auth/me', null, { quiet401: true }); start(); }
+  catch { state.token = null; showLogin(); }
+})();

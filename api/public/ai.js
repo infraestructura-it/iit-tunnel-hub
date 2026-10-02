@@ -66,8 +66,17 @@ async function openAI(machine = null) {
   $('#ai-sub').textContent = machine
     ? `${machine.client ? machine.client + ' · ' : ''}Solo opera sobre esta máquina y su alcance.`
     : 'Pregunte por el estado de las máquinas o pida diagnósticos.';
-  $('#ai-settings-tab').classList.toggle('hidden', !!machine);
+  const isAdmin = state.me?.user?.role === 'admin';
+  $('#ai-settings-tab').classList.toggle('hidden', !!machine || !isAdmin);
   $('#ai-modal').classList.remove('hidden');
+  if (!isAdmin) {
+    // Los técnicos no ven los ajustes: solo si la IA está lista
+    showTab('chat');
+    if (!state.summary?.ai?.ready) { $('#ai-chat').innerHTML = '<div class="chat-empty">La IA no está configurada. Pídale al administrador que la active.</div>'; return; }
+    await loadChat();
+    $('#ai-text').focus();
+    return;
+  }
   const s = await api('GET', '/ai/settings').catch(() => null);
   if (!s?.enabled || !(s.apiKeyMasked)) {
     showTab(machine ? 'chat' : 'settings');

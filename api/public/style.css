@@ -319,3 +319,36 @@ pre.code { background: #05070b; border: 1px solid var(--line-2); border-radius: 
   .hide-sm { display: none; }
   .drawer { padding: 18px 16px; }
 }
+
+/* ---------- usuarios y roles ---------- */
+body:not([data-role="admin"]) .admin-only { display: none !important; }
+body[data-role="cliente"] .staff-only { display: none !important; }
+.login-alt { display: block; margin-top: 16px; text-align: center; font-size: 12px; color: var(--muted); text-decoration: none; }
+.login-alt:hover { color: var(--cyan); }
+.login-card code { font-family: var(--code); color: var(--amber); }
+.user-btn .lbl { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+.users-modal { max-width: 860px; }
+.users-table tr.off td { opacity: .55; }
+.badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.tag.role-admin { color: var(--purple); border-color: rgba(167,139,250,.4); }
+.tag.role-tecnico { color: var(--cyan); border-color: rgba(34,211,238,.35); }
+.tag.role-cliente { color: var(--green); border-color: rgba(52,245,164,.35); }
+.tag.bad { color: var(--red); border-color: rgba(251,113,133,.4); }
+.tag.warn { color: var(--amber); border-color: rgba(251,191,36,.4); }
+.user-form { margin-top: 8px; border-top: 1px solid var(--line); }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 12px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; }
+.check { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text); cursor: pointer; }
+.check input { width: auto; }
+.ok-line { color: var(--green); font-size: 13px; }
+.totp-setup { display: grid; grid-template-columns: 188px minmax(0, 1fr); gap: 16px; align-items: start; }
+.totp-setup > div { min-width: 0; }
+.totp-setup .row { flex-wrap: wrap; }
+.totp-setup .qr { background: #fff; border-radius: 8px; padding: 4px; width: 188px; min-height: 188px; box-sizing: border-box; display: grid; place-items: center; }
+.totp-setup .qr svg { display: block; width: 180px; height: 180px; }
+.totp-setup .qr .hint { color: #333; padding: 8px; text-align: center; }
+.totp-setup .steps { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; }
+.totp-setup code { font-family: var(--code); color: var(--amber); cursor: pointer; word-break: break-all; }
+@media (max-width: 760px) {
+  .totp-setup { grid-template-columns: 1fr; }
+  .totp-setup .qr { justify-self: center; }
+}

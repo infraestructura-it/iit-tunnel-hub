@@ -1,4 +1,4 @@
-# iniciar-local.ps1 — arranca IIT Tunnel Hub en este equipo para pruebas
+﻿# iniciar-local.ps1 — arranca IIT Tunnel Hub en este equipo para pruebas
 # Uso (desde la carpeta iit-tunnel-hub):
 #   powershell -ExecutionPolicy Bypass -File .\iniciar-local.ps1
 
@@ -45,4 +45,5 @@ if (Test-Path "$root\frp\frps.exe") {
 
 Start-Sleep -Seconds 1
 Start-Process "http://127.0.0.1:$env:PORT"
-Write-Host "Token del panel: $env:ADMIN_TOKEN" -ForegroundColor Green
+Write-Host "Token de administración: $env:ADMIN_TOKEN" -ForegroundColor Green
+Write-Host "La primera vez, el panel pide crear el administrador con ese token; después entre con su usuario." -ForegroundColor Gray

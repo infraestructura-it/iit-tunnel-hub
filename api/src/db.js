@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
+const { currentActor } = require('./context');
 
 // Tabla de servicios. stcp = servicio privado: sin puerto público, solo visitantes autorizados (secret = clave stcp)
 const SERVICES_TABLE = (name) => `
@@ -56,6 +57,50 @@ ${SERVICES_TABLE('services')}
       detail      TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS events_machine_ts ON events (machine_id, ts DESC);
+
+    -- Clientes de IIT: agrupan máquinas y definen qué ve cada técnico y cada usuario de cliente
+    CREATE TABLE IF NOT EXISTS clients (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      created_at  INTEGER NOT NULL
+    );
+
+    -- Personas que entran al panel. role: admin | tecnico | cliente
+    CREATE TABLE IF NOT EXISTS users (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      username        TEXT NOT NULL UNIQUE,
+      name            TEXT NOT NULL DEFAULT '',
+      role            TEXT NOT NULL CHECK (role IN ('admin','tecnico','cliente')),
+      client_id       TEXT REFERENCES clients(id) ON DELETE CASCADE,  -- solo rol cliente
+      password_hash   TEXT NOT NULL,
+      must_change     INTEGER NOT NULL DEFAULT 1,
+      totp_secret     TEXT,
+      totp_enabled    INTEGER NOT NULL DEFAULT 0,
+      totp_last_step  INTEGER NOT NULL DEFAULT 0,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      failed_count    INTEGER NOT NULL DEFAULT 0,
+      locked_until    INTEGER,
+      created_at      INTEGER NOT NULL,
+      last_login_at   INTEGER
+    );
+
+    -- Clientes asignados a cada técnico
+    CREATE TABLE IF NOT EXISTS user_clients (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      client_id  TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      PRIMARY KEY (user_id, client_id)
+    );
+
+    -- Sesiones del panel: se guarda el hash del token de la cookie, nunca el token
+    CREATE TABLE IF NOT EXISTS sessions (
+      id          TEXT PRIMARY KEY,
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER NOT NULL,
+      last_seen   INTEGER NOT NULL,
+      ip          TEXT NOT NULL DEFAULT '',
+      user_agent  TEXT NOT NULL DEFAULT ''
+    );
 
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
@@ -115,6 +160,26 @@ function migrate(db) {
   add('state_since', 'INTEGER');                        // desde cuándo está en ese estado
   add('offline_alerted', 'INTEGER NOT NULL DEFAULT 0'); // 0 pendiente · 1 avisada · 2 sin aviso
   add('ai_scope', "TEXT NOT NULL DEFAULT '{}'");        // alcance de la IA (JSON, ver ai-scope.js)
+  add('client_id', 'TEXT REFERENCES clients(id) ON DELETE SET NULL'); // cliente al que pertenece (client = su nombre)
+
+  const evCols = new Set(db.prepare('PRAGMA table_info(events)').all().map((c) => c.name));
+  if (!evCols.has('actor')) db.exec('ALTER TABLE events ADD COLUMN actor TEXT'); // usuario que hizo el cambio
+
+  // El cliente era un texto libre en cada máquina: se crean los clientes y se enlazan por nombre
+  const orphans = db.prepare("SELECT DISTINCT client FROM machines WHERE client_id IS NULL AND TRIM(client) <> ''").all();
+  for (const { client } of orphans) {
+    const name = client.trim();
+    let c = db.prepare('SELECT id FROM clients WHERE name = ?').get(name);
+    if (!c) {
+      const base = clientSlug(name);
+      let id = base;
+      for (let i = 2; db.prepare('SELECT 1 FROM clients WHERE id = ?').get(id); i++) id = `${base.slice(0, 28)}-${i}`;
+      db.prepare('INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)').run(id, name, now());
+      c = { id };
+    }
+    db.prepare("UPDATE machines SET client_id = ? WHERE client_id IS NULL AND TRIM(client) = ?").run(c.id, name);
+  }
+  if (orphans.length) db.exec('UPDATE machines SET client = (SELECT name FROM clients WHERE id = machines.client_id) WHERE client_id IS NOT NULL');
 
   // services: el CHECK de tipo no admitía 'stcp' y faltaba la columna secret. SQLite no altera
   // un CHECK: se reconstruye la tabla conservando ids y datos.
@@ -136,14 +201,20 @@ function migrate(db) {
 
 const now = () => Math.floor(Date.now() / 1000);
 
+function clientSlug(name) {
+  const s = String(name).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32).replace(/-+$/, '');
+  return s || 'cliente';
+}
+
 class Store {
   constructor(db) {
     this.db = db;
     this.q = {
       listMachines: db.prepare('SELECT * FROM machines ORDER BY client, name'),
       getMachine: db.prepare('SELECT * FROM machines WHERE id = ?'),
-      insertMachine: db.prepare(`INSERT INTO machines (id, name, client, description, token_hash, enabled, created_at, updated_at)
-                                 VALUES (?, ?, ?, ?, ?, 1, ?, ?)`),
+      insertMachine: db.prepare(`INSERT INTO machines (id, name, client, client_id, description, token_hash, enabled, created_at, updated_at)
+                                 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`),
       deleteMachine: db.prepare('DELETE FROM machines WHERE id = ?'),
       setToken: db.prepare('UPDATE machines SET token_hash = ?, updated_at = ? WHERE id = ?'),
       recordLogin: db.prepare(`UPDATE machines SET last_login_at = ?, last_client_address = ?, last_hostname = ?,
@@ -166,7 +237,7 @@ class Store {
       subdomainOwner: db.prepare('SELECT machine_id, name FROM services WHERE subdomain = ?'),
       usedPorts: db.prepare('SELECT remote_port FROM services WHERE remote_port IS NOT NULL'),
 
-      insertEvent: db.prepare('INSERT INTO events (ts, machine_id, kind, detail) VALUES (?, ?, ?, ?)'),
+      insertEvent: db.prepare('INSERT INTO events (ts, machine_id, kind, detail, actor) VALUES (?, ?, ?, ?, ?)'),
       lastEvent: db.prepare('SELECT * FROM events WHERE kind = ? AND detail = ? AND (machine_id IS ? ) ORDER BY id DESC LIMIT 1'),
       recentEvents: db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?'),
       machineEvents: db.prepare('SELECT * FROM events WHERE machine_id = ? ORDER BY id DESC LIMIT ?'),
@@ -237,14 +308,14 @@ class Store {
   listMachines() { return this.q.listMachines.all(); }
   getMachine(id) { return this.q.getMachine.get(id) || null; }
 
-  createMachine({ id, name, client, description, tokenHash }) {
+  createMachine({ id, name, client, clientId = null, description, tokenHash }) {
     const t = now();
-    this.q.insertMachine.run(id, name, client, description, tokenHash, t, t);
+    this.q.insertMachine.run(id, name, client, clientId, description, tokenHash, t, t);
     return this.getMachine(id);
   }
 
   updateMachine(id, fields) {
-    const allowed = ['name', 'client', 'description', 'enabled', 'alerts'];
+    const allowed = ['name', 'client', 'client_id', 'description', 'enabled', 'alerts'];
     const sets = [];
     const values = [];
     for (const k of allowed) {
@@ -301,14 +372,90 @@ class Store {
       const last = this.q.lastEvent.get(kind, detail, machineId ?? null);
       if (last && t - last.ts < dedupeSeconds) return;
     }
-    this.q.insertEvent.run(t, machineId ?? null, kind, detail);
+    this.q.insertEvent.run(t, machineId ?? null, kind, detail, currentActor());
     if (Math.random() < 0.02) this.q.pruneEvents.run(5000);
   }
 
-  events({ machineId, limit = 100 }) {
+  /** visible(machineId) filtra para usuarios con alcance limitado (los eventos sin máquina quedan fuera). */
+  events({ machineId, limit = 100, visible = null }) {
     const n = Math.min(Math.max(limit, 1), 500);
-    return machineId ? this.q.machineEvents.all(machineId, n) : this.q.recentEvents.all(n);
+    if (machineId || !visible) return machineId ? this.q.machineEvents.all(machineId, n) : this.q.recentEvents.all(n);
+    const out = [];
+    for (let offset = 0; out.length < n && offset < 20000; offset += 500) {
+      const page = this.db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT 500 OFFSET ?').all(offset);
+      if (!page.length) break;
+      for (const e of page) if (e.machine_id && visible(e.machine_id) && out.length < n) out.push(e);
+    }
+    return out;
   }
+
+  // ---------- clientes ----------
+  listClients() {
+    return this.db.prepare(`SELECT c.*, (SELECT COUNT(*) FROM machines m WHERE m.client_id = c.id) AS machines
+                            FROM clients c ORDER BY c.name`).all();
+  }
+  getClient(id) { return this.db.prepare('SELECT * FROM clients WHERE id = ?').get(id) || null; }
+  clientByName(name) { return this.db.prepare('SELECT * FROM clients WHERE name = ?').get(String(name).trim()) || null; }
+  createClient(name) {
+    const base = clientSlug(name);
+    let id = base;
+    for (let i = 2; this.getClient(id); i++) id = `${base.slice(0, 28)}-${i}`;
+    this.db.prepare('INSERT INTO clients (id, name, created_at) VALUES (?, ?, ?)').run(id, String(name).trim(), now());
+    return this.getClient(id);
+  }
+  renameClient(id, name) {
+    this.transaction(() => {
+      this.db.prepare('UPDATE clients SET name = ? WHERE id = ?').run(name, id);
+      this.db.prepare('UPDATE machines SET client = ? WHERE client_id = ?').run(name, id);
+    });
+    return this.getClient(id);
+  }
+  deleteClient(id) { return this.db.prepare('DELETE FROM clients WHERE id = ?').run(id).changes > 0; }
+
+  // ---------- usuarios ----------
+  countUsers() { return this.db.prepare('SELECT COUNT(*) AS n FROM users').get().n; }
+  countAdmins(exceptId = 0) { return this.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND enabled = 1 AND id <> ?").get(exceptId).n; }
+  listUsers() { return this.db.prepare('SELECT * FROM users ORDER BY role, username').all(); }
+  getUser(id) { return this.db.prepare('SELECT * FROM users WHERE id = ?').get(Number(id)) || null; }
+  userByName(username) { return this.db.prepare('SELECT * FROM users WHERE username = ?').get(String(username)) || null; }
+  createUser(u) {
+    const r = this.db.prepare(`INSERT INTO users (username, name, role, client_id, password_hash, must_change, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)`).run(u.username, u.name || '', u.role, u.clientId ?? null, u.passwordHash, u.mustChange ? 1 : 0, now());
+    return this.getUser(Number(r.lastInsertRowid));
+  }
+  updateUser(id, fields) {
+    const allowed = ['name', 'role', 'client_id', 'password_hash', 'must_change', 'totp_secret', 'totp_enabled', 'totp_last_step', 'enabled', 'failed_count', 'locked_until', 'last_login_at'];
+    const sets = []; const values = [];
+    for (const k of allowed) if (fields[k] !== undefined) { sets.push(`${k} = ?`); values.push(fields[k]); }
+    if (sets.length) this.db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...values, Number(id));
+    return this.getUser(id);
+  }
+  deleteUser(id) { return this.db.prepare('DELETE FROM users WHERE id = ?').run(Number(id)).changes > 0; }
+  userClientIds(userId) { return this.db.prepare('SELECT client_id FROM user_clients WHERE user_id = ?').all(Number(userId)).map((r) => r.client_id); }
+  setUserClients(userId, ids) {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM user_clients WHERE user_id = ?').run(Number(userId));
+      const ins = this.db.prepare('INSERT INTO user_clients (user_id, client_id) VALUES (?, ?)');
+      for (const c of new Set(ids)) ins.run(Number(userId), c);
+    });
+  }
+
+  // ---------- sesiones ----------
+  createSession(idHash, userId, { ip = '', userAgent = '', hours }) {
+    const t = now();
+    this.db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(t);
+    this.db.prepare('INSERT INTO sessions (id, user_id, created_at, expires_at, last_seen, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(idHash, userId, t, t + hours * 3600, t, String(ip).slice(0, 64), String(userAgent).slice(0, 200));
+  }
+  getSession(idHash) {
+    const s = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(idHash);
+    if (!s) return null;
+    if (s.expires_at < now()) { this.deleteSession(idHash); return null; }
+    if (now() - s.last_seen > 60) this.db.prepare('UPDATE sessions SET last_seen = ? WHERE id = ?').run(now(), idHash);
+    return s;
+  }
+  deleteSession(idHash) { this.db.prepare('DELETE FROM sessions WHERE id = ?').run(idHash); }
+  deleteUserSessions(userId, exceptIdHash = '') { this.db.prepare('DELETE FROM sessions WHERE user_id = ? AND id <> ?').run(Number(userId), exceptIdHash); }
 
   transaction(fn) {
     this.db.exec('BEGIN');
@@ -317,4 +464,4 @@ class Store {
   }
 }
 
-module.exports = { open };
+module.exports = { open, clientSlug };
