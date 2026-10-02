@@ -51,6 +51,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `frps/frps.toml` | Config de frps; toma valores con `{{ .Envs.X }}` |
 | `iniciar-local.ps1` | Arranque local en Windows (hub + frps) |
 | `frp.ps1` | Descarga `frpc.exe`/`frps.exe` a `frp/` |
+| `actualizar.ps1` | Aplica un zip de actualización: detiene hub (solo puerto 8090)/frps/frpc, copia sin tocar `frp/`, `data/`, `.git`, `.env`, `frpc-*.toml`, rearranca y relanza los frpc previos |
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
@@ -71,6 +72,7 @@ ADMIN_TOKEN=... node --disable-warning=ExperimentalWarning api/src/server.js
 powershell -ExecutionPolicy Bypass -File .\frp.ps1            # una vez
 powershell -ExecutionPolicy Bypass -File .\iniciar-local.ps1  # hub + frps, abre http://127.0.0.1:8090
 cd frp; .\frpc.exe -c .\frpc-<maquina>.toml                   # conectar una máquina
+powershell -ExecutionPolicy Bypass -File .\actualizar.ps1     # aplica el iit-tunnel-hub*.zip más reciente de C:\descargas o Descargas
 ```
 
 Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios http: `http://<servicio>-<maquina>.localhost:8081` (Chrome/Edge resuelven `*.localhost`).
