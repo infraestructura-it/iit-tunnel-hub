@@ -1,0 +1,220 @@
+\# CLAUDE.md — IIT Tunnel Hub
+
+
+
+Guía para trabajar en este repositorio con Claude Code. Responder y documentar en \*\*español\*\*.
+
+
+
+\## Qué es
+
+
+
+Panel + API para \*\*registrar y monitorear máquinas conectadas por túneles frp\*\* (modelo tipo Home Assistant Cloud / SniTun).
+
+Cada equipo de cliente corre `frpc`, abre un túnel saliente hacia `frps` y queda publicado en `<servicio>-<maquina>.<dominio>`
+
+o en un puerto TCP. El hub decide qué entra: funciona como \*\*server plugin de frps\*\*.
+
+
+
+Proyecto de Infraestructura-IT (IIT), org GitHub `infraestructura-it`.
+
+
+
+\## Arquitectura
+
+
+
+```
+
+Navegador ─▶ frps :80/:443(SNI)/rango TCP ─┐
+
+&#x20;                   │  pregunta antes de aceptar
+
+&#x20;                   └─▶ hub :9000 (plugin, solo 127.0.0.1) ── SQLite
+
+Técnico ───▶ hub :8080 (panel + API REST, ADMIN\_TOKEN)
+
+&#x20;                   └─▶ lee estado en vivo de frps :7500 (dashboard API)
+
+Máquina cliente: frpc ──túnel saliente──▶ frps :7000
+
+```
+
+
+
+\- \*\*Dos servidores HTTP en un solo proceso Node\*\* (`api/src/server.js`): panel/API (`PORT`) y plugin de frps (`PLUGIN\_PORT`).
+
+\- \*\*frps falla cerrado\*\*: si el hub no responde, rechaza logins. Reiniciar el hub desconecta las máquinas unos segundos.
+
+
+
+\## Stack y convenciones
+
+
+
+\- \*\*Node.js ≥ 22.13 sin dependencias npm.\*\* SQLite con el módulo nativo `node:sqlite` (`DatabaseSync`). No agregar paquetes sin necesidad clara.
+
+\- \*\*Frontend vanilla\*\* HTML/CSS/JS en `api/public/` (sin frameworks, sin build). Estética oscura IIT: fondo `#080b10`, cian/verde/morado, fuentes Syne / Space Mono / DM Mono.
+
+\- Todo el texto de UI, errores de API, eventos y comentarios en \*\*español\*\*.
+
+\- frp \*\*v0.71.0\*\*, configuración en \*\*TOML\*\* (el formato INI está obsoleto). Fijar la versión en `frp.ps1`, `frps/Dockerfile`, `deploy/\*.sh` y `test/e2e.sh` a la vez.
+
+
+
+\## Archivos
+
+
+
+| Ruta | Qué hace |
+
+|---|---|
+
+| `api/src/server.js` | Rutas REST, servidor del plugin, estáticos, arranque |
+
+| `api/src/plugin.js` | Lógica del server plugin (Login, NewProxy, CloseProxy, NewUserConn, NewWorkConn, Ping) |
+
+| `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml` |
+
+| `api/src/db.js` | Esquema SQLite (`machines`, `services`, `events`) y consultas |
+
+| `api/src/frps.js` | Cliente de la API del dashboard de frps (caché 3 s) |
+
+| `api/src/config.js` | Variables de entorno |
+
+| `frps/frps.toml` | Config de frps; toma valores con `{{ .Envs.X }}` |
+
+| `iniciar-local.ps1` | Arranque local en Windows (hub + frps) |
+
+| `frp.ps1` | Descarga `frpc.exe`/`frps.exe` a `frp/` |
+
+| `deploy/install.sh` | Instalación en Linux con systemd |
+
+| `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
+
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (34 casos) |
+
+
+
+\## Comandos
+
+
+
+```bash
+
+\# Pruebas (Linux/WSL; descarga frp en .frp/ si falta)
+
+./test/e2e.sh
+
+
+
+\# Hub en desarrollo (Linux)
+
+ADMIN\_TOKEN=... node --disable-warning=ExperimentalWarning api/src/server.js
+
+```
+
+
+
+```powershell
+
+\# Windows local
+
+powershell -ExecutionPolicy Bypass -File .\\frp.ps1            # una vez
+
+powershell -ExecutionPolicy Bypass -File .\\iniciar-local.ps1  # hub + frps, abre http://127.0.0.1:8090
+
+cd frp; .\\frpc.exe -c .\\frpc-<maquina>.toml                   # conectar una máquina
+
+```
+
+
+
+Panel local: `http://127.0.0.1:8090`, token `prueba-local-1234567890`. Servicios http: `http://<servicio>-<maquina>.localhost:8081` (Chrome/Edge resuelven `\*.localhost`).
+
+
+
+\## Reglas de seguridad (no romper)
+
+
+
+\- El hub guarda \*\*solo el hash\*\* del token de máquina; el token se muestra una vez (registro o rotación).
+
+\- `GET /api/machines/:id/frpc.toml` \*\*nunca\*\* incluye el token (pone `PEGUE\_AQUI\_EL\_TOKEN...`).
+
+\- `NewProxy` exige que el servicio exista con el mismo tipo y subdominio/puerto; `customDomains` siempre se rechaza.
+
+\- `NewUserConn`, `NewWorkConn` y `Ping` revisan que la máquina siga habilitada: deshabilitar/eliminar corta tráfico y expulsa.
+
+\- Ante error interno el plugin \*\*rechaza\*\* (falla cerrado). Mantenerlo así.
+
+\- El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
+
+\- \*\*Nunca commitear\*\*: `.env`, `frp/`, `\*.exe`, `frpc-\*.toml` (llevan tokens), `data/`, `\*.db`. Ya están en `.gitignore`.
+
+
+
+\## frp v0.71: detalles verificados
+
+
+
+\- Plugin: `POST /frp/handler?op=<Op>`; respuesta `{reject, reject\_reason}` o `{reject:false, unchange:true}`.
+
+\- frps antepone el usuario al nombre del proxy: `"<maquina>.<servicio>"`.
+
+\- El tipo `http` \*\*no\*\* pasa por `NewUserConn`; por eso se intercepta también `NewWorkConn`.
+
+\- Dashboard API usada: `/api/serverinfo`, `/api/clients` (incluye `online`), `/api/proxy/{http,https,tcp}`. No hay endpoint para expulsar un cliente: se hace rechazando `Ping`.
+
+\- `transport.heartbeatTimeout` debe ser > 0 en frps para que el rechazo de `Ping` expulse.
+
+\- `https` con `tlsMode: "local"` usa el plugin `https2http` de frpc: el TLS termina en la máquina, frps solo enruta por SNI.
+
+\- Error `token in login doesn't match token from configuration` = no coincide el \*\*token global\*\* (`auth.token`) entre frps y frpc; no tiene que ver con el token de máquina (ese error sería "token inválido" desde el hub).
+
+
+
+\## Problemas conocidos en Windows (equipos de desarrollo)
+
+
+
+\- \*\*PowerShell: `$env:X = ""` BORRA la variable\*\* en vez de dejarla vacía. Por eso `iniciar-local.ps1` usa `FRP\_AUTH\_TOKEN = "iit-local-frp"`, y los `frpc.toml` locales deben llevar `auth.token = "iit-local-frp"`.
+
+\- \*\*Windows Defender marca frp como HackTool\*\* y borra `frps.exe`/`frpc.exe`. Sin admin no se puede agregar exclusión; alternativa: binarios Linux de frp dentro de WSL.
+
+\- \*\*WSL 2 sin `networkingMode=mirrored`\*\*: Windows llega a `localhost` de WSL, pero WSL \*\*no\*\* llega al `localhost` de Windows. Si frps corre en WSL y el hub en Windows, hace falta modo espejo (Windows 11 22H2+).
+
+\- \*\*Puertos ocupados en el PC de oficina\*\*: 8080 (iit-monitor-ups, node) y 9000 (puente RUNT 2.0, no detener). Por eso el entorno local usa 8090 (panel) y 9100 (plugin).
+
+\- \*\*El proyecto vive en OneDrive\*\* y se usa desde dos perfiles (`Infraestructura02` y `User01`). `data/hub.db` se sincroniza: \*\*no correr el hub en ambos PC a la vez\*\*. Opción: `DB\_PATH` en `%LOCALAPPDATA%`.
+
+\- `\*.sh`, `\*.service` y `\*.toml` deben quedar con LF (`.gitattributes`); con CRLF fallan en Linux.
+
+
+
+\## Producción (pendiente)
+
+
+
+\- Destino: VPS o VM Linux propia. `docker compose up -d --build` (red del host) o `deploy/install.sh`.
+
+\- DNS en Cloudflare \*\*solo DNS (nube gris)\*\*: `tuneles.<dominio>` y `\*.clientes.<dominio>`.
+
+\- Si Nginx ya usa el 443: `stream` + `ssl\_preread` hacia frps (ver README).
+
+\- Las imágenes Docker aún \*\*no se han construido\*\* en un daemon real; validar en el primer despliegue.
+
+
+
+\## Pendientes / ideas
+
+
+
+\- Usuarios y roles (hoy un solo `ADMIN\_TOKEN`).
+
+\- Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
+
+\- Instalador de frpc para Windows (servicio con NSSM) generado desde el panel.
+
