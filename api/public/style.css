@@ -352,3 +352,38 @@ body[data-role="cliente"] .staff-only { display: none !important; }
   .totp-setup { grid-template-columns: 1fr; }
   .totp-setup .qr { justify-self: center; }
 }
+
+/* ---------- estado del hub y respaldos ---------- */
+.dot.warn { background: var(--amber); box-shadow: 0 0 8px rgba(251,191,36,.6); }
+.dot.down { background: var(--red); box-shadow: 0 0 8px rgba(251,113,133,.6); }
+.status-btn .dot { margin: 0; }
+.status-modal { max-width: 1040px; }
+.status-banner { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; background: var(--bg-2); }
+.status-banner.good { border-color: rgba(52,245,164,.4); color: var(--green); }
+.status-banner.warn { border-color: rgba(251,191,36,.45); color: var(--amber); }
+.status-banner.bad { border-color: rgba(251,113,133,.5); color: var(--red); }
+.status-banner ul { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; color: var(--text); }
+.status-banner li.bad { color: var(--red); }
+.status-banner li.warn { color: var(--amber); }
+.status-banner li.info { color: var(--muted); }
+.status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.status-card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.status-card h5 { margin: 0 0 10px; font-family: var(--display); font-size: 14px; color: var(--text); }
+.status-card .kv, .backup-info .kv { grid-template-columns: 120px minmax(0, 1fr); font-size: 12px; gap: 5px 10px; }
+.status-card code, .backup-info code, .restore-steps code { font-family: var(--code); font-size: 11px; color: #b9f5dd; word-break: break-all; }
+b.ok { color: var(--green); font-weight: 500; }
+b.ko { color: var(--red); font-weight: 500; }
+.dim { color: var(--dim); }
+.meter { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin-bottom: 10px; }
+.meter span { display: block; height: 100%; background: var(--cyan); }
+.meter span.warn { background: var(--amber); }
+.meter span.bad { background: var(--red); }
+.backup-info { margin-bottom: 12px; }
+.backup-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 8px; }
+.backup-form .switch { margin: 0 8px 8px 0; }
+.backup-form .field { margin: 0; min-width: 120px; }
+.restore-steps { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 8px; font-size: 13px; }
+@media (max-width: 760px) {
+  .status-grid { grid-template-columns: 1fr; }
+  .status-card .kv, .backup-info .kv { grid-template-columns: 1fr; }
+}

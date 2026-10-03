@@ -82,12 +82,14 @@ class TelegramBot {
         if (!c.enabled) { await sleep(5000); continue; }
         try {
           const updates = await this.#api('getUpdates', { offset: this.offset, timeout: 25, allowed_updates: ['message', 'callback_query'] }, 35000);
+          this.lastOkAt = Date.now(); this.lastError = null;
           for (const u of updates) {
             this.offset = u.update_id + 1;
             await this.#handle(u, c).catch((e) => this.log.error('telegram:', e.message));
           }
         } catch (e) {
           this.log.error('telegram:', e.message);
+          this.lastError = e.message;
           await sleep(5000);
         }
       }

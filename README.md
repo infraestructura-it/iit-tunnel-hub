@@ -225,6 +225,29 @@ No avisan las máquinas que nunca se han conectado, las deshabilitadas ni las qu
 - Deshabilitar un usuario, cambiarle el rol o restablecer su contraseña cierra sus sesiones.
 - El **`ADMIN_TOKEN`** sigue sirviendo para la API (`Authorization: Bearer`) y como llave de emergencia ("Entrar con el token de administración").
 
+## Respaldos y estado del hub
+
+**🩺 Estado** (solo administrador) muestra la salud del propio hub: proceso, base de datos, disco, frps (con latencia), plugin de frps (consultas, rechazos, errores), monitor de alertas, bot de Telegram, IA y errores de la API, más **advertencias**: frps caído, disco lleno, respaldos viejos o fallidos, administradores sin 2FA, `ADMIN_TOKEN` de ejemplo, panel expuesto sin HTTPS, sin canales de alertas… El punto del botón cambia de color (verde, ámbar, rojo).
+
+**Respaldos de `hub.db`**
+- Diarios a la hora elegida (por defecto 03:00, zona `TZ_ALERTS`); si el hub estaba apagado a esa hora, se hace al arrancar. También **Respaldar ahora**.
+- Copia en caliente con `VACUUM INTO` (consistente, sin detener nada), **sin las sesiones** del panel, verificada con `quick_check`, permisos 600.
+- Se conservan los últimos N automáticos (7 a 90); los manuales no se borran solos.
+- Con `BACKUP_KEY` se cifran con AES-256-GCM (`.db.enc`). Contienen claves de servicios privados, de la IA y del bot: cífrelos si salen del servidor.
+- Carpeta: `BACKUP_DIR` (por defecto `respaldos/` junto a `hub.db`). Si falla, se envía una alerta (`backup_failed`) por Telegram y webhooks.
+- Descarga y eliminación desde el panel; cópielos también fuera del servidor (NAS, nube).
+
+Restaurar (con el hub y frps detenidos):
+
+```bash
+node api/src/respaldo.js verificar respaldos/hub-…-auto.db          # revisa integridad y contenido
+BACKUP_KEY=… node api/src/respaldo.js restaurar respaldos/hub-….db.enc --hub-detenido
+```
+
+`restaurar` verifica el respaldo, guarda la base actual como `hub.db.antes-de-restaurar-…`, borra el `-wal`/`-shm` y la reemplaza (destino: `DB_PATH`). Todos deben iniciar sesión de nuevo.
+
+**Monitoreo externo**: `GET /api/health` (público) responde `{ok, status, checks}` con **200**, o **503** si la base no acepta escrituras o frps no responde. `status: "degradado"` indica que no hay respaldo correcto en 26 h. Sirve para Uptime Kuma, Node-RED o cualquier monitor HTTP.
+
 ## Inteligencia artificial (Claude)
 
 Botón **🤖 IA** del panel. En **Ajustes** se pega la clave de API de Claude (console.anthropic.com) y se elige el modelo (por defecto `claude-sonnet-5-5`).
@@ -270,6 +293,12 @@ Las rutas aceptan `Authorization: Bearer <ADMIN_TOKEN>` (acceso total) o la cook
 | PATCH / DELETE | `/api/users/:id` | `name`, `role`, `clients`, `client`, `enabled`, `resetPassword`, `resetTotp` (admin) |
 | GET / POST | `/api/clients` | Clientes visibles · crear (admin) |
 | PATCH / DELETE | `/api/clients/:id` | Renombrar (actualiza sus máquinas) · eliminar si no tiene máquinas (admin) |
+| GET | `/api/health` | Salud para monitores (público): 200 o 503 |
+| GET | `/api/status` | Estado completo del hub y advertencias (admin) |
+| GET | `/api/backups` | Respaldos, configuración, último resultado y próximo (admin) |
+| POST | `/api/backups` | Respaldar ahora (admin) |
+| PUT | `/api/backups/settings` | `{enabled, hour, keep}` (admin) |
+| GET / DELETE | `/api/backups/:nombre` | Descargar o eliminar un respaldo (admin) |
 | GET | `/api/summary` | Totales y estado de frps |
 | GET | `/api/machines` | Máquinas con servicios y estado en vivo |
 | POST | `/api/machines` | Registrar (devuelve token y frpc.toml) |
@@ -334,7 +363,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 141 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría.
+Levanta frps, el hub y frpc reales en localhost y verifica 159 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado.
 
 ## Límites conocidos
 

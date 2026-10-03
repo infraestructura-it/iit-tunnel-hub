@@ -99,6 +99,8 @@ function message(alert, tz) {
       return `✅ El servidor de túneles (frps) volvió a responder\nEstuvo caído ${duration(alert.downtimeSeconds)}`;
     case 'ai_analysis':
       return `🤖 Diagnóstico IA · ${m.name}${m.client ? ` · ${m.client}` : ''}\n${alert.analysis}`;
+    case 'backup_failed':
+      return `💾 Falló el respaldo ${alert.kind === 'auto' ? 'automático ' : ''}de la base del hub\n${alert.error || ''}`.trim();
     case 'test':
       return '🔔 Prueba de alertas de IIT Tunnel Hub\nSi recibe este mensaje, el canal está bien configurado.';
     default:
@@ -149,6 +151,8 @@ class AlertMonitor {
     this.running = false;
     // Estado de frps en memoria: si el hub reinicia con frps caído, se vuelve a avisar (es lo deseable)
     this.server = { down: false, since: null, alerted: false, error: null };
+    this.lastCheckAt = null; // para la página de estado
+    this.lastError = null;
   }
 
   start() {
@@ -180,7 +184,9 @@ class AlertMonitor {
   async tick() {
     if (this.running) return;
     this.running = true;
-    try { await this.#check(); } finally { this.running = false; }
+    try { await this.#check(); this.lastError = null; }
+    catch (e) { this.lastError = e.message; throw e; }
+    finally { this.running = false; this.lastCheckAt = now(); }
   }
 
   async #check() {

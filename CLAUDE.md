@@ -40,6 +40,10 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/src/context.js` | `AsyncLocalStorage` con el actor de la petición: `store.event()` lo guarda en `events.actor` |
 | `api/public/users.js` | Panel: mi cuenta (contraseña, 2FA con QR) y administración de usuarios y clientes |
 | `api/public/vendor/qrcode.js` | qrcode-generator 1.4.4 (MIT), servido localmente para el QR del 2FA |
+| `api/src/backup.js` | Respaldos: `VACUUM INTO`, sin sesiones, `quick_check`, cifrado AES-256-GCM opcional, programación diaria por zona horaria, retención |
+| `api/src/respaldo.js` | CLI: `verificar`, `descifrar`, `restaurar --hub-detenido` |
+| `api/src/status.js` | `/api/status` (estado y advertencias) y `/api/health` (200/503 para monitores) |
+| `api/public/estado.js` | Panel: modal 🩺 Estado y respaldos |
 | `api/src/plugin.js` | Lógica del server plugin (Login, NewProxy, CloseProxy, NewUserConn, NewWorkConn, Ping) |
 | `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml`, accesos stcp (`normalizeAccess`, `accessToml`, `rdpFile`) |
 | `api/src/db.js` | Esquema SQLite (`machines`, `services`, `service_access`, `clients`, `users`, `user_clients`, `sessions`, `events`, `settings`, `ai_*`), migraciones y consultas |
@@ -59,7 +63,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (141 casos) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (159 casos) |
 
 ## Comandos
 
@@ -92,6 +96,16 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Ante error interno el plugin **rechaza** (falla cerrado). Mantenerlo así.
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
+
+## Respaldos y estado: reglas (no romper)
+
+- Nombre `hub-AAAAMMDD-HHMMSSmmm-(auto|manual).db[.enc]` (UTC con milisegundos: dos seguidos no se pisan). Las rutas solo aceptan nombres que cumplan `NAME_RE` (sin rutas arbitrarias).
+- El respaldo se hace con `VACUUM INTO ?` en un temporal, se borran `sessions`, se verifica y luego se renombra o cifra. Nunca copiar `hub.db` a mano con el hub corriendo (WAL).
+- Programación: `lastSlot()` calcula la última hora programada en `TZ_ALERTS`; si `lastAutoAt` es anterior, toca respaldar (también al arrancar). La retención solo borra automáticos.
+- Fallo ⇒ evento `respaldo_fallido` + alerta `backup_failed` (monitor.notify) + `POST /api/backups` responde 500.
+- `/api/health` es público y no debe exponer datos: solo `ok`, `status`, `version` y `checks` booleanos. `/api/status` es solo admin.
+- Contadores `stats` (plugin y API) viven en memoria desde el arranque.
+- En pruebas, no usar `pkill -f`/`pgrep -f` con un patrón que aparezca en el propio comando: se mata la shell. Detener por puerto (`lsof -t -iTCP:<puerto>`) o `pidof`.
 
 ## Usuarios y permisos: reglas (no romper)
 

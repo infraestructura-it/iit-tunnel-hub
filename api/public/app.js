@@ -66,6 +66,7 @@ const EVENT_STYLE = {
   usuario_creado: 'info', usuario_modificado: 'info', usuario_eliminado: 'warn', cliente_creado: 'info', cliente_renombrado: 'info',
   cliente_eliminado: 'warn', cliente_cambiado: 'info', sesion_iniciada: 'good', login_fallido: 'bad', contrasena_cambiada: 'info',
   '2fa_activado': 'good', '2fa_desactivado': 'warn',
+  respaldo_creado: 'good', respaldo_fallido: 'bad', respaldo_descargado: 'info', respaldo_eliminado: 'warn', respaldos_configurados: 'info',
   acceso_otorgado: 'info', acceso_revocado: 'warn', clave_rotada: 'warn', reconexion: 'info', accesos_descargados: 'info',
 };
 const EVENT_LABEL = {
@@ -82,6 +83,8 @@ const EVENT_LABEL = {
   cliente_creado: 'Cliente creado', cliente_renombrado: 'Cliente renombrado', cliente_eliminado: 'Cliente eliminado',
   cliente_cambiado: 'Cambio de cliente', sesion_iniciada: 'Sesión iniciada', login_fallido: 'Ingreso fallido',
   contrasena_cambiada: 'Contraseña cambiada', '2fa_activado': '2FA activado', '2fa_desactivado': '2FA desactivado',
+  respaldo_creado: 'Respaldo creado', respaldo_fallido: 'Respaldo fallido', respaldo_descargado: 'Respaldo descargado',
+  respaldo_eliminado: 'Respaldo eliminado', respaldos_configurados: 'Respaldos configurados',
 };
 const TYPE_LABEL = { stcp: 'privado' };
 const typeTag = (t) => `<span class="tag ${t}">${TYPE_LABEL[t] || t}</span>`;
@@ -895,6 +898,7 @@ async function start() {
   showApp();
   if (state.me.user.mustChangePassword) openAccount(true);
   refresh();
+  if (typeof statusDot === 'function') statusDot();
   clearInterval(state.timer);
   state.timer = setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 }

@@ -479,7 +479,42 @@ sapi admin PATCH /users/$TID -d '{"enabled":false}' >/dev/null
 check "deshabilitar un usuario cierra su sesión" '[ "$(scode tec1 GET /machines)" = 401 ]'
 for m in $HOT $TM; do api DELETE /machines/$m >/dev/null; done
 
-echo "12. Configuración y limpieza"
+echo "12. Respaldos y estado del hub"
+H=$(curl -s -w " %{http_code}" $API/health)
+check "health público: 200 con base y frps bien" '[ "${H##* }" = 200 ] && echo "${H% *}" | jq -e ".ok and .checks.db and .checks.frps" >/dev/null'
+autos() { api GET /backups | jq '[.list[] | select(.kind=="auto")] | length'; }
+manuals() { api GET /backups | jq '[.list[] | select(.kind=="manual")] | length'; }
+check "al arrancar se hizo el primer respaldo automático" 'wait_for "[ \$(autos) -ge 1 ]"'
+R=$(api POST /backups)
+BK=$(echo "$R" | jq -r .name)
+check "respaldo manual creado y verificado" '[ "$(echo "$R" | jq -r .ok)" = true ] && [ -f "$WORK/respaldos/$BK" ]'
+check "el respaldo no incluye sesiones del panel" '[ "$(node --disable-warning=ExperimentalWarning -e "const {DatabaseSync}=require(\"node:sqlite\");console.log(new DatabaseSync(process.argv[1]).prepare(\"select count(*) n from sessions\").get().n)" "$WORK/respaldos/$BK")" = 0 ] && [ "$(api GET /status | jq .db.counts.sessions)" -ge 1 ]'
+check "descarga del respaldo íntegra" 'api GET /backups/$BK -o "$WORK/bajado.db" && cmp -s "$WORK/bajado.db" "$WORK/respaldos/$BK"'
+check "nombre de respaldo inválido → 404" '[ "$(api GET "/backups/..%2Fhub.db" -o /dev/null -w "%{http_code}")" = 404 ]'
+check "solo el administrador ve estado y respaldos" '[ "$(scode h3 GET /status)" = 403 ] && [ "$(scode h3 GET /backups)" = 403 ]'
+check "CLI: verificar respaldo" 'node "$ROOT/api/src/respaldo.js" verificar "$WORK/bajado.db" | grep -q "íntegro"'
+check "CLI: restaurar exige confirmar que el hub está detenido" '! DB_PATH="$WORK/rest/hub.db" node "$ROOT/api/src/respaldo.js" restaurar "$WORK/bajado.db" 2>/dev/null'
+check "CLI: restaurar en otra base conserva las máquinas" 'DB_PATH="$WORK/rest/hub.db" node "$ROOT/api/src/respaldo.js" restaurar "$WORK/bajado.db" --hub-detenido >/dev/null && [ "$(node "$ROOT/api/src/respaldo.js" verificar "$WORK/rest/hub.db" | grep -o "[0-9]* máquinas")" = "$(api GET /machines | jq length) máquinas" ]'
+check "cifrado: ida y vuelta con la clave, error con otra" 'node --disable-warning=ExperimentalWarning -e "
+  const b=require(process.argv[1]); const x=Buffer.from(\"hola-respaldo\"); const e=b.encrypt(x,\"k1\");
+  if (b.decrypt(e,\"k1\").toString()!==\"hola-respaldo\") process.exit(1);
+  try { b.decrypt(e,\"k2\"); process.exit(1); } catch {}" "$ROOT/api/src/backup.js"'
+api POST /backups >/dev/null; api POST /backups >/dev/null
+api PUT /backups/settings -d '{"keep":1}' >/dev/null
+check "retención: quedan solo N automáticos (los manuales se conservan)" '[ "$(autos)" = 1 ] && [ "$(manuals)" -ge 3 ]'
+check "hora inválida → 400" '[ "$(api PUT /backups/settings -o /dev/null -w "%{http_code}" -d "{\"hour\":25}")" = 400 ]'
+: > "$WORK/hooks.log"
+mv "$WORK/respaldos" "$WORK/respaldos.bak" && touch "$WORK/respaldos"
+check "un respaldo que falla responde error y avisa por las alertas" '[ "$(api POST /backups -o /dev/null -w "%{http_code}")" = 500 ] && wait_for "grep -q backup_failed \"$WORK/hooks.log\""'
+rm -f "$WORK/respaldos" && mv "$WORK/respaldos.bak" "$WORK/respaldos"
+api GET /status > "$WORK/status.json"
+check "estado: el fallo del respaldo aparece como problema" 'jq -e ".overall == \"falla\" and ([.warnings[].text] | any(test(\"respaldo falló\")))" "$WORK/status.json" >/dev/null'
+api POST /backups >/dev/null
+api GET /status > "$WORK/status.json"
+check "estado: frps, plugin, base y monitor" 'jq -e ".frps.reachable and .plugin.listening and (.plugin.calls > 0) and .db.writable and (.monitor.lastCheckAt != null) and (.hub.uptimeSeconds > 0)" "$WORK/status.json" >/dev/null'
+check "estado: advierte administradores sin 2FA" 'jq -e "[.warnings[].text] | any(test(\"sin verificación en dos pasos\"))" "$WORK/status.json" >/dev/null'
+
+echo "13. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
 check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"extra\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
 check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/extra | jq -r .deleted)" = "extra" ]'
@@ -487,10 +522,11 @@ check "eliminar máquina" '[ "$(api DELETE /machines/$ID | jq -r .deleted)" = "$
 check "máquina eliminada ya no recibe tráfico" 'http_blocked'
 check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \"\$(curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq length)\" = 0 ]"'
 
-echo "13. Servidor frps caído"
+echo "14. Servidor frps caído"
 : > "$WORK/hooks.log"
 kill $FRPS_PID 2>/dev/null
 check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'
+check "health público responde 503 sin frps" '[ "$(curl -s -o /dev/null -w "%{http_code}" $API/health)" = 503 ]'
 
 echo
 echo "Resultado: $PASS correctas, $FAIL fallidas"

@@ -20,18 +20,28 @@ const { AIService, AIError, viewMessages } = require('./ai');
 const SC = require('./ai-scope');
 const { TelegramBot } = require('./telegram');
 const AU = require('./auth');
+const { BackupService } = require('./backup');
+const ST = require('./status');
 const { requestContext } = require('./context');
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
 // ---------- utilidades HTTP ----------
 
+// Contadores desde el arranque, para la página de estado
+const stats = {
+  startedAt: Date.now(),
+  plugin: { calls: 0, rejects: 0, errors: 0, byOp: {}, lastAt: null },
+  api: { requests: 0, errors: 0, lastError: null },
+};
+
 function send(res, status, data, headers = {}) {
+  const isBin = Buffer.isBuffer(data);
   const isText = typeof data === 'string';
-  const body = isText ? data : JSON.stringify(data);
+  const body = isText || isBin ? data : JSON.stringify(data);
   res.writeHead(status, {
-    'content-type': isText ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
+    'content-type': isBin ? 'application/octet-stream' : isText ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     ...headers,
   });
@@ -202,7 +212,8 @@ function accessFor(store, u, via) {
 
 // ---------- rutas de la API ----------
 
-function createApi(store, frps, monitor, ai, plugin) {
+function createApi(store, frps, monitor, ai, plugin, extra = {}) {
+  const { backups, bot = {}, pluginListening = () => true } = extra;
   const routes = [];
   /**
    * perm: 'public' (sin sesión) · 'session' (cualquier usuario, incluso con cambio de contraseña pendiente)
@@ -253,7 +264,43 @@ function createApi(store, frps, monitor, ai, plugin) {
   // Las máquinas dueñas de servicios privados se reconectan para que frps tome la clave y los visitantes nuevos
   const reload = (ids) => { for (const id of new Set(ids)) plugin?.requestReload(id); };
 
-  route('GET', '/api/health', async () => [200, { ok: true, version: VERSION }], 'public');
+  // Público, para monitores externos (Uptime Kuma, etc.): 503 si la base no escribe o frps no responde
+  route('GET', '/api/health', async () => {
+    const h = await ST.health({ store, frps, backups, version: VERSION });
+    return [h.code, h.body];
+  }, 'public');
+
+  // ---------- estado del hub y respaldos (administrador) ----------
+
+  route('GET', '/api/status', async () => [200, await ST.gather({
+    config, store, frps, monitor, bot, ai, backups, stats, version: VERSION, pluginListening,
+  })], 'admin');
+
+  route('GET', '/api/backups', async () => [200, {
+    settings: backups.settings(), state: backups.state(), encrypted: !!config.backupKey,
+    dir: path.resolve(config.backupDir), nextAt: backups.nextAt() ? Math.floor(backups.nextAt() / 1000) : null, list: backups.list(),
+  }], 'admin');
+  route('PUT', '/api/backups/settings', async (req) => {
+    const s = backups.updateSettings(await readJson(req), M.bad);
+    store.event(null, 'respaldos_configurados', `${s.enabled ? `diario a las ${String(s.hour).padStart(2, '0')}:00` : 'apagados'} · conservar ${s.keep}`, 0);
+    return [200, s];
+  }, 'admin');
+  route('POST', '/api/backups', async () => {
+    const r = await backups.run('manual');
+    if (!r.ok) throw new M.HttpError(500, `el respaldo falló: ${r.error}`);
+    return [201, r];
+  }, 'admin');
+  route('GET', '/api/backups/:name', async (_req, p) => {
+    const f = backups.file(p.name);
+    if (!f) throw new M.HttpError(404, 'no existe ese respaldo');
+    store.event(null, 'respaldo_descargado', p.name, 0);
+    return [200, fs.readFileSync(f), { 'content-disposition': `attachment; filename="${p.name}"` }];
+  }, 'admin');
+  route('DELETE', '/api/backups/:name', async (_req, p) => {
+    if (!backups.remove(p.name)) throw new M.HttpError(404, 'no existe ese respaldo');
+    store.event(null, 'respaldo_eliminado', p.name, 0);
+    return [200, { deleted: p.name }];
+  }, 'admin');
 
   route('GET', '/api/summary', async (_req, _p, ctx) => {
     const status = await frps.status();
@@ -910,6 +957,8 @@ function errorResponse(res, err) {
   if (err instanceof M.HttpError || err instanceof AIError) return send(res, err.status, { error: err.message });
   if (err?.code === 'ERR_SQLITE_ERROR' && /UNIQUE/.test(err.message)) return send(res, 409, { error: 'conflicto: el valor ya está en uso' });
   console.error(err);
+  stats.api.errors++;
+  stats.api.lastError = { at: Math.floor(Date.now() / 1000), message: String(err?.message || err).slice(0, 200) };
   return send(res, 500, { error: 'error interno' });
 }
 
@@ -929,12 +978,17 @@ function main() {
   monitor.ai = ai;
   const bot = new TelegramBot({ store, ai, frps, apiBase: config.telegramApiBase });
   const plugin = createPluginHandler(store, frps);
-  const api = createApi(store, frps, monitor, ai, plugin);
+  const backups = new BackupService({
+    store, dbPath: config.dbPath, dir: config.backupDir, key: config.backupKey, timezone: config.timezone,
+    notify: (alert) => monitor.notify(alert),
+  });
+  let pluginUp = false;
+  const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp });
 
   const app = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
     try {
-      if (pathname.startsWith('/api/')) return await api(req, res, pathname);
+      if (pathname.startsWith('/api/')) { stats.api.requests++; return await api(req, res, pathname); }
       if (req.method === 'GET') return serveStatic(req, res, pathname);
       return send(res, 405, { error: 'método no permitido' });
     } catch (err) {
@@ -948,22 +1002,32 @@ function main() {
     try {
       const body = await readJson(req, 256 * 1024);
       const op = u.searchParams.get('op') || body.op;
-      return send(res, 200, plugin(op, body));
+      const r = plugin(op, body);
+      stats.plugin.calls++;
+      stats.plugin.byOp[op] = (stats.plugin.byOp[op] || 0) + 1;
+      stats.plugin.lastAt = Math.floor(Date.now() / 1000);
+      if (r.reject) stats.plugin.rejects++;
+      return send(res, 200, r);
     } catch (err) {
       console.error('plugin:', err.message);
+      stats.plugin.errors++;
       // Ante un error interno se rechaza: es preferible negar el acceso que abrirlo por fallo.
       return send(res, 200, { reject: true, reject_reason: 'error interno del hub' });
     }
   });
 
   app.listen(config.port, config.host, () => console.log(`Panel y API en http://${config.host}:${config.port}`));
-  pluginServer.listen(config.pluginPort, config.pluginHost, () => console.log(`Plugin frps en http://${config.pluginHost}:${config.pluginPort}/frp/handler`));
+  pluginServer.listen(config.pluginPort, config.pluginHost, () => { pluginUp = true; console.log(`Plugin frps en http://${config.pluginHost}:${config.pluginPort}/frp/handler`); });
+  pluginServer.on('error', (e) => { pluginUp = false; console.error('plugin:', e.message); });
+  pluginServer.on('close', () => { pluginUp = false; });
 
   monitor.start();
   bot.start();
+  backups.start();
   console.log(`Alertas: revisión cada ${config.alertCheckSeconds} s`);
+  console.log(`Respaldos en ${path.resolve(config.backupDir)}${config.backupKey ? ' (cifrados)' : ''}`);
 
-  const shutdown = () => { monitor.stop(); bot.stop(); app.close(); pluginServer.close(); process.exit(0); };
+  const shutdown = () => { monitor.stop(); bot.stop(); backups.stop(); app.close(); pluginServer.close(); process.exit(0); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

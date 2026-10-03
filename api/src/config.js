@@ -26,6 +26,9 @@ const config = {
   pluginPort: int('PLUGIN_PORT', 9000),
 
   dbPath: env.DB_PATH || './data/hub.db',
+  // Respaldos: carpeta (por defecto <carpeta de hub.db>/respaldos) y clave opcional para cifrarlos
+  backupDir: env.BACKUP_DIR || path.join(path.dirname(path.resolve(env.DB_PATH || './data/hub.db')), 'respaldos'),
+  backupKey: env.BACKUP_KEY || '',
 
   // Alertas: cada cuánto se revisa el estado y zona horaria de los mensajes
   alertCheckSeconds: int('ALERT_CHECK_SECONDS', 15),

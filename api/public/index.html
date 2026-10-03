@@ -67,6 +67,7 @@
     <span class="pill" id="frps-pill"><span class="dot"></span> frps</span>
     <button class="btn small ai-btn staff-only" id="ai-btn" title="Asistente IA">🤖<span class="lbl"> IA</span> <span class="badge hidden" id="ai-badge"></span></button>
     <button class="btn small bell admin-only" id="alerts-btn" title="Alertas">🔔<span class="lbl"> Alertas</span></button>
+    <button class="btn small admin-only status-btn" id="status-btn" title="Estado del hub"><span class="dot" id="status-dot"></span><span class="lbl"> Estado</span></button>
     <button class="btn small admin-only" id="users-btn" title="Usuarios y clientes">👥<span class="lbl"> Usuarios</span></button>
     <button class="btn small user-btn" id="user-btn" title="Mi cuenta">👤<span class="lbl" id="user-label"></span></button>
     <button class="btn small" id="logout">Salir</button>
@@ -280,6 +281,45 @@
   </div>
 </div>
 
+<!-- Estado del hub y respaldos (administrador) -->
+<div id="status-modal" class="overlay hidden">
+  <div class="modal status-modal">
+    <div class="ai-head">
+      <div style="flex:1;min-width:0">
+        <h2>Estado del hub</h2>
+        <div class="sub" id="status-sub">Salud del servidor, de frps y de la base de datos.</div>
+      </div>
+      <button class="btn small" id="status-refresh" title="Actualizar">↻</button>
+      <button class="btn icon" data-close title="Cerrar">✕</button>
+    </div>
+    <div id="status-banner"></div>
+    <div class="status-grid" id="status-grid"></div>
+
+    <h4 class="section-title">💾 Respaldos de la base</h4>
+    <div id="backup-info" class="backup-info"></div>
+    <form id="backup-form" class="backup-form">
+      <label class="switch"><input type="checkbox" name="enabled"> <span>Respaldo automático diario</span></label>
+      <div class="field"><label>Hora</label><select name="hour"></select></div>
+      <div class="field"><label>Conservar</label><select name="keep">
+        <option value="7">7 respaldos</option><option value="14">14 respaldos</option><option value="30">30 respaldos</option><option value="60">60 respaldos</option><option value="90">90 respaldos</option>
+      </select></div>
+      <button class="btn small" type="submit">Guardar</button>
+      <button class="btn small primary" type="button" id="backup-now">Respaldar ahora</button>
+    </form>
+    <div class="error" id="backup-error"></div>
+    <div id="backup-list"></div>
+    <details class="toml-preview">
+      <summary>Cómo restaurar un respaldo</summary>
+      <ol class="restore-steps">
+        <li>Detenga el hub y frps.</li>
+        <li>En la carpeta del proyecto: <code>node api/src/respaldo.js restaurar &lt;archivo&gt; --hub-detenido</code><br>
+          <span class="hint">Verifica el respaldo, guarda la base actual como <code>hub.db.antes-de-restaurar-…</code> y la reemplaza. Si está cifrado (.enc), defina antes <code>BACKUP_KEY</code> con la misma clave.</span></li>
+        <li>Arranque de nuevo. Todos deberán iniciar sesión otra vez (las sesiones no se respaldan).</li>
+      </ol>
+    </details>
+  </div>
+</div>
+
 <!-- Configuración de alertas -->
 <div id="alerts-modal" class="overlay hidden">
   <form class="modal" id="alerts-form">
@@ -445,5 +485,6 @@
 <script src="app.js"></script>
 <script src="ai.js"></script>
 <script src="users.js"></script>
+<script src="estado.js"></script>
 </body>
 </html>
