@@ -22,6 +22,10 @@ const { TelegramBot } = require('./telegram');
 const AU = require('./auth');
 const { BackupService } = require('./backup');
 const ST = require('./status');
+const { HubFrpc } = require('./hubfrpc');
+const { SnmpMonitor } = require('./snmp-monitor');
+const SD = require('./snmp-devices');
+const { PROFILES: SNMP_PROFILES } = require('./snmp-profiles');
 const { requestContext } = require('./context');
 
 const VERSION = '1.1.0';
@@ -213,7 +217,7 @@ function accessFor(store, u, via) {
 // ---------- rutas de la API ----------
 
 function createApi(store, frps, monitor, ai, plugin, extra = {}) {
-  const { backups, bot = {}, pluginListening = () => true } = extra;
+  const { backups, bot = {}, pluginListening = () => true, snmp = null, hub = null } = extra;
   const routes = [];
   /**
    * perm: 'public' (sin sesión) · 'session' (cualquier usuario, incluso con cambio de contraseña pendiente)
@@ -273,7 +277,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
   // ---------- estado del hub y respaldos (administrador) ----------
 
   route('GET', '/api/status', async () => [200, await ST.gather({
-    config, store, frps, monitor, bot, ai, backups, stats, version: VERSION, pluginListening,
+    config, store, frps, monitor, bot, ai, backups, stats, version: VERSION, pluginListening, hub, snmp,
   })], 'admin');
 
   route('GET', '/api/backups', async () => [200, {
@@ -406,8 +410,10 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     mustMachine(p.id, ctx);
     // Si era visitante de servicios privados, sus dueños se reconectan para retirarla de allowUsers
     const owners = store.accessOfVisitor(p.id).map((a) => a.owner_id);
+    const hadSnmp = store.snmpOf(p.id);
     store.deleteMachine(p.id);
     reload(owners);
+    if (hadSnmp.length) { for (const d of hadSnmp) snmp?.forget(d.id); hub?.sync(); } // sus equipos SNMP se borran en cascada
     store.event(p.id, 'eliminada', '', 0);
     return [200, { deleted: p.id }];
   });
@@ -444,7 +450,8 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const P = PLATFORMS[platform];
     store.event(m.id, 'instalador_generado', `${platform} · servidor ${serverAddr}`, 0);
     const grants = store.accessOfVisitor(m.id);
-    return [200, P.build(m, services, config.frps, body.token, serverAddr, grants.length ? M.accessToml(m, grants) : ''), {
+    const snmp = store.snmpOf(m.id);
+    return [200, P.build(m, services, config.frps, body.token, serverAddr, grants.length || snmp.length ? M.accessToml(m, grants, snmp) : ''), {
       'content-type': P.type,
       'content-disposition': `attachment; filename="instalar-${m.id}.${P.ext}"`,
     }];
@@ -526,7 +533,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
   // Archivo de accesos de una máquina visitante (no lleva el token de la máquina)
   route('GET', '/api/machines/:id/accesos.toml', async (_req, p, ctx) => {
     const m = mustMachine(p.id, ctx);
-    return [200, M.accessToml(m, store.accessOfVisitor(m.id)), {
+    return [200, M.accessToml(m, store.accessOfVisitor(m.id), store.snmpOf(m.id)), {
       'content-type': 'application/toml; charset=utf-8',
       'content-disposition': `attachment; filename="${M.accessFileName(m.id)}"`,
     }];
@@ -537,12 +544,117 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const P = ACCESS_PLATFORMS[p.platform];
     if (!P) throw M.bad('platform debe ser linux o windows');
     const grants = store.accessOfVisitor(m.id);
-    store.event(m.id, 'accesos_descargados', `${p.platform} · ${grants.length} acceso${grants.length === 1 ? '' : 's'}`, 0);
-    return [200, P.build(m, grants, M.accessToml(m, grants)), {
+    const snmp = store.snmpOf(m.id);
+    store.event(m.id, 'accesos_descargados', `${p.platform} · ${grants.length} acceso${grants.length === 1 ? '' : 's'}${snmp.length ? ` · ${snmp.length} SNMP` : ''}`, 0);
+    return [200, P.build(m, grants, M.accessToml(m, grants, snmp), snmp), {
       'content-type': P.type,
       'content-disposition': `attachment; filename="accesos-${m.id}.${P.ext}"`,
     }];
   });
+
+  // ---------- equipos SNMP de la red local de cada sede ----------
+
+  const mustSnmp = (id, ctx, { write = true } = {}) => {
+    const d = store.getSnmp(Number(id));
+    if (!d || !ctx.canSee(store.getMachine(d.machine_id))) throw new M.HttpError(404, 'no existe ese equipo SNMP');
+    if (write) mustMachine(d.machine_id, ctx);
+    return d;
+  };
+  const snmpView = async (d, ctx) => SD.snmpView(d, await frps.status(), { client: ctx.role === 'cliente' });
+  const hubSync = () => hub?.sync();
+
+  route('GET', '/api/snmp/profiles', async () => [200, Object.values(SNMP_PROFILES).map((p) => ({
+    id: p.id, label: p.label, thresholds: p.thresholds, meta: p.meta,
+  }))], 'any');
+
+  route('GET', '/api/snmp/devices', async (req, _p, ctx) => {
+    const machine = new URL(req.url, 'http://x').searchParams.get('machine');
+    if (machine) mustMachine(machine, ctx, { write: false });
+    const ids = visibleIds(ctx);
+    const status = await frps.status();
+    const list = (machine ? store.snmpOf(machine) : store.listSnmp()).filter((d) => ids.has(d.machine_id));
+    return [200, list.map((d) => SD.snmpView(d, status, { client: ctx.role === 'cliente' }))];
+  }, 'any');
+
+  route('GET', '/api/snmp/devices/:id', async (_req, p, ctx) => [200, await snmpView(mustSnmp(p.id, ctx, { write: false }), ctx)], 'any');
+
+  route('POST', '/api/snmp/devices', async (req, _p, ctx) => {
+    const body = await readJson(req);
+    const m = mustMachine(String(body.machine || ''), ctx);
+    const data = SD.normalizeSnmp(body, null, M.bad);
+    const used = store.usedSnmpPorts();
+    let port = config.snmpPortBase;
+    while (used.has(port)) port++;
+    const d = store.createSnmp({ ...data, machine_id: m.id, secret: M.newSecret(), bind_port: port });
+    store.event(m.id, 'snmp_agregado', `${d.name} (${d.host}:${d.port}, v${d.version})`, 0);
+    hubSync();
+    return [201, await snmpView(d, ctx)];
+  });
+
+  route('PATCH', '/api/snmp/devices/:id', async (req, p, ctx) => {
+    const cur = mustSnmp(p.id, ctx);
+    const data = SD.normalizeSnmp(await readJson(req), cur, M.bad);
+    // Cambiar IP o puerto exige aplicar el archivo nuevo en la sede (el nombre del servicio cambia)
+    if ((data.host && data.host !== cur.host) || (data.port && data.port !== cur.port)) data.rev = cur.rev + 1;
+    const d = store.updateSnmp(cur.id, { ...data, ...(data.profile && data.profile !== cur.profile ? { detected: null } : {}) });
+    snmp?.forget(d.id);
+    store.event(d.machine_id, 'snmp_modificado', `${d.name}${data.rev ? ' · cambió la dirección: aplique los accesos en la sede' : ''}`, 0);
+    hubSync();
+    if (data.rev || data.enabled !== undefined) reload([d.machine_id]);
+    return [200, await snmpView(d, ctx)];
+  });
+
+  route('DELETE', '/api/snmp/devices/:id', async (_req, p, ctx) => {
+    const d = mustSnmp(p.id, ctx);
+    store.deleteSnmp(d.id);
+    snmp?.forget(d.id);
+    store.event(d.machine_id, 'snmp_eliminado', d.name, 0);
+    hubSync();
+    reload([d.machine_id]);
+    return [200, { deleted: d.id }];
+  });
+
+  route('POST', '/api/snmp/devices/:id/poll', async (_req, p, ctx) => {
+    const d = mustSnmp(p.id, ctx);
+    const r = await snmp.pollNow(d.id);
+    return [200, { result: r, device: await snmpView(store.getSnmp(d.id), ctx) }];
+  });
+
+  route('GET', '/api/snmp/devices/:id/walk', async (req, p, ctx) => {
+    const d = mustSnmp(p.id, ctx);
+    const oid = new URL(req.url, 'http://x').searchParams.get('oid') || '1.3.6.1.2.1.1';
+    try {
+      const vbs = await snmp.walk(d.id, oid, 500);
+      const { display } = require('./snmp');
+      return [200, vbs.map((vb) => ({ oid: vb.oid, type: vb.type, value: display(vb) }))];
+    } catch (e) {
+      if (e.status) throw new M.HttpError(e.status, e.message);
+      throw new M.HttpError(502, `el equipo no respondió el recorrido: ${e.message}`);
+    }
+  });
+
+  route('GET', '/api/snmp/devices/:id/history', async (req, p, ctx) => {
+    const d = mustSnmp(p.id, ctx, { write: false });
+    const u = new URL(req.url, 'http://x');
+    const range = { '6h': 6 * 3600, '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 }[u.searchParams.get('range') || '24h'];
+    if (!range) throw M.bad('range debe ser 6h, 24h, 7d o 30d');
+    const metrics = (u.searchParams.get('metric') || '').split(',').filter(Boolean).slice(0, 8);
+    const from = Math.floor(Date.now() / 1000) - range;
+    const bucket = Math.max(300, Math.ceil(range / 300 / 300) * 300); // máx. ~300 puntos por serie
+    const series = {};
+    for (const m of metrics) {
+      const pts = store.samples(d.id, m, from);
+      const agg = new Map();
+      for (const s of pts) {
+        const b = Math.floor(s.ts / bucket) * bucket;
+        const a = agg.get(b) || { sum: 0, n: 0, max: -Infinity };
+        a.sum += s.value; a.n++; a.max = Math.max(a.max, s.value);
+        agg.set(b, a);
+      }
+      series[m] = [...agg.entries()].map(([ts, a]) => [ts, Math.round((a.sum / a.n) * 100) / 100, a.max]);
+    }
+    return [200, { from, to: from + range, bucket, series, available: store.sampleMetrics(d.id) }];
+  }, 'any');
 
   route('GET', '/api/access/:id/rdp', async (req, p, ctx) => {
     const a = mustAccess(p.id, ctx, { write: false });
@@ -977,13 +1089,23 @@ function main() {
   const ai = new AIService({ store, frps, config, machineView });
   monitor.ai = ai;
   const bot = new TelegramBot({ store, ai, frps, apiBase: config.telegramApiBase });
-  const plugin = createPluginHandler(store, frps);
+  // frpc interno del hub: visita los servicios privados que el hub consulta (SNMP por sudp)
+  const hubFrpc = new HubFrpc({
+    config, root: path.join(__dirname, '..', '..'),
+    visitors: () => store.listSnmp().filter((d) => d.enabled).map((d) => ({
+      name: `snmp-${d.id}`, type: 'sudp', serverUser: d.machine_id, serverName: M.snmpProxyName(d), secretKey: d.secret, bindPort: d.bind_port,
+    })),
+  });
+  const plugin = createPluginHandler(store, frps, { hub: hubFrpc });
+  const snmpMon = new SnmpMonitor({
+    store, frps, hub: hubFrpc, notify: (a) => monitor.notify(a), graceSeconds: () => A.loadSettings(store).graceSeconds,
+  });
   const backups = new BackupService({
     store, dbPath: config.dbPath, dir: config.backupDir, key: config.backupKey, timezone: config.timezone,
     notify: (alert) => monitor.notify(alert),
   });
   let pluginUp = false;
-  const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp });
+  const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp, snmp: snmpMon, hub: hubFrpc });
 
   const app = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
@@ -1017,17 +1139,23 @@ function main() {
   });
 
   app.listen(config.port, config.host, () => console.log(`Panel y API en http://${config.host}:${config.port}`));
-  pluginServer.listen(config.pluginPort, config.pluginHost, () => { pluginUp = true; console.log(`Plugin frps en http://${config.pluginHost}:${config.pluginPort}/frp/handler`); });
+  pluginServer.listen(config.pluginPort, config.pluginHost, () => {
+    pluginUp = true;
+    console.log(`Plugin frps en http://${config.pluginHost}:${config.pluginPort}/frp/handler`);
+    hubFrpc.start(); // necesita el plugin escuchando para poder entrar a frps
+    console.log(hubFrpc.bin ? `frpc del hub: ${hubFrpc.bin}` : `frpc del hub: ${hubFrpc.lastError}`);
+  });
   pluginServer.on('error', (e) => { pluginUp = false; console.error('plugin:', e.message); });
   pluginServer.on('close', () => { pluginUp = false; });
 
   monitor.start();
   bot.start();
   backups.start();
+  snmpMon.start();
   console.log(`Alertas: revisión cada ${config.alertCheckSeconds} s`);
   console.log(`Respaldos en ${path.resolve(config.backupDir)}${config.backupKey ? ' (cifrados)' : ''}`);
 
-  const shutdown = () => { monitor.stop(); bot.stop(); backups.stop(); app.close(); pluginServer.close(); process.exit(0); };
+  const shutdown = () => { monitor.stop(); bot.stop(); backups.stop(); snmpMon.stop(); hubFrpc.stop(); app.close(); pluginServer.close(); process.exit(0); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

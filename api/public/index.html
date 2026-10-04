@@ -281,6 +281,69 @@
   </div>
 </div>
 
+<!-- Equipo SNMP: ficha con lecturas, gráficas, tablas y explorador -->
+<div id="snmp-modal" class="overlay hidden">
+  <div class="modal snmp-modal">
+    <div class="ai-head">
+      <div style="flex:1;min-width:0">
+        <h2 id="snmp-title">Equipo SNMP</h2>
+        <div class="sub" id="snmp-sub"></div>
+      </div>
+      <button class="btn icon" data-close title="Cerrar">✕</button>
+    </div>
+    <div class="actions" id="snmp-actions" style="margin-bottom:12px"></div>
+    <div id="snmp-body"></div>
+  </div>
+</div>
+
+<!-- Alta / edición de equipo SNMP -->
+<div id="snmp-form-modal" class="overlay hidden">
+  <form class="modal snmp-form" id="snmp-form" autocomplete="off">
+    <h2 id="snmp-form-title">Nuevo equipo SNMP</h2>
+    <div class="sub">Equipo de la red local de la sede (UPS, switch, impresora, servidor…). El hub lo consulta por el túnel de esta máquina, sin abrir puertos.</div>
+    <div class="row">
+      <div class="field"><label>Nombre *</label><input name="name" required maxlength="60" placeholder="UPS cuarto técnico"></div>
+      <div class="field"><label>IP en la red de la sede *</label><input name="host" required placeholder="192.168.1.50"></div>
+      <div class="field" style="max-width:110px"><label>Puerto</label><input name="port" type="number" min="1" max="65535" placeholder="161"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Versión</label><select name="version"><option value="2c">SNMP v2c (comunidad)</option><option value="3">SNMP v3 (usuario)</option></select></div>
+      <div class="field" data-v="2c"><label>Comunidad *</label><input name="community" placeholder="public" autocomplete="off"></div>
+      <div class="field hidden" data-v="3"><label>Usuario *</label><input name="user" placeholder="monitoreo" autocomplete="off"></div>
+    </div>
+    <div class="row hidden" data-v="3">
+      <div class="field"><label>Autenticación</label><select name="authProtocol">
+        <option value="sha">SHA-1</option><option value="sha256">SHA-256</option><option value="sha512">SHA-512</option>
+        <option value="sha224">SHA-224</option><option value="sha384">SHA-384</option><option value="md5">MD5</option><option value="none">ninguna</option>
+      </select></div>
+      <div class="field"><label>Contraseña de autenticación</label><input name="authKey" type="password" autocomplete="new-password" placeholder="mín. 8 caracteres"></div>
+    </div>
+    <div class="row hidden" data-v="3">
+      <div class="field"><label>Cifrado</label><select name="privProtocol"><option value="aes">AES-128</option><option value="des">DES</option><option value="none">ninguno</option></select></div>
+      <div class="field"><label>Contraseña de cifrado</label><input name="privKey" type="password" autocomplete="new-password" placeholder="mín. 8 caracteres"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Tipo de equipo</label><select name="profile"></select></div>
+      <div class="field" style="max-width:160px"><label>Consultar cada</label><select name="interval">
+        <option value="30">30 s</option><option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option><option value="900">15 min</option>
+      </select></div>
+    </div>
+    <div class="row" style="gap:20px">
+      <label class="switch"><input type="checkbox" name="enabled"> <span>Consultar este equipo</span></label>
+      <label class="switch"><input type="checkbox" name="alerts"> <span>Enviar alertas</span></label>
+    </div>
+    <div id="snmp-th"></div>
+    <label style="margin-top:14px;display:block">OIDs propios <span class="dim" style="text-transform:none;letter-spacing:0">(cualquier dato del equipo; con condición, también alertan)</span></label>
+    <div id="snmp-custom" class="custom-rows"></div>
+    <button type="button" class="btn small" id="snmp-add-custom" style="margin-top:8px">+ OID</button>
+    <div class="error" id="snmp-form-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Cancelar</button>
+      <button type="submit" class="btn primary">Guardar</button>
+    </div>
+  </form>
+</div>
+
 <!-- Estado del hub y respaldos (administrador) -->
 <div id="status-modal" class="overlay hidden">
   <div class="modal status-modal">
@@ -486,5 +549,6 @@
 <script src="ai.js"></script>
 <script src="users.js"></script>
 <script src="estado.js"></script>
+<script src="snmp.js"></script>
 </body>
 </html>

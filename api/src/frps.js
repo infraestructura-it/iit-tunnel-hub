@@ -1,6 +1,6 @@
 'use strict';
 // Lectura del estado en vivo desde la API del dashboard de frps (webServer).
-// Endpoints usados (frp v0.71): /api/serverinfo, /api/clients, /api/proxy/{http,https,tcp,stcp}
+// Endpoints usados (frp v0.71): /api/serverinfo, /api/clients, /api/proxy/{http,https,tcp,stcp,sudp}
 
 const CACHE_MS = 3000;
 
@@ -31,20 +31,21 @@ class FrpsClient {
   async #load() {
     let result;
     try {
-      const [server, clients, http, https, tcp, stcp] = await Promise.all([
+      const [server, clients, http, https, tcp, stcp, sudp] = await Promise.all([
         this.get('/api/serverinfo'),
         this.get('/api/clients'),
         this.get('/api/proxy/http'),
         this.get('/api/proxy/https'),
         this.get('/api/proxy/tcp'),
         this.get('/api/proxy/stcp'),
+        this.get('/api/proxy/sudp'),
       ]);
       const clientMap = new Map();
       for (const c of Array.isArray(clients) ? clients : []) {
         if (c.online !== false) clientMap.set(c.user, c);
       }
       const proxyMap = new Map();
-      for (const list of [http, https, tcp, stcp]) {
+      for (const list of [http, https, tcp, stcp, sudp]) {
         for (const p of list?.proxies || []) proxyMap.set(p.name, p);
       }
       result = { reachable: true, error: null, server, clients: clientMap, proxies: proxyMap };

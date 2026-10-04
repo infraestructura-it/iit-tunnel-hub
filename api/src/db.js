@@ -148,6 +148,55 @@ ${SERVICES_TABLE('services')}
       UNIQUE (visitor_id, bind_port)
     );
   `);
+  db.exec(`
+    -- Equipos SNMP de la red local de una sede. La máquina de la sede (machine_id) publica el UDP 161
+    -- del equipo como servicio privado sudp "snmp-<id>"; el frpc del hub lo abre en 127.0.0.1:bind_port.
+    CREATE TABLE IF NOT EXISTS snmp_devices (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      machine_id    TEXT NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+      name          TEXT NOT NULL,
+      host          TEXT NOT NULL,
+      port          INTEGER NOT NULL DEFAULT 161,
+      version       TEXT NOT NULL CHECK (version IN ('2c','3')),
+      community     TEXT NOT NULL DEFAULT '',
+      v3_user       TEXT NOT NULL DEFAULT '',
+      auth_proto    TEXT NOT NULL DEFAULT 'none',
+      auth_key      TEXT NOT NULL DEFAULT '',
+      priv_proto    TEXT NOT NULL DEFAULT 'none',
+      priv_key      TEXT NOT NULL DEFAULT '',
+      profile       TEXT NOT NULL DEFAULT 'auto',
+      detected      TEXT,
+      custom        TEXT NOT NULL DEFAULT '[]',
+      thresholds    TEXT NOT NULL DEFAULT '{}',
+      watch         TEXT NOT NULL DEFAULT '[]',
+      interval_s    INTEGER NOT NULL DEFAULT 60,
+      enabled       INTEGER NOT NULL DEFAULT 1,
+      alerts        INTEGER NOT NULL DEFAULT 1,
+      secret        TEXT NOT NULL,
+      bind_port     INTEGER NOT NULL UNIQUE,
+      created_at    INTEGER NOT NULL,
+      sys           TEXT NOT NULL DEFAULT '{}',
+      state         TEXT NOT NULL DEFAULT 'unknown',
+      state_since   INTEGER,
+      last_poll_at  INTEGER,
+      last_ok_at    INTEGER,
+      last_error    TEXT,
+      fails         INTEGER NOT NULL DEFAULT 0,
+      data          TEXT NOT NULL DEFAULT '{}',
+      alert_state   TEXT NOT NULL DEFAULT '{}',
+      rev           INTEGER NOT NULL DEFAULT 1   -- sube al cambiar IP/puerto: obliga a aplicar el archivo nuevo en la sede
+    );
+    CREATE INDEX IF NOT EXISTS snmp_devices_machine ON snmp_devices (machine_id);
+
+    -- Historial (cada ~5 min por métrica, 30 días)
+    CREATE TABLE IF NOT EXISTS snmp_samples (
+      device_id  INTEGER NOT NULL REFERENCES snmp_devices(id) ON DELETE CASCADE,
+      metric     TEXT NOT NULL,
+      ts         INTEGER NOT NULL,
+      value      REAL NOT NULL,
+      PRIMARY KEY (device_id, metric, ts)
+    ) WITHOUT ROWID;
+  `);
   return new Store(db);
 }
 
@@ -388,6 +437,35 @@ class Store {
     }
     return out;
   }
+
+  // ---------- SNMP ----------
+  listSnmp() { return this.db.prepare('SELECT * FROM snmp_devices ORDER BY machine_id, name').all(); }
+  snmpOf(machineId) { return this.db.prepare('SELECT * FROM snmp_devices WHERE machine_id = ? ORDER BY name').all(machineId); }
+  getSnmp(id) { return this.db.prepare('SELECT * FROM snmp_devices WHERE id = ?').get(Number(id)) || null; }
+  usedSnmpPorts() { return new Set(this.db.prepare('SELECT bind_port FROM snmp_devices').all().map((r) => r.bind_port)); }
+  createSnmp(d) {
+    const cols = Object.keys(d);
+    const r = this.db.prepare(`INSERT INTO snmp_devices (${cols.join(', ')}, created_at) VALUES (${cols.map(() => '?').join(', ')}, ?)`)
+      .run(...cols.map((k) => d[k]), now());
+    return this.getSnmp(Number(r.lastInsertRowid));
+  }
+  updateSnmp(id, fields) {
+    const cols = Object.keys(fields);
+    if (cols.length) this.db.prepare(`UPDATE snmp_devices SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`).run(...cols.map((k) => fields[k]), Number(id));
+    return this.getSnmp(id);
+  }
+  deleteSnmp(id) { return this.db.prepare('DELETE FROM snmp_devices WHERE id = ?').run(Number(id)).changes > 0; }
+  addSamples(deviceId, ts, values) {
+    const ins = this.db.prepare('INSERT OR REPLACE INTO snmp_samples (device_id, metric, ts, value) VALUES (?, ?, ?, ?)');
+    this.transaction(() => { for (const [m, v] of Object.entries(values)) if (Number.isFinite(v)) ins.run(deviceId, m, ts, v); });
+  }
+  samples(deviceId, metric, from) {
+    return this.db.prepare('SELECT ts, value FROM snmp_samples WHERE device_id = ? AND metric = ? AND ts >= ? ORDER BY ts').all(Number(deviceId), metric, from);
+  }
+  sampleMetrics(deviceId) {
+    return this.db.prepare('SELECT DISTINCT metric FROM snmp_samples WHERE device_id = ?').all(Number(deviceId)).map((r) => r.metric);
+  }
+  pruneSamples(olderThan) { return this.db.prepare('DELETE FROM snmp_samples WHERE ts < ?').run(olderThan).changes; }
 
   // ---------- clientes ----------
   listClients() {

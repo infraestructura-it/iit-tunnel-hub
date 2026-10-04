@@ -49,6 +49,14 @@ const TOOL_DEFS = {
       additionalProperties: false,
     },
   },
+  equipos_snmp: {
+    description: 'Lecturas SNMP de los equipos de la red local de las sedes (UPS, switches, impresoras, servidores/NAS): estado, valores actuales (carga de batería, autonomía, alimentación, voltajes, tóner, puertos, CPU, discos…) y alertas activas. Es solo lectura. Úsala para diagnosticar cortes de energía, consumibles o fallas de red.',
+    input_schema: {
+      type: 'object',
+      properties: { maquina_id: { type: 'string', description: 'id de la máquina de la sede; omítalo para ver todos los equipos' } },
+      additionalProperties: false,
+    },
+  },
   consultar_http: {
     description: 'Ejecuta una consulta HTTP definida en el alcance de la máquina (Home Assistant, Node-RED, panel de UPS, etc.) a través del túnel. Solo puede usar el id de una consulta existente; los valores de parámetros solo admiten letras, números y . _ : @ -. Si la consulta es de modo "accion" NO se ejecuta: queda pendiente de aprobación humana y debe decírselo al usuario.',
     input_schema: {
@@ -76,7 +84,7 @@ const TOOL_DEFS = {
   },
 };
 
-const HUB_TOOLS = ['listar_maquinas', 'estado_maquina', 'eventos'];
+const HUB_TOOLS = ['listar_maquinas', 'estado_maquina', 'eventos', 'equipos_snmp'];
 const ALL_TOOLS = Object.keys(TOOL_DEFS);
 
 function systemPrompt({ tz, machine, scope, channel }) {
@@ -135,6 +143,7 @@ function describeToolUse(b) {
     case 'listar_maquinas': return 'consultó la lista de máquinas';
     case 'estado_maquina': return `revisó el estado de ${i.maquina_id}`;
     case 'eventos': return `revisó la actividad${i.maquina_id ? ` de ${i.maquina_id}` : ''}`;
+    case 'equipos_snmp': return `revisó los equipos SNMP${i.maquina_id ? ` de ${i.maquina_id}` : ''}`;
     case 'consultar_http': return `consulta HTTP ${i.consulta_id} en ${i.maquina_id}`;
     case 'ejecutar_comando': return `comando ${i.comando_id} en ${i.maquina_id}`;
     default: return b.name;
@@ -346,6 +355,28 @@ class AIService {
         const visible = allow ? (id) => { const m = this.store.getMachine(id); return !!m && allow(m); } : null;
         return this.store.events({ machineId: mid, limit, visible }).map((e) => ({ hora: new Date(e.ts * 1000).toISOString(), maquina: e.machine_id, tipo: e.kind, detalle: e.detail }));
       }
+      case 'equipos_snmp': {
+        if (mid) this.#machine(mid, allow);
+        const list = (mid ? this.store.snmpOf(mid) : this.store.listSnmp()).filter((d) => {
+          if (conv.machine_id && d.machine_id !== conv.machine_id) return false;
+          const m = this.store.getMachine(d.machine_id);
+          return m && (!allow || allow(m));
+        });
+        return list.map((d) => {
+          const data = (() => { try { return JSON.parse(d.data); } catch { return {}; } })();
+          const tables = data.tables || {};
+          return {
+            id: d.id, maquina: d.machine_id, nombre: d.name, ip: d.host, perfil: data.profile || d.profile,
+            estado: d.enabled ? d.state : 'deshabilitado', ultima_lectura: data.at ? new Date(data.at * 1000).toISOString() : null,
+            error: d.last_error || undefined, sistema: data.sys ? { nombre: data.sys.name, descripcion: data.sys.descr, ubicacion: data.sys.location } : undefined,
+            valores: data.metrics || {},
+            consumibles: tables.supplies?.map((x) => `${x.name}: ${x.percent ?? x.state ?? '?'}%`),
+            discos: tables.storage?.map((x) => `${x.name}: ${x.percent}%`),
+            interfaces_abajo: tables.interfaces?.filter((i) => i.admin === 'arriba' && i.oper !== 'arriba').map((i) => i.name).slice(0, 30),
+            alertas: Object.values((() => { try { return JSON.parse(d.alert_state); } catch { return {}; } })()).map((a) => `${a.level}: ${a.text}`),
+          };
+        });
+      }
       case 'consultar_http':
       case 'ejecutar_comando':
         return this.#runScopeItem(conv, name === 'consultar_http' ? 'http' : 'ssh', input);
@@ -554,6 +585,7 @@ class AIService {
       role: 'user',
       content: `La máquina ${machine.id} (${machine.name}${machine.client ? `, cliente ${machine.client}` : ''}) perdió la conexión desde las ${when}. `
         + 'Revisa con las herramientas su actividad reciente (desconexiones repetidas, rechazos, cambios), su último login/IP y si otras máquinas del mismo cliente también cayeron. '
+        + 'Si la sede tiene equipos SNMP (equipos_snmp), revisa si la UPS estaba en batería o con autonomía baja antes de la caída. '
         + 'Da la causa más probable (corte de energía o internet en la sede, equipo apagado, frpc detenido, credenciales, etc.) y 1 o 2 pasos recomendados. '
         + 'Máximo 6 líneas, texto plano sin markdown.',
     });

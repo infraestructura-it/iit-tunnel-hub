@@ -10,7 +10,9 @@ const deny = (reason) => ({ reject: true, reject_reason: reason });
 // Usuario imposible (los ids no admiten "!"): con allowUsers vacío frps dejaría entrar al propio dueño
 const NOBODY = '!nadie';
 
-function createPluginHandler(store, frpsStatus) {
+const HUB_USER = '_hub'; // frpc interno del hub (ver hubfrpc.js); los ids de máquina no admiten "_"
+
+function createPluginHandler(store, frpsStatus, { hub = null } = {}) {
   // Máquinas a las que se les pidió reconectarse para aplicar cambios (accesos, clave stcp).
   // Se rechaza su próximo latido: frpc cierra la sesión, vuelve a entrar y frps vuelve a preguntar NewProxy.
   const reloadPending = new Set();
@@ -18,6 +20,12 @@ function createPluginHandler(store, frpsStatus) {
   function login(c) {
     const id = c.user;
     const from = c.client_address || '?';
+    if (id === HUB_USER) {
+      // Solo el frpc que lanzó este hub, desde el propio servidor
+      if (hub && hub.tokenMatches(c.metas?.token)) { hub.lastLoginAt = Math.floor(Date.now() / 1000); return allow(); }
+      store.event(null, 'login_rechazado', `usuario interno del hub con token inválido desde ${from}`);
+      return deny('token inválido');
+    }
     if (!id) {
       store.event(null, 'login_rechazado', `sin usuario desde ${from}`);
       return deny('frpc debe definir "user" con el id de la máquina');
@@ -44,6 +52,7 @@ function createPluginHandler(store, frpsStatus) {
 
   function newProxy(c) {
     const id = c.user?.user;
+    if (id === HUB_USER) return deny('el frpc del hub solo visita servicios, no publica');
     const m = id ? store.getMachine(id) : null;
     if (!m || !m.enabled) return deny('máquina no autorizada');
 
@@ -55,6 +64,19 @@ function createPluginHandler(store, frpsStatus) {
       store.event(id, 'servicio_rechazado', `${svcName}: ${why}`);
       return deny(why);
     };
+
+    // Equipo SNMP de la red local de la sede: sudp "snmp-<id>" que solo puede visitar el frpc del hub
+    const snmp = /^snmp-(\d+)-r(\d+)$/.exec(svcName);
+    if (snmp) {
+      const d = store.getSnmp(Number(snmp[1]));
+      if (!d || d.machine_id !== id) return reject(`el equipo SNMP "${svcName}" no está registrado para esta máquina`);
+      if (Number(snmp[2]) !== d.rev) return reject(`${svcName} es una configuración anterior del equipo SNMP "${d.name}": aplique el archivo de accesos nuevo`);
+      if (c.proxy_type !== 'sudp') return reject(`${svcName} debe ser de tipo sudp`);
+      if (!d.enabled) return reject(`el equipo SNMP "${d.name}" está deshabilitado`);
+      store.event(id, 'servicio_activo', `${svcName} (SNMP ${d.name} → ${d.host}:${d.port})`, 0);
+      frpsStatus.invalidate();
+      return { reject: false, unchange: false, content: { ...c, sk: d.secret, allow_users: [HUB_USER] } };
+    }
 
     if (!s) return reject(`el servicio "${svcName}" no está registrado para esta máquina`);
     if (c.proxy_type !== s.type) return reject(`tipo "${c.proxy_type}" no coincide con el registrado (${s.type})`);
@@ -89,6 +111,7 @@ function createPluginHandler(store, frpsStatus) {
 
   const authorized = (c) => {
     const id = c.user?.user;
+    if (id === HUB_USER) return { id: HUB_USER, enabled: 1 };
     const m = id ? store.getMachine(id) : null;
     return m && m.enabled ? m : null;
   };
@@ -111,7 +134,7 @@ function createPluginHandler(store, frpsStatus) {
   function ping(c) {
     const m = authorized(c);
     if (!m) return deny('máquina deshabilitada o eliminada');
-    if (reloadPending.delete(m.id)) {
+    if (m.id !== HUB_USER && reloadPending.delete(m.id)) {
       store.event(m.id, 'reconexion', 'el hub pidió reconectar para aplicar cambios de acceso', 0);
       return deny('el hub pidió reconectar para aplicar cambios de acceso');
     }
@@ -131,4 +154,4 @@ function createPluginHandler(store, frpsStatus) {
   return handle;
 }
 
-module.exports = { createPluginHandler };
+module.exports = { createPluginHandler, HUB_USER };

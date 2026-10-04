@@ -225,6 +225,34 @@ No avisan las máquinas que nunca se han conectado, las deshabilitadas ni las qu
 - Deshabilitar un usuario, cambiarle el rol o restablecer su contraseña cierra sus sesiones.
 - El **`ADMIN_TOKEN`** sigue sirviendo para la API (`Authorization: Bearer`) y como llave de emergencia ("Entrar con el token de administración").
 
+## Monitoreo SNMP (UPS, switches, impresoras, servidores)
+
+El hub consulta por SNMP los equipos de la **red local de cada sede** sin abrir puertos ni instalar nada nuevo: el frpc que ya está en la sede (Raspberry, PC) publica el UDP 161 de cada equipo como servicio privado `sudp`, y el **frpc interno del hub** (usuario `_hub`, token solo en memoria) es el único visitante permitido.
+
+```
+Hub ─ SNMP ─▶ 127.0.0.1:16200 ─ frpc del hub ══ frps ══ frpc de la sede ─▶ 192.168.1.50:161 (UPS)
+```
+
+1. En el detalle de la máquina de la sede: **📟 Equipos SNMP → + Equipo SNMP**: nombre, IP en la red de la sede, versión (v2c con comunidad, o v3 con usuario, SHA/SHA-2/MD5 y AES/DES), tipo (automático) e intervalo.
+2. **Aplicar en la sede**: ejecute el script de accesos de esa máquina (el mismo de los accesos privados); reinicia su frpc con los equipos nuevos. Hasta entonces el equipo aparece "Pendiente en la sede". Cambiar la IP o el puerto pide aplicarlo de nuevo.
+3. El hub lo consulta (cada 1 min por defecto), detecta el tipo y muestra lecturas, tablas y gráficas.
+
+| Tipo | Qué lee | Alertas por defecto |
+|---|---|---|
+| UPS (UPS-MIB) y UPS APC (PowerNet) | alimentación (red/batería/bypass), carga y estado de batería, autonomía, carga de salida, voltajes, temperatura, alarmas, reemplazo de batería | en batería, bypass, batería baja, carga < 30 %, autonomía < 10 min, carga de salida ≥ 80/95 %, temperatura ≥ 40 °C |
+| Switch / router (IF-MIB) | interfaces: estado, velocidad, tráfico (bps), errores | interfaz **vigilada** caída, errores |
+| Impresora (Printer-MIB) | estado, páginas, consumibles (%), alertas (sin papel, atasco…) | consumible ≤ 15/3 %, errores de la impresora |
+| Servidor / NAS (HOST-RESOURCES) | CPU, RAM, discos | CPU ≥ 90 %, RAM ≥ 95 %, disco ≥ 90/97 % |
+| Genérico | datos del sistema | — |
+
+- **Cualquier equipo**: OIDs propios (nombre, unidad, escala, historial y condición de alerta) y **Explorar OIDs** para recorrer el árbol del equipo y agregarlos con un clic. Los umbrales se ajustan por equipo.
+- **Historial** de 30 días cada ~5 min, con gráficas de 6 h a 30 días (tráfico de interfaces vigiladas, consumibles, discos y OIDs con historial).
+- **Alertas** por los canales de siempre (Telegram, webhooks) con el mismo tiempo de gracia, y aviso cuando se normaliza. Un equipo sin respuesta alerta; si la que cae es la máquina de la sede, solo alerta la máquina.
+- La IA tiene la herramienta de solo lectura `equipos_snmp`, y al diagnosticar una caída revisa si la UPS estaba en batería.
+- Permisos: técnicos solo en sus clientes; los usuarios de cliente ven el estado de sus equipos sin credenciales ni configuración.
+- **DES** (SNMPv3 antiguo) requiere arrancar Node con `--openssl-legacy-provider` (ya incluido en `iniciar-local.ps1`, el servicio systemd y la imagen Docker).
+- El servidor necesita `frpc` además de `frps` (lo instalan `deploy/install.sh` y la imagen del hub; en Windows, `frp.ps1`). Variables opcionales: `HUB_FRPC_PATH`, `HUB_FRPC_ADMIN_PORT` (7401), `SNMP_PORT_BASE` (16200).
+
 ## Respaldos y estado del hub
 
 **🩺 Estado** (solo administrador) muestra la salud del propio hub: proceso, base de datos, disco, frps (con latencia), plugin de frps (consultas, rechazos, errores), monitor de alertas, bot de Telegram, IA y errores de la API, más **advertencias**: frps caído, disco lleno, respaldos viejos o fallidos, administradores sin 2FA, `ADMIN_TOKEN` de ejemplo, panel expuesto sin HTTPS, sin canales de alertas… El punto del botón cambia de color (verde, ámbar, rojo).
@@ -299,6 +327,12 @@ Las rutas aceptan `Authorization: Bearer <ADMIN_TOKEN>` (acceso total) o la cook
 | POST | `/api/backups` | Respaldar ahora (admin) |
 | PUT | `/api/backups/settings` | `{enabled, hour, keep}` (admin) |
 | GET / DELETE | `/api/backups/:nombre` | Descargar o eliminar un respaldo (admin) |
+| GET | `/api/snmp/profiles` | Perfiles SNMP con sus métricas y umbrales por defecto |
+| GET / POST | `/api/snmp/devices` | Equipos SNMP visibles (`?machine=`) · agregar `{machine, name, host, port?, version, community \| user, authProtocol, authKey, privProtocol, privKey, profile?, interval?, custom?, thresholds?}` |
+| GET / PATCH / DELETE | `/api/snmp/devices/:id` | Detalle con lecturas y tablas (secretos enmascarados) · cambiar (`watch` = interfaces vigiladas) · eliminar |
+| POST | `/api/snmp/devices/:id/poll` | Consultar ahora |
+| GET | `/api/snmp/devices/:id/history?metric=a,b&range=6h\|24h\|7d\|30d` | Series para gráficas (promedio y máximo por intervalo) |
+| GET | `/api/snmp/devices/:id/walk?oid=` | Explorar OIDs (máx. 500) |
 | GET | `/api/summary` | Totales y estado de frps |
 | GET | `/api/machines` | Máquinas con servicios y estado en vivo |
 | POST | `/api/machines` | Registrar (devuelve token y frpc.toml) |
@@ -363,7 +397,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 159 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado.
+Levanta frps, el hub y frpc reales en localhost y verifica 186 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado; y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
 
 ## Límites conocidos
 

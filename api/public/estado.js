@@ -83,6 +83,13 @@ async function loadStatus() {
       ['Archivo', `<code>${esc(s.db.path)}</code>`],
     ])],
     ['💽 Disco', disk],
+    ['📟 SNMP', kv([
+      ['Equipos', `${s.snmp.enabled} activos de ${s.snmp.devices}${s.snmp.devices ? ` · <b class="ok">${s.snmp.ok} normal</b>${s.snmp.warn ? ` · ${s.snmp.warn} aviso` : ''}${s.snmp.crit ? ` · <b class="ko">${s.snmp.crit} crítico</b>` : ''}${s.snmp.down ? ` · <b class="ko">${s.snmp.down} sin respuesta</b>` : ''}${s.snmp.pending ? ` · ${s.snmp.pending} pendiente(s)` : ''}` : ''}`],
+      ['Consultas', `${s.snmp.polls} · ${s.snmp.errors} con error`],
+      ['frpc del hub', !s.snmp.hubFrpc ? '—' : !s.snmp.hubFrpc.available ? '<b class="ko">no instalado</b>'
+        : s.snmp.hubFrpc.running ? `<b class="ok">corriendo</b> · ${s.snmp.hubFrpc.visitors} túnel(es)${s.snmp.hubFrpc.lastLoginAt ? ` · entró ${ago(s.snmp.hubFrpc.lastLoginAt)}` : ''}` : '<b class="ko">detenido</b>'],
+      s.snmp.hubFrpc?.lastError && ['Último error', `<span class="dim">${esc(s.snmp.hubFrpc.lastError)}</span>`],
+    ])],
     ['🔔 Alertas, Telegram e IA', kv([
       ['Monitor', s.monitor.lastCheckAt ? `revisó ${ago(s.monitor.lastCheckAt)} · cada ${s.monitor.intervalSeconds} s` : 'aún no revisa'],
       ['Canales', [s.monitor.channels.telegram && 'Telegram', s.monitor.channels.webhooks && `${s.monitor.channels.webhooks} webhook(s)`].filter(Boolean).join(' y ') || '<b class="ko">ninguno</b>'],

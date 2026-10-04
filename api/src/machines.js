@@ -92,6 +92,7 @@ function normalizeMachine(body, store) {
 function normalizeService(body, machineId, store, frps) {
   const name = str(body.name, 20, 'service.name').toLowerCase();
   if (!SVC_RE.test(name)) throw bad('el nombre del servicio solo admite a-z, 0-9 y guiones (máx. 20)');
+  if (/^snmp-/.test(name)) throw bad('los nombres que empiezan con "snmp-" están reservados para los equipos SNMP');
   if (store.getService(machineId, name)) throw new HttpError(409, `la máquina ya tiene un servicio "${name}"`);
 
   const type = str(body.type, 10, 'service.type').toLowerCase() || 'http';
@@ -216,6 +217,9 @@ function frpcToml(machine, services, frps, token, opts = {}) {
 const ACCESS_PORT_MIN = 6000;
 const ACCESS_PORT_MAX = 6999;
 
+/** Nombre del servicio sudp de un equipo SNMP en la sede (cambia con rev al cambiar IP o puerto). */
+const snmpProxyName = (d) => `snmp-${d.id}-r${d.rev}`;
+
 function accessFileName(machineId, dir = '') { return `${dir}accesos-${machineId}.toml`; }
 
 /** Puertos sugeridos según el puerto local del servicio, para que sea fácil reconocerlos. */
@@ -259,8 +263,12 @@ function normalizeAccess(body, store) {
   return { svc, owner, visitor, bindPort };
 }
 
-/** Archivo de accesos de una máquina visitante: un [[visitors]] por servicio privado autorizado. */
-function accessToml(visitor, grants) {
+/**
+ * Archivo complementario de una máquina (accesos-<id>.toml), incluido desde su frpc.toml:
+ *  - [[visitors]]: servicios privados de otras máquinas a los que esta máquina puede entrar
+ *  - [[proxies]]:  equipos SNMP de su red local que el hub consulta (sudp, solo los visita el frpc del hub)
+ */
+function accessToml(visitor, grants, snmp = []) {
   const lines = [
     `# Accesos privados de ${visitor.name} (${visitor.id}) — generado por IIT Tunnel Hub ${new Date().toISOString()}`,
     `# Va en la misma carpeta que el frpc.toml de esta máquina, con el nombre ${accessFileName(visitor.id)}.`,
@@ -278,7 +286,16 @@ function accessToml(visitor, grants) {
       `bindAddr = "127.0.0.1"`,
       `bindPort = ${a.bind_port}`);
   }
-  if (!grants.length) lines.push('', '# Esta máquina no tiene accesos a servicios privados.');
+  for (const d of snmp.filter((x) => x.enabled)) {
+    lines.push('',
+      `# SNMP: ${d.name} (${d.host}:${d.port}) en la red local — solo lo consulta el hub`,
+      `[[proxies]]`,
+      `name = ${q(snmpProxyName(d))}`,
+      `type = "sudp"`,
+      `localIP = ${q(d.host)}`,
+      `localPort = ${d.port}`);
+  }
+  if (!grants.length && !snmp.length) lines.push('', '# Esta máquina no tiene accesos a servicios privados ni equipos SNMP.');
   return lines.join('\n') + '\n';
 }
 
@@ -296,6 +313,6 @@ function rdpFile(a, user = '') {
 }
 
 module.exports = {
-  normalizeAccess, accessToml, accessFileName, rdpFile, newSecret, suggestedPort,
+  normalizeAccess, accessToml, accessFileName, snmpProxyName, rdpFile, newSecret, suggestedPort,
   HttpError, bad, newToken, hashToken, tokenMatches, normalizeMachine, normalizeService, publicUrl, frpcToml, normalizeServerAddr, ID_RE,
 };

@@ -44,6 +44,13 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/src/respaldo.js` | CLI: `verificar`, `descifrar`, `restaurar --hub-detenido` |
 | `api/src/status.js` | `/api/status` (estado y advertencias) y `/api/health` (200/503 para monitores) |
 | `api/public/estado.js` | Panel: modal 🩺 Estado y respaldos |
+| `api/src/snmp.js` | Cliente SNMP sin dependencias: BER, GET/GETNEXT/GETBULK/walk, v2c y v3 (USM: MD5/SHA/SHA-2, AES-128, DES con legacy provider) |
+| `api/src/snmp-profiles.js` | Perfiles (ups, ups-apc, network, printer, host, generic): detección, lectura, metadatos y reglas de alerta |
+| `api/src/snmp-monitor.js` | Sondeo, historial (~5 min, 30 días), alertas con gracia y normalización, explorador |
+| `api/src/snmp-devices.js` | Validación de equipos y vistas sin secretos |
+| `api/src/hubfrpc.js` | frpc interno del hub (usuario `_hub`): visitante sudp en 127.0.0.1, recarga por API de admin |
+| `api/public/snmp.js` | Panel: equipos SNMP por sede, ficha con gráficas SVG, formulario, explorador |
+| `test/snmp/*.snmprec` | Equipos simulados para snmpsim (comunidad = nombre del archivo) |
 | `api/src/plugin.js` | Lógica del server plugin (Login, NewProxy, CloseProxy, NewUserConn, NewWorkConn, Ping) |
 | `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml`, accesos stcp (`normalizeAccess`, `accessToml`, `rdpFile`) |
 | `api/src/db.js` | Esquema SQLite (`machines`, `services`, `service_access`, `clients`, `users`, `user_clients`, `sessions`, `events`, `settings`, `ai_*`), migraciones y consultas |
@@ -63,7 +70,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (159 casos) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (186 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -96,6 +103,17 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Ante error interno el plugin **rechaza** (falla cerrado). Mantenerlo así.
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
+
+## SNMP: reglas (no romper)
+
+- Transporte: la sede publica cada equipo como `sudp` llamado `snmp-<id>-r<rev>` (en su `accesos-<id>.toml`, sin clave). `NewProxy` inyecta `sk = snmp_devices.secret` y `allow_users = ['_hub']`. `rev` sube al cambiar host/puerto: la configuración vieja se rechaza y el equipo queda "pendiente".
+- frpc del hub: usuario `_hub` (los ids de máquina no admiten `_`), token aleatorio por arranque, comparado en `Login`; no puede publicar proxies. Config en `<dir de hub.db>/hub-frpc.toml` (600), recarga con `GET /api/reload` del webServer local; al arrancar mata un frpc del hub huérfano (pid en `hub-frpc.pid`). `actualizar.ps1` no lo relanza.
+- Visitantes del hub: uno por equipo habilitado, `bindAddr 127.0.0.1`, `bind_port` único desde `SNMP_PORT_BASE`. Cualquier cambio de equipos ⇒ `hub.sync()`.
+- Estados sin culpa del equipo (`pendiente`, `sede_desconectada`, `sin_transporte`, `deshabilitado`) **no alertan**. "Sin respuesta" alerta tras 2 fallos seguidos.
+- Alertas: `alert_state` por equipo `{clave: {level, text, since, notified}}`; se avisa al superar `graceSeconds` de Alertas, se re-avisa si sube de aviso a crítico y se envía `snmp_ok` al resolverse.
+- Solo lectura: no hay SET. Secretos (comunidad, contraseñas v3) nunca salen en la API (`********` conserva el valor al editar) ni a la IA.
+- Historial: `snmp_samples` WITHOUT ROWID `(device_id, metric, ts)`; métricas `hist` del perfil + `if.<idx>.in/out` (vigiladas o físicas arriba, máx. 24) + `supply.<idx>` + `disk.<idx>` + `c.<clave>`; poda a 30 días.
+- Detección: `ups-apc` → `ups` → `printer` → `host` (hrSystemUptime, salvo sysServices solo capa 2/3) → `network` → `generic`.
 
 ## Respaldos y estado: reglas (no romper)
 
@@ -159,6 +177,8 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - frpc 0.71 escribe `login to server success` (sin "the"); los instaladores buscan esa frase.
 - Ping rechazado: frps responde `Pong{Error}` y frpc cierra la sesión al recibirlo (`handlePong` → `closeSession`), luego reconecta con backoff rápido.
 - Visitante stcp: `NewVisitorConn` lleva el RunID de su sesión; frps toma el usuario de esa sesión y lo compara con `allowUsers` del proxy. Nombre destino = `serverUser.serverName`.
+- `sudp` funciona igual que `stcp` (allowUsers + clave); el dashboard lo lista en `/api/proxy/sudp`. frpc admite `includes` con `[[proxies]]` además de `[[visitors]]`.
+- frpc admin API (webServer): `GET /api/reload` recarga proxies y visitantes sin cortar la sesión.
 - Plugin con contenido modificado: `NewProxy` acepta `unchange:false` + `content` y frps registra el proxy con ese contenido.
 - Error `token in login doesn't match token from configuration` = no coincide el **token global** (`auth.token`) entre frps y frpc; no tiene que ver con el token de máquina (ese error sería "token inválido" desde el hub).
 
@@ -184,7 +204,8 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Portal de cliente con alertas propias (Telegram/webhook por cliente).
 - Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
 - Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
-- Que el hub sea visitante stcp para que la IA use SSH privado.
+- Que la IA use SSH privado: el frpc del hub ya existe; falta agregar visitantes stcp para los servicios SSH del alcance.
+- SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.
 - Instalación con una línea (`curl … | sudo bash`) mediante código de un solo uso.

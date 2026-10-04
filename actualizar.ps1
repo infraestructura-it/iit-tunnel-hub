@@ -82,7 +82,8 @@ Get-CimInstance Win32_Process -Filter "Name = 'frpc.exe'" -ErrorAction SilentlyC
   if ($_.CommandLine -match '-c\s+"?([^"]+?\.toml)"?(\s|$)') {
     $toml = $Matches[1]
     if (-not [System.IO.Path]::IsPathRooted($toml)) { $toml = Join-Path "$root\frp" $toml }
-    $frpcPrevios += $toml
+    # El frpc interno del hub (data\hub-frpc.toml) lo arranca el propio hub con un token nuevo: no se relanza
+    if ($toml -notmatch 'hub-frpc\.toml$') { $frpcPrevios += $toml }
   }
 }
 

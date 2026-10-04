@@ -54,7 +54,7 @@ async function health({ store, frps, backups, version }) {
   };
 }
 
-async function gather({ config, store, frps, monitor, bot, ai, backups, stats, version, pluginListening }) {
+async function gather({ config, store, frps, monitor, bot, ai, backups, stats, version, pluginListening, hub = null, snmp = null }) {
   const now = Date.now();
   const f = await frpsProbe(frps);
   const live = await frps.status();
@@ -133,6 +133,17 @@ async function gather({ config, store, frps, monitor, bot, ai, backups, stats, v
     },
     telegram: { enabled: tgEnabled, lastOkAt: bot.lastOkAt ? Math.floor(bot.lastOkAt / 1000) : null, lastError: tgEnabled ? bot.lastError || null : null },
     ai: { enabled: aiS.enabled, ready: ai.ready(), model: aiS.model, pending: ai.pending().length },
+    snmp: (() => {
+      const list = store.listSnmp();
+      const by = (s) => list.filter((d) => d.enabled && d.state === s).length;
+      return {
+        devices: list.length, enabled: list.filter((d) => d.enabled).length,
+        ok: by('ok'), warn: by('warn'), crit: by('crit'), down: by('down'), pending: by('pendiente'),
+        polls: snmp?.stats.polls ?? 0, errors: snmp?.stats.errors ?? 0, lastTickAt: snmp?.stats.lastTickAt ?? null,
+        hubFrpc: hub ? hub.status() : null,
+        hubFrpcLog: hub ? hub.logTail(5) : [],
+      };
+    })(),
   };
   status.warnings = warnings(status, { config, users });
   status.overall = status.warnings.some((w) => w.level === 'bad') ? 'falla' : status.warnings.some((w) => w.level === 'warn') ? 'atención' : 'ok';
@@ -161,6 +172,12 @@ function warnings(s, { config, users }) {
   else if (!b.lastOkAt || nowS - b.lastOkAt > 26 * 3600) add('warn', 'No hay un respaldo correcto en las últimas 26 horas.');
   if (b.count && path.dirname(b.dir) === path.dirname(s.db.path)) add('info', 'Los respaldos están en el mismo disco que la base: cópielos también a otro lugar (NAS, nube) o use BACKUP_DIR.');
   if (b.count && !b.encrypted) add('info', 'Los respaldos no están cifrados (contienen claves de servicios y de la IA). Defina BACKUP_KEY para cifrarlos.');
+
+  const sn = s.snmp;
+  if (sn.enabled && sn.hubFrpc && !sn.hubFrpc.available) add('bad', `Hay ${sn.enabled} equipo(s) SNMP pero el hub no tiene frpc para consultarlos: ${sn.hubFrpc.lastError}`);
+  else if (sn.enabled && sn.hubFrpc && !sn.hubFrpc.running) add('bad', `El frpc interno del hub no está corriendo: ${sn.hubFrpc.lastError || 'sin detalle'}`);
+  if (sn.down) add('warn', `${sn.down} equipo(s) SNMP sin respuesta.`);
+  if (sn.pending) add('info', `${sn.pending} equipo(s) SNMP pendientes de aplicar en su sede (ejecutar el script de accesos).`);
 
   if (!users.length) add('warn', 'Aún no hay usuarios: cree el administrador desde el panel.');
   const admins = users.filter((u) => u.role === 'admin' && u.enabled);

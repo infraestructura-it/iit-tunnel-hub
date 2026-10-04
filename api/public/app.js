@@ -5,7 +5,7 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const state = { token: null, me: null, machines: [], summary: null, events: [], openId: null, timer: null };
+const state = { token: null, me: null, machines: [], summary: null, events: [], snmp: [], openId: null, timer: null };
 const TOKEN_KEY = 'iit-hub-admin-token';
 
 // ---------- API ----------
@@ -66,6 +66,7 @@ const EVENT_STYLE = {
   usuario_creado: 'info', usuario_modificado: 'info', usuario_eliminado: 'warn', cliente_creado: 'info', cliente_renombrado: 'info',
   cliente_eliminado: 'warn', cliente_cambiado: 'info', sesion_iniciada: 'good', login_fallido: 'bad', contrasena_cambiada: 'info',
   '2fa_activado': 'good', '2fa_desactivado': 'warn',
+  snmp_agregado: 'info', snmp_modificado: 'info', snmp_eliminado: 'warn', snmp_alerta: 'bad', snmp_normal: 'good',
   respaldo_creado: 'good', respaldo_fallido: 'bad', respaldo_descargado: 'info', respaldo_eliminado: 'warn', respaldos_configurados: 'info',
   acceso_otorgado: 'info', acceso_revocado: 'warn', clave_rotada: 'warn', reconexion: 'info', accesos_descargados: 'info',
 };
@@ -83,6 +84,8 @@ const EVENT_LABEL = {
   cliente_creado: 'Cliente creado', cliente_renombrado: 'Cliente renombrado', cliente_eliminado: 'Cliente eliminado',
   cliente_cambiado: 'Cambio de cliente', sesion_iniciada: 'Sesión iniciada', login_fallido: 'Ingreso fallido',
   contrasena_cambiada: 'Contraseña cambiada', '2fa_activado': '2FA activado', '2fa_desactivado': '2FA desactivado',
+  snmp_agregado: 'Equipo SNMP agregado', snmp_modificado: 'Equipo SNMP modificado', snmp_eliminado: 'Equipo SNMP eliminado',
+  snmp_alerta: 'Alerta SNMP', snmp_normal: 'SNMP normalizado',
   respaldo_creado: 'Respaldo creado', respaldo_fallido: 'Respaldo fallido', respaldo_descargado: 'Respaldo descargado',
   respaldo_eliminado: 'Respaldo eliminado', respaldos_configurados: 'Respaldos configurados',
 };
@@ -215,8 +218,10 @@ function applyRole() {
 
 async function refresh() {
   try {
-    const [summary, machines, events] = await Promise.all([api('GET', '/summary'), api('GET', '/machines'), api('GET', '/events?limit=60')]);
-    Object.assign(state, { summary, machines, events });
+    const [summary, machines, events, snmp] = await Promise.all([
+      api('GET', '/summary'), api('GET', '/machines'), api('GET', '/events?limit=60'), api('GET', '/snmp/devices').catch(() => []),
+    ]);
+    Object.assign(state, { summary, machines, events, snmp });
     renderSummary();
     renderMachines();
     renderEvents();
@@ -318,6 +323,7 @@ function renderMachines() {
       </div>
       <div class="meta">${conn}</div>
       ${m.services.length ? m.services.map(serviceLine).join('') : (m.visits?.length ? '' : '<div class="no-svc">Sin servicios publicados</div>')}
+      ${typeof snmpCardLine === 'function' ? snmpCardLine(m) : ''}
       ${m.visits?.length ? `<div class="visits-line">🔑 Entra a ${plural(m.visits.length, 'servicio privado', 'servicios privados')}</div>` : ''}
     </article>`;
   }).join('');
@@ -430,6 +436,8 @@ async function renderDrawer() {
           Los <b>privados</b> no abren puertos en internet: solo entran las máquinas a las que les dé acceso.</div>
       </form>` : ''}
     </section>
+
+    ${typeof snmpSection === 'function' ? snmpSection(m) : ''}
 
     ${isStaff() ? visitsSection(m) : ''}
 

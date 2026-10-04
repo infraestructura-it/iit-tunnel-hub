@@ -85,7 +85,7 @@ if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/sshd ] && command -v ssh >/dev/null; the
   SSHD=1
 fi
 
-node --disable-warning=ExperimentalWarning "$ROOT/api/src/server.js" > "$WORK/api.log" 2>&1 & PIDS+=($!)
+node --disable-warning=ExperimentalWarning --openssl-legacy-provider "$ROOT/api/src/server.js" > "$WORK/api.log" 2>&1 & PIDS+=($!)
 "$FRP_DIR/frps" -c "$ROOT/frps/frps.toml" > "$WORK/frps.log" 2>&1 & FRPS_PID=$!; PIDS+=($FRPS_PID)
 sleep 1.5
 
@@ -479,7 +479,98 @@ sapi admin PATCH /users/$TID -d '{"enabled":false}' >/dev/null
 check "deshabilitar un usuario cierra su sesión" '[ "$(scode tec1 GET /machines)" = 401 ]'
 for m in $HOT $TM; do api DELETE /machines/$m >/dev/null; done
 
-echo "12. Respaldos y estado del hub"
+echo "12. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
+SNMPOK=0
+if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/snmpd ] && command -v snmpsim-command-responder >/dev/null; then SNMPOK=1; fi
+if [ $SNMPOK = 1 ]; then
+  # snmpd real (v2c + usuarios v3) y simulador con perfiles de equipos (test/snmp/*.snmprec)
+  mkdir -p "$WORK/snmpd"
+  cat > "$WORK/snmpd/snmpd.conf" <<'CONF'
+agentAddress udp:127.0.0.1:18161
+rocommunity publico 127.0.0.1
+sysLocation Cuarto tecnico
+createUser u_sha256_aes SHA-256 "clave-auth-256" AES "clave-priv-256"
+createUser u_md5_des MD5 "clave-auth-md5" DES "clave-priv-des"
+rouser u_sha256_aes priv
+rouser u_md5_des priv
+CONF
+  SNMP_PERSISTENT_DIR="$WORK/snmpd" /usr/sbin/snmpd -f -Lf "$WORK/snmpd/log" -C -c "$WORK/snmpd/snmpd.conf" -p "$WORK/snmpd/pid" -I -smux,mteTrigger,mteTriggerConf & PIDS+=($!)
+  SIM=$(mktemp -d); chmod 755 "$SIM"; mkdir -p "$SIM/data" "$SIM/cache"; cp "$ROOT"/test/snmp/*.snmprec "$SIM/data/"; chmod -R a+rX "$SIM"; chown nobody:nogroup "$SIM/cache"
+  snmpsim-command-responder --data-dir="$SIM/data" --agent-udpv4-endpoint=127.0.0.1:18162 --cache-dir="$SIM/cache" --process-user=nobody --process-group=nogroup > "$WORK/snmpsim.log" 2>&1 & PIDS+=($!)
+
+  api POST /machines -d '{"name":"Sede SNMP","client":"Clínica Norte"}' > "$WORK/sede.json"
+  SEDE=$(jq -r .machine.id "$WORK/sede.json"); mkdir -p "$WORK/sede"
+  jq -r .frpcToml "$WORK/sede.json" > "$WORK/sede/frpc.toml"
+  ( cd "$WORK/sede" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & SEDEPID=$!; PIDS+=($SEDEPID)
+  dev() { api POST /snmp/devices -d "$1" | jq -r .id; }
+  UPS=$(dev "{\"machine\":\"$SEDE\",\"name\":\"UPS cuarto\",\"host\":\"127.0.0.1\",\"port\":18162,\"version\":\"2c\",\"community\":\"ups\"}")
+  APC=$(dev "{\"machine\":\"$SEDE\",\"name\":\"UPS APC\",\"host\":\"127.0.0.1\",\"port\":18162,\"version\":\"2c\",\"community\":\"apc\"}")
+  PRN=$(dev "{\"machine\":\"$SEDE\",\"name\":\"Impresora\",\"host\":\"127.0.0.1\",\"port\":18162,\"version\":\"2c\",\"community\":\"printer\"}")
+  SW=$(dev "{\"machine\":\"$SEDE\",\"name\":\"Switch\",\"host\":\"127.0.0.1\",\"port\":18162,\"version\":\"2c\",\"community\":\"switch\"}")
+  V3=$(dev "{\"machine\":\"$SEDE\",\"name\":\"Servidor v3\",\"host\":\"127.0.0.1\",\"port\":18161,\"version\":\"3\",\"user\":\"u_sha256_aes\",\"authProtocol\":\"sha256\",\"authKey\":\"clave-auth-256\",\"privProtocol\":\"aes\",\"privKey\":\"clave-priv-256\"}")
+  DES=$(dev "{\"machine\":\"$SEDE\",\"name\":\"Equipo viejo DES\",\"host\":\"127.0.0.1\",\"port\":18161,\"version\":\"3\",\"user\":\"u_md5_des\",\"authProtocol\":\"md5\",\"authKey\":\"clave-auth-md5\",\"privProtocol\":\"des\",\"privKey\":\"clave-priv-des\"}")
+  check "equipos SNMP registrados (v2c y v3)" '[ "$(api GET "/snmp/devices?machine=$SEDE" | jq length)" = 6 ]'
+  check "la comunidad y las contraseñas no se devuelven" '[ "$(api GET /snmp/devices/$UPS | jq -r .community)" = "********" ] && [ "$(api GET /snmp/devices/$V3 | jq -r .privKey)" = "********" ]'
+  check "IP inválida → 400" '[ "$(api POST /snmp/devices -o /dev/null -w "%{http_code}" -d "{\"machine\":\"$SEDE\",\"name\":\"x\",\"host\":\"a;b\",\"community\":\"p\"}")" = 400 ]'
+  check "v3: contraseña corta o cifrado sin autenticación → 400" '[ "$(api POST /snmp/devices -o /dev/null -w "%{http_code}" -d "{\"machine\":\"$SEDE\",\"name\":\"x\",\"host\":\"1.2.3.4\",\"version\":\"3\",\"user\":\"u\",\"authProtocol\":\"sha\",\"authKey\":\"corta\"}")" = 400 ] && [ "$(api POST /snmp/devices -o /dev/null -w "%{http_code}" -d "{\"machine\":\"$SEDE\",\"name\":\"x\",\"host\":\"1.2.3.4\",\"version\":\"3\",\"user\":\"u\",\"authProtocol\":\"none\",\"privProtocol\":\"aes\",\"privKey\":\"clave-larga-1\"}")" = 400 ]'
+  check "un servicio no puede llamarse snmp-…" '[ "$(api POST /machines/$SEDE/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"snmp-9-r1\",\"type\":\"stcp\",\"localPort\":161}")" = 400 ]'
+  wait_for "[ \"\$(api GET /machines/$SEDE | jq -r .online)\" = true ]"
+  check "sin aplicar en la sede queda pendiente" '[ "$(api POST /snmp/devices/$UPS/poll | jq -r .result.state)" = pendiente ]'
+  check "el frpc del hub entra a frps con su usuario interno" 'wait_for "grep -q \"login to server success\" \"$WORK/hub-frpc.log\""'
+
+  api GET /machines/$SEDE/accesos.toml > "$WORK/sede/accesos-$SEDE.toml"
+  check "el archivo de la sede publica los equipos como sudp sin clave" 'grep -q "name = \"snmp-$UPS-r1\"" "$WORK/sede/accesos-$SEDE.toml" && grep -q "type = \"sudp\"" "$WORK/sede/accesos-$SEDE.toml" && ! grep -q secretKey "$WORK/sede/accesos-$SEDE.toml"'
+  kill $SEDEPID 2>/dev/null; sleep 0.5
+  ( cd "$WORK/sede" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc2.log 2>&1 ) & SEDEPID=$!; PIDS+=($SEDEPID)
+  pollok() { api POST /snmp/devices/$1/poll | jq -r ".result.ok"; }
+  check "UPS consultada por el túnel (UPS-MIB detectado)" 'wait_for_long "[ \"\$(pollok $UPS)\" = true ]" && [ "$(api GET /snmp/devices/$UPS | jq -r ".detected + \" \" + (.metrics.charge|tostring)")" = "ups 100" ]'
+  check "UPS APC (PowerNet) detectada con autonomía" '[ "$(pollok $APC)" = true ] && [ "$(api GET /snmp/devices/$APC | jq -r ".detected + \" \" + (.metrics.runtime|tostring)")" = "ups-apc 45" ]'
+  check "impresora: consumible bajo → aviso" '[ "$(pollok $PRN)" = true ] && [ "$(api GET /snmp/devices/$PRN | jq -r ".detected + \" \" + .state + \" \" + (.tables.supplies[0].percent|tostring)")" = "printer warn 8" ]'
+  check "switch: interfaces leídas" '[ "$(pollok $SW)" = true ] && [ "$(api GET /snmp/devices/$SW | jq -r ".detected + \" \" + (.tables.interfaces|length|tostring)")" = "network 4" ]'
+  check "SNMPv3 SHA-256/AES por el túnel (servidor detectado)" '[ "$(pollok $V3)" = true ] && [ "$(api GET /snmp/devices/$V3 | jq -r .detected)" = host ]'
+  check "SNMPv3 MD5/DES (equipos antiguos)" '[ "$(pollok $DES)" = true ]'
+  check "historial guardado desde la primera lectura" '[ "$(api GET "/snmp/devices/$UPS/history?range=6h&metric=charge" | jq ".series.charge|length")" -ge 1 ]'
+  check "explorador de OIDs" 'api GET "/snmp/devices/$UPS/walk?oid=1.3.6.1.2.1.1" | jq -r ".[].value" | grep -q ups-cuarto-tecnico'
+
+  : > "$WORK/hooks.log"
+  api PATCH /snmp/devices/$UPS -d '{"community":"ups-bateria"}' >/dev/null
+  api POST /snmp/devices/$UPS/poll >/dev/null; sleep 3; api POST /snmp/devices/$UPS/poll >/dev/null
+  check "UPS en batería → alerta crítica por los canales" 'wait_for "grep -q snmp_alert \"$WORK/hooks.log\"" && jq -r "select(.type==\"snmp_alert\") | .text" "$WORK/hooks.log" | grep -q "batería"'
+  check "la alerta incluye la autonomía bajo el mínimo" 'jq -r "select(.type==\"snmp_alert\") | .text" "$WORK/hooks.log" | grep -q "Autonomía 9 min"'
+  api PATCH /snmp/devices/$UPS -d '{"community":"ups"}' >/dev/null
+  api POST /snmp/devices/$UPS/poll >/dev/null
+  check "al volver la energía → aviso de normalización" 'wait_for "grep -q snmp_ok \"$WORK/hooks.log\""'
+  api PATCH /snmp/devices/$SW -d '{"watch":["3"]}' >/dev/null
+  check "interfaz vigilada caída → crítico" '[ "$(api POST /snmp/devices/$SW/poll | jq -r .result.state)" = crit ] && api GET /snmp/devices/$SW | jq -r ".alerts[].text" | grep -q "Gi1/0/3"'
+
+  # Otra máquina registrada que roba la clave del sudp no puede consultar el equipo
+  SK=$(awk -v n="snmp-$UPS" '$0 ~ "name = \""n"\"" {f=1} f && /secretKey/ {gsub(/.*= "|"/,""); print; exit}' "$WORK/hub-frpc.toml")
+  api POST /machines -d '{"name":"Ladron SNMP"}' > "$WORK/lad.json"; LAD=$(jq -r .machine.id "$WORK/lad.json"); mkdir -p "$WORK/lad"
+  jq -r .frpcToml "$WORK/lad.json" > "$WORK/lad/frpc.toml"
+  printf '[[visitors]]\nname = "robo"\ntype = "sudp"\nserverUser = "%s"\nserverName = "snmp-%s-r1"\nsecretKey = "%s"\nbindAddr = "127.0.0.1"\nbindPort = 18170\n' "$SEDE" "$UPS" "$SK" > "$WORK/lad/accesos-$LAD.toml"
+  ( cd "$WORK/lad" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & LADPID=$!; PIDS+=($LADPID)
+  wait_for "grep -q \"start visitor success\" $WORK/lad/frpc.log"
+  check "otra máquina con la clave no consulta el SNMP" '[ -n "$SK" ] && ! snmpget -v2c -c ups -t 2 -r 0 127.0.0.1:18170 1.3.6.1.2.1.1.5.0 >/dev/null 2>&1'
+  kill $LADPID 2>/dev/null
+  printf 'serverAddr = "127.0.0.1"\nserverPort = 17000\nuser = "_hub"\nauth.token = "%s"\nmetadatas.token = "falso"\n' "$FRP_AUTH_TOKEN" > "$WORK/falso-hub.toml"
+  FH=$(start_frpc "$WORK/falso-hub.toml"); PIDS+=($FH)
+  check "nadie más puede entrar como el usuario interno del hub" 'wait_for "grep -q \"token inválido\" $WORK/falso-hub.toml.log"'
+  kill $FH 2>/dev/null
+
+  api PATCH /snmp/devices/$PRN -d '{"port":18163}' >/dev/null
+  check "cambiar la IP o el puerto exige aplicar el archivo nuevo" '[ "$(api POST /snmp/devices/$PRN/poll | jq -r .result.state)" = pendiente ] && api GET /machines/$SEDE/accesos.toml | grep -q "snmp-$PRN-r2"'
+  check "el cliente de otra empresa no ve los equipos" '[ "$(scode h3 GET /snmp/devices/$UPS)" = 404 ] && [ "$(sapi h3 GET /snmp/devices | jq length)" = 0 ]'
+  check "la IA lee los equipos SNMP" 'say general "$(tool equipos_snmp "{\"maquina_id\":\"$SEDE\"}")" | jq -r .reply | grep -q "Equipo viejo DES"'
+  check "estado del hub: SNMP y frpc interno" '[ "$(api GET /status | jq -r ".snmp.hubFrpc.running and (.snmp.devices >= 6)")" = true ]'
+  api DELETE /snmp/devices/$DES >/dev/null
+  check "eliminar un equipo lo quita del frpc del hub" 'wait_for "! grep -q \"name = \\\"snmp-$DES\\\"\" \"$WORK/hub-frpc.toml\""'
+  kill $SEDEPID 2>/dev/null
+  for m in $SEDE $LAD; do api DELETE /machines/$m >/dev/null; done
+else
+  echo "  - (pruebas SNMP omitidas: requieren root, snmpd y snmpsim-command-responder)"
+fi
+
+echo "13. Respaldos y estado del hub"
 H=$(curl -s -w " %{http_code}" $API/health)
 check "health público: 200 con base y frps bien" '[ "${H##* }" = 200 ] && echo "${H% *}" | jq -e ".ok and .checks.db and .checks.frps" >/dev/null'
 autos() { api GET /backups | jq '[.list[] | select(.kind=="auto")] | length'; }
@@ -514,15 +605,16 @@ api GET /status > "$WORK/status.json"
 check "estado: frps, plugin, base y monitor" 'jq -e ".frps.reachable and .plugin.listening and (.plugin.calls > 0) and .db.writable and (.monitor.lastCheckAt != null) and (.hub.uptimeSeconds > 0)" "$WORK/status.json" >/dev/null'
 check "estado: advierte administradores sin 2FA" 'jq -e "[.warnings[].text] | any(test(\"sin verificación en dos pasos\"))" "$WORK/status.json" >/dev/null'
 
-echo "13. Configuración y limpieza"
+echo "14. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
 check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"extra\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
 check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/extra | jq -r .deleted)" = "extra" ]'
 check "eliminar máquina" '[ "$(api DELETE /machines/$ID | jq -r .deleted)" = "$ID" ]'
 check "máquina eliminada ya no recibe tráfico" 'http_blocked'
-check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \"\$(curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq length)\" = 0 ]"'
+others() { curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq '[.[] | select(.user != "_hub")] | length'; }
+check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \$(others) = 0 ]"'
 
-echo "14. Servidor frps caído"
+echo "15. Servidor frps caído"
 : > "$WORK/hooks.log"
 kill $FRPS_PID 2>/dev/null
 check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'

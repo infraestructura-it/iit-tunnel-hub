@@ -200,7 +200,7 @@ $MachineId  = "${machine.id}"
 $Server     = "${serverAddr}:${frps.bindPort}"
 $TaskName   = "IIT frpc"
 
-$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Administrators")
+$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $Dir   = if ($admin) { Join-Path $env:ProgramData "iit-frpc" } else { Join-Path $env:LOCALAPPDATA "iit-frpc" }
 $Exe   = Join-Path $Dir "frpc.exe"
 $Conf  = Join-Path $Dir "frpc.toml"
@@ -323,10 +323,13 @@ function howToConnect(a) {
   return { kind: 'TCP', cmd: `127.0.0.1:${a.bind_port}` };
 }
 
-function linuxAccess(visitor, grants, access) {
+const snmpLines = (snmp, fmt) => snmp.filter((d) => d.enabled).map((d) => fmt(`SNMP · ${d.name} (${d.host}:${d.port}) publicado para el hub`));
+
+function linuxAccess(visitor, grants, access, snmp = []) {
   if (access.split('\n').some((l) => l.trim() === 'IIT_ACCESOS')) throw new Error('marcador reservado');
   const file = accessFileName(visitor.id, '/etc/iit-frpc/');
-  const list = grants.map((a) => { const h = howToConnect(a); return `echo "   ${a.owner_id}/${a.service} · ${h.kind}:  ${h.cmd}"`; }).join('\n');
+  const list = [...grants.map((a) => { const h = howToConnect(a); return `echo "   ${a.owner_id}/${a.service} · ${h.kind}:  ${h.cmd}"`; }),
+    ...snmpLines(snmp, (s) => `echo "   ${s}"`)].join('\n');
   return `#!/usr/bin/env bash
 # Accesos privados de IIT Tunnel Hub para ${visitor.name} (${visitor.id})
 # Generado: ${new Date().toISOString()}
@@ -365,15 +368,16 @@ else
 fi
 ok "frpc reiniciado"
 echo
-echo "Conéctese desde este equipo:"
-${list || 'echo "   (sin accesos: se quitaron todos)"'}
+echo "Accesos y equipos SNMP de este equipo:"
+${list || 'echo "   (ninguno: se quitaron todos)"'}
 `;
 }
 
-function windowsAccess(visitor, grants, access) {
+function windowsAccess(visitor, grants, access, snmp = []) {
   if (access.split('\n').some((l) => l.startsWith("'@"))) throw new Error('secuencia reservada');
   const name = accessFileName(visitor.id);
-  const list = grants.map((a) => { const h = howToConnect(a); return `Write-Host "   ${a.owner_id}/${a.service} · ${h.kind}:  ${h.cmd}"`; }).join('\n');
+  const list = [...grants.map((a) => { const h = howToConnect(a); return `Write-Host "   ${a.owner_id}/${a.service} · ${h.kind}:  ${h.cmd}"`; }),
+    ...snmpLines(snmp, (s) => `Write-Host "   ${s}"`)].join('\n');
   return `\uFEFF# Accesos privados de IIT Tunnel Hub para ${visitor.name} (${visitor.id})
 # Generado: ${new Date().toISOString()}
 # ⚠ Contiene las claves de los servicios privados: no lo comparta.
@@ -425,8 +429,8 @@ if ($manual) {
 }
 
 Write-Host ""
-Write-Host "Conéctese desde este equipo:"
-${list || 'Write-Host "   (sin accesos: se quitaron todos)"'}
+Write-Host "Accesos y equipos SNMP de este equipo:"
+${list || 'Write-Host "   (ninguno: se quitaron todos)"'}
 `;
 }
 

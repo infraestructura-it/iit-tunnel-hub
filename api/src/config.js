@@ -30,6 +30,11 @@ const config = {
   backupDir: env.BACKUP_DIR || path.join(path.dirname(path.resolve(env.DB_PATH || './data/hub.db')), 'respaldos'),
   backupKey: env.BACKUP_KEY || '',
 
+  // frpc interno del hub (visitante de servicios privados, p. ej. SNMP) y puertos locales que abre
+  hubFrpcPath: env.HUB_FRPC_PATH || '',
+  hubFrpcAdminPort: int('HUB_FRPC_ADMIN_PORT', 7401),
+  snmpPortBase: int('SNMP_PORT_BASE', 16200),
+
   // Alertas: cada cuánto se revisa el estado y zona horaria de los mensajes
   alertCheckSeconds: int('ALERT_CHECK_SECONDS', 15),
   timezone: env.TZ_ALERTS || 'America/Bogota',

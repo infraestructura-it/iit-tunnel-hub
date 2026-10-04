@@ -99,6 +99,10 @@ function message(alert, tz) {
       return `✅ El servidor de túneles (frps) volvió a responder\nEstuvo caído ${duration(alert.downtimeSeconds)}`;
     case 'ai_analysis':
       return `🤖 Diagnóstico IA · ${m.name}${m.client ? ` · ${m.client}` : ''}\n${alert.analysis}`;
+    case 'snmp_alert':
+      return `${alert.level === 'crit' ? '🔴' : '🟠'} ${alert.text}\n${alert.device.name} (${alert.device.host}) · ${alert.machine.name}${alert.machine.client ? ` · ${alert.machine.client}` : ''}\nDesde: ${when(alert.since)}`;
+    case 'snmp_ok':
+      return `🟢 Normalizado: ${alert.text}\n${alert.device.name} (${alert.device.host}) · ${alert.machine.name}${alert.machine.client ? ` · ${alert.machine.client}` : ''}\nDuró ${duration(alert.downtimeSeconds)}`;
     case 'backup_failed':
       return `💾 Falló el respaldo ${alert.kind === 'auto' ? 'automático ' : ''}de la base del hub\n${alert.error || ''}`.trim();
     case 'test':

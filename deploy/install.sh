@@ -38,6 +38,7 @@ chown -R root:iit-hub "$PREFIX" && chmod 640 "$PREFIX/.env"
 echo "→ frps v$FRP_VERSION ($ARCH)"
 curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${ARCH}.tar.gz" | tar xz -C /tmp
 install -m 755 "/tmp/frp_${FRP_VERSION}_linux_${ARCH}/frps" /usr/local/bin/frps
+install -m 755 "/tmp/frp_${FRP_VERSION}_linux_${ARCH}/frpc" /usr/local/bin/frpc   # visitante interno del hub (SNMP)
 rm -rf "/tmp/frp_${FRP_VERSION}_linux_${ARCH}"
 
 echo "→ Servicios systemd"

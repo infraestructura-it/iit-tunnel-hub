@@ -32,7 +32,7 @@ if ($ocupados) {
 
 # ---------- hub (panel + API) ----------
 Write-Host "Iniciando hub en http://127.0.0.1:$env:PORT ..." -ForegroundColor Cyan
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$root\api'; node --disable-warning=ExperimentalWarning src\server.js"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$root\api'; node --disable-warning=ExperimentalWarning --openssl-legacy-provider src\server.js"
 Start-Sleep -Seconds 2
 
 # ---------- frps ----------
