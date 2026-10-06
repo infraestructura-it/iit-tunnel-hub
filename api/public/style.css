@@ -445,3 +445,21 @@ b.ko { color: var(--red); font-weight: 500; }
   .custom-row { grid-template-columns: 1fr 1fr; }
   .snmp-metrics { grid-template-columns: 1fr 1fr; }
 }
+
+/* Instalar con código */
+.enroll-modal { max-width: 760px; }
+.enroll-result { margin-top: 18px; background: #05070b; border: 1px solid rgba(52,245,164,.35); border-radius: 12px; padding: 16px; }
+.enroll-code { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.enroll-code span { font-family: var(--code); font-size: 26px; letter-spacing: .12em; color: var(--green); }
+.enroll-code small { font-family: var(--code); font-size: 12px; color: var(--muted); }
+.enroll-code small.expired { color: var(--red, #f87171); }
+.enroll-step { margin: 14px 0 6px; font-size: 13px; color: var(--muted); }
+.enroll-step b { color: var(--text); }
+.enroll-result .secret { color: #b9f5dd; border-color: var(--line-2); }
+.enroll-notes { margin: 14px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; display: grid; gap: 4px; }
+.enroll-result .warning { margin: 10px 0 0; }
+.enroll-table td { vertical-align: top; }
+@media (max-width: 760px) {
+  header.top { flex-wrap: wrap; row-gap: 10px; }
+  header.top .user-btn .lbl { display: none; }
+}

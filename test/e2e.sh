@@ -479,7 +479,50 @@ sapi admin PATCH /users/$TID -d '{"enabled":false}' >/dev/null
 check "deshabilitar un usuario cierra su sesión" '[ "$(scode tec1 GET /machines)" = 401 ]'
 for m in $HOT $TM; do api DELETE /machines/$m >/dev/null; done
 
-echo "12. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
+echo "12. Instalación con código de un solo uso"
+HUBURL="http://127.0.0.1:$PORT"
+enroll() { curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/json" "$API/enroll" -d "{\"code\":\"$1\",\"platform\":\"${2:-linux}\",\"hostname\":\"${3:-x}\"}"; }
+check "solo el administrador genera códigos" '[ "$(scode h3 POST /enrollments -d "{}")" = 403 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" $API/enrollments)" = 401 ]'
+check "código para una máquina inexistente → 404" '[ "$(api POST /enrollments -o /dev/null -w "%{http_code}" -d "{\"machine\":\"no-existe\"}")" = 404 ]'
+api POST /enrollments -d '{"client":"clinica-norte","minutes":30}' > "$WORK/enr.json"
+CODE=$(jq -r .code "$WORK/enr.json")
+check "código de 12 caracteres con comandos para Windows y Linux" '[[ "$CODE" =~ ^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$ ]] && jq -r .commands.windows "$WORK/enr.json" | grep -qF "irm $HUBURL/i/$CODE/windows | iex" && jq -r .commands.linux "$WORK/enr.json" | grep -qF "curl -fsSL $HUBURL/i/$CODE/linux | sudo bash"'
+check "el hub guarda solo el hash del código" '! grep -qa "${CODE//-/}" "$WORK"/hub.db*'
+curl -s "$HUBURL/i/$CODE/linux" > "$WORK/boot.sh"
+check "el arranque Linux es bash válido y no lleva el token" 'bash -n "$WORK/boot.sh" && grep -q "^CODE=.$CODE.$" "$WORK/boot.sh" && ! grep -q "metadatas" "$WORK/boot.sh"'
+curl -s "$HUBURL/i/$CODE/windows" > "$WORK/boot.ps1"
+check "el arranque Windows corre en un bloque sin exit (no cierra PowerShell)" 'head -1 "$WORK/boot.ps1" | grep -q "^& {" && ! grep -qw exit "$WORK/boot.ps1" && grep -q "/api/enroll" "$WORK/boot.ps1"'
+# El arranque se ejecuta de verdad; "bash" e "id" falsos atrapan el instalador sin instalar nada en este equipo
+mkdir -p "$WORK/fakebin" "$WORK/enr"
+printf '#!/bin/sh\necho 0\n' > "$WORK/fakebin/id"
+printf '#!/bin/sh\ncp "$1" "%s/canjeado.sh"\n' "$WORK" > "$WORK/fakebin/bash"
+chmod +x "$WORK/fakebin/id" "$WORK/fakebin/bash"
+PATH="$WORK/fakebin:$PATH" /bin/bash "$WORK/boot.sh" > "$WORK/boot.out" 2>&1 || true
+EM=$(api GET /enrollments | jq -r '.[] | select(.status=="usado") | .usedMachine' | head -1)
+check "el arranque canjea el código y recibe el instalador" '[ -s "$WORK/canjeado.sh" ] && head -1 "$WORK/canjeado.sh" | grep -q "^#!/usr/bin/env bash" && /bin/bash -n "$WORK/canjeado.sh"'
+check "la máquina nueva queda en el cliente con el nombre del equipo" '[ "$(api GET /machines/$EM | jq -r .clientId)" = clinica-norte ] && [ "$(api GET /machines/$EM | jq -r .name)" = "$(hostname | tr -cd "A-Za-z0-9.-" | cut -c1-63)" ]'
+awk "/^cat > .*<<'IIT_FRPC_TOML'/{f=1;next} /^IIT_FRPC_TOML/{f=0} f" "$WORK/canjeado.sh" | sed "s|/etc/iit-frpc/|$WORK/enr/|" > "$WORK/enr/frpc.toml"
+EPID=$(start_frpc "$WORK/enr/frpc.toml"); PIDS+=($EPID)
+check "el token entregado conecta la máquina" 'wait_for "[ \"\$(api GET /machines/$EM | jq -r .online)\" = true ]"'
+check "el código no sirve dos veces" '[ "$(enroll "$CODE")" = 410 ]'
+check "con un código usado, el arranque solo muestra el error" 'curl -s "$HUBURL/i/$CODE/linux" | grep -q "^echo \"X Codigo invalido"'
+api POST /enrollments -d "{\"machine\":\"$EM\"}" > "$WORK/enr2.json"
+kill $EPID 2>/dev/null; sleep 0.5; EPID=$(start_frpc "$WORK/enr/frpc.toml"); PIDS+=($EPID)
+check "generar un código no desconecta la máquina instalada" 'wait_for "grep -q \"login to server success\" $WORK/enr/frpc.toml.log"'
+check "revocar un código vigente" '[ "$(api DELETE /enrollments/$(jq -r .enrollment.id "$WORK/enr2.json") | jq -r .status)" = revocado ]'
+check "un código revocado no se canjea" '[ "$(enroll "$(jq -r .code "$WORK/enr2.json")")" = 410 ]'
+C3=$(api POST /enrollments -d "{\"machine\":\"$EM\"}" | jq -r .code)
+curl -s -H "Content-Type: application/json" "$API/enroll" -d "{\"code\":\"${C3,,}\",\"platform\":\"windows\",\"hostname\":\"OTRO-PC\"}" > "$WORK/inst-code.ps1"
+check "reinstalar con código entrega el instalador de esa máquina (acepta minúsculas)" 'grep -q "^\$MachineId  = \"$EM\"" "$WORK/inst-code.ps1" && grep -q "Register-ScheduledTask" "$WORK/inst-code.ps1"'
+kill $EPID 2>/dev/null; sleep 0.5; EPID=$(start_frpc "$WORK/enr/frpc.toml"); PIDS+=($EPID)
+check "y el token anterior deja de servir" 'wait_for "grep -q \"token inválido\" $WORK/enr/frpc.toml.log"'
+kill $EPID 2>/dev/null
+check "canjes auditados con el nombre del equipo" '[ "$(api GET "/events?machine=$EM" | jq "[.[] | select(.kind==\"codigo_canjeado\")] | length")" = 2 ] && api GET "/events?machine=$EM" | jq -r ".[] | select(.kind==\"codigo_canjeado\") | .actor" | grep -q "instalador (OTRO-PC)"'
+for i in $(seq 1 10); do enroll AAAA-BBBB-CCCC >/dev/null; done
+check "10 códigos inexistentes desde una IP → 429" '[ "$(enroll "$C3")" = 429 ]'
+api DELETE /machines/$EM >/dev/null
+
+echo "13. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
 SNMPOK=0
 if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/snmpd ] && command -v snmpsim-command-responder >/dev/null; then SNMPOK=1; fi
 if [ $SNMPOK = 1 ]; then
@@ -570,7 +613,7 @@ else
   echo "  - (pruebas SNMP omitidas: requieren root, snmpd y snmpsim-command-responder)"
 fi
 
-echo "13. Respaldos y estado del hub"
+echo "14. Respaldos y estado del hub"
 H=$(curl -s -w " %{http_code}" $API/health)
 check "health público: 200 con base y frps bien" '[ "${H##* }" = 200 ] && echo "${H% *}" | jq -e ".ok and .checks.db and .checks.frps" >/dev/null'
 autos() { api GET /backups | jq '[.list[] | select(.kind=="auto")] | length'; }
@@ -605,7 +648,7 @@ api GET /status > "$WORK/status.json"
 check "estado: frps, plugin, base y monitor" 'jq -e ".frps.reachable and .plugin.listening and (.plugin.calls > 0) and .db.writable and (.monitor.lastCheckAt != null) and (.hub.uptimeSeconds > 0)" "$WORK/status.json" >/dev/null'
 check "estado: advierte administradores sin 2FA" 'jq -e "[.warnings[].text] | any(test(\"sin verificación en dos pasos\"))" "$WORK/status.json" >/dev/null'
 
-echo "14. Configuración y limpieza"
+echo "15. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
 check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"extra\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
 check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/extra | jq -r .deleted)" = "extra" ]'
@@ -614,7 +657,7 @@ check "máquina eliminada ya no recibe tráfico" 'http_blocked'
 others() { curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq '[.[] | select(.user != "_hub")] | length'; }
 check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \$(others) = 0 ]"'
 
-echo "15. Servidor frps caído"
+echo "16. Servidor frps caído"
 : > "$WORK/hooks.log"
 kill $FRPS_PID 2>/dev/null
 check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'

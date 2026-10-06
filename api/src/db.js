@@ -197,6 +197,27 @@ ${SERVICES_TABLE('services')}
       PRIMARY KEY (device_id, metric, ts)
     ) WITHOUT ROWID;
   `);
+  db.exec(`
+    -- Códigos de instalación de un solo uso: el equipo descarga el instalador directamente del hub.
+    -- Con machine_id instala esa máquina (rota su token al canjearse); sin machine_id crea una nueva
+    -- en client_id (o sin cliente) con el nombre del equipo. Solo se guarda el hash del código.
+    CREATE TABLE IF NOT EXISTS enrollments (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      code_hash     TEXT NOT NULL UNIQUE,
+      hint          TEXT NOT NULL,
+      machine_id    TEXT REFERENCES machines(id) ON DELETE CASCADE,
+      client_id     TEXT REFERENCES clients(id) ON DELETE CASCADE,
+      server_addr   TEXT NOT NULL,
+      created_by    TEXT,
+      created_at    INTEGER NOT NULL,
+      expires_at    INTEGER NOT NULL,
+      used_at       INTEGER,
+      used_ip       TEXT,
+      used_host     TEXT,
+      used_machine  TEXT,
+      revoked_at    INTEGER
+    );
+  `);
   return new Store(db);
 }
 
@@ -534,6 +555,31 @@ class Store {
   }
   deleteSession(idHash) { this.db.prepare('DELETE FROM sessions WHERE id = ?').run(idHash); }
   deleteUserSessions(userId, exceptIdHash = '') { this.db.prepare('DELETE FROM sessions WHERE user_id = ? AND id <> ?').run(Number(userId), exceptIdHash); }
+
+  // ---------- códigos de instalación ----------
+  createEnrollment(e) {
+    const r = this.db.prepare(`INSERT INTO enrollments (code_hash, hint, machine_id, client_id, server_addr, created_by, created_at, expires_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(e.codeHash, e.hint, e.machineId ?? null, e.clientId ?? null, e.serverAddr, e.createdBy ?? null, now(), e.expiresAt);
+    return this.getEnrollment(Number(r.lastInsertRowid));
+  }
+  getEnrollment(id) { return this.db.prepare('SELECT * FROM enrollments WHERE id = ?').get(Number(id)) || null; }
+  enrollmentByHash(hash) { return this.db.prepare('SELECT * FROM enrollments WHERE code_hash = ?').get(hash) || null; }
+  listEnrollments(limit = 50) {
+    // Se conservan 7 días para la auditoría; los eventos guardan el resto
+    this.db.prepare('DELETE FROM enrollments WHERE expires_at < ?').run(now() - 7 * 86400);
+    return this.db.prepare('SELECT * FROM enrollments ORDER BY id DESC LIMIT ?').all(Math.min(Math.max(limit, 1), 200));
+  }
+  /** Marca el código como usado solo si sigue vigente. false = ya usado, vencido o revocado (canje doble). */
+  useEnrollment(id, { ip, host }) {
+    return this.db.prepare(`UPDATE enrollments SET used_at = ?, used_ip = ?, used_host = ?
+                            WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`)
+      .run(now(), String(ip).slice(0, 64), String(host).slice(0, 64), Number(id), now()).changes > 0;
+  }
+  setEnrollmentMachine(id, machineId) { this.db.prepare('UPDATE enrollments SET used_machine = ? WHERE id = ?').run(machineId, Number(id)); }
+  revokeEnrollment(id) {
+    return this.db.prepare('UPDATE enrollments SET revoked_at = ? WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL').run(now(), Number(id)).changes > 0;
+  }
 
   transaction(fn) {
     this.db.exec('BEGIN');

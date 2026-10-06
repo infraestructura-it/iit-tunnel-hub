@@ -53,7 +53,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `test/snmp/*.snmprec` | Equipos simulados para snmpsim (comunidad = nombre del archivo) |
 | `api/src/plugin.js` | Lógica del server plugin (Login, NewProxy, CloseProxy, NewUserConn, NewWorkConn, Ping) |
 | `api/src/machines.js` | Validación, tokens (SHA-256, comparación en tiempo constante), slugs, generación de `frpc.toml`, accesos stcp (`normalizeAccess`, `accessToml`, `rdpFile`) |
-| `api/src/db.js` | Esquema SQLite (`machines`, `services`, `service_access`, `clients`, `users`, `user_clients`, `sessions`, `events`, `settings`, `ai_*`), migraciones y consultas |
+| `api/src/db.js` | Esquema SQLite (`machines`, `services`, `service_access`, `clients`, `users`, `user_clients`, `sessions`, `events`, `settings`, `ai_*`, `snmp_*`, `enrollments`), migraciones y consultas |
 | `api/src/alerts.js` | Monitor de estado (cada `ALERT_CHECK_SECONDS`) y envío de alertas por Telegram y webhooks; configuración en la tabla `settings` |
 | `api/src/ai.js` | Agente Claude: herramientas, bucle tool_use, conversaciones, aprobaciones, diagnóstico de alertas, uso |
 | `api/src/ai-scope.js` | Alcance de IA por máquina: validación, vistas sin secretos, ejecución HTTP por frps y SSH con clave del hub |
@@ -61,6 +61,8 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/public/ai.js` | Panel: chat, pendientes, ajustes de IA y editor de alcance |
 | `test/mock-claude.js`, `test/mock-telegram.js` | Simuladores para las pruebas (validan el formato de la API como lo haría la real) |
 | `api/src/installers.js` | Instaladores autocontenidos por máquina (Linux `.sh`, Windows `.ps1`) con el toml, el token y los accesos incrustados; scripts de accesos (`ACCESS_PLATFORMS`) |
+| `api/src/enroll.js` | Instalación con código de un solo uso: códigos, URL pública del hub y arranques (`irm … \| iex`, `curl … \| sudo bash`) |
+| `api/public/enroll.js` | Panel: modal "Instalar con código" (máquina nueva por cliente o reinstalar una máquina), lista y revocación |
 | `api/src/frps.js` | Cliente de la API del dashboard de frps (caché 3 s) |
 | `api/src/config.js` | Variables de entorno |
 | `frps/frps.toml` | Config de frps; toma valores con `{{ .Envs.X }}` |
@@ -70,7 +72,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (186 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (204 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -114,6 +116,17 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Solo lectura: no hay SET. Secretos (comunidad, contraseñas v3) nunca salen en la API (`********` conserva el valor al editar) ni a la IA.
 - Historial: `snmp_samples` WITHOUT ROWID `(device_id, metric, ts)`; métricas `hist` del perfil + `if.<idx>.in/out` (vigiladas o físicas arriba, máx. 24) + `supply.<idx>` + `disk.<idx>` + `c.<clave>`; poda a 30 días.
 - Detección: `ups-apc` → `ups` → `printer` → `host` (hrSystemUptime, salvo sysServices solo capa 2/3) → `network` → `generic`.
+
+## Instalación con código: reglas (no romper)
+
+- Solo admin genera (`POST /api/enrollments`). El código (12 caracteres de `ALPHABET`, 60 bits) se muestra **una vez**; en `enrollments` solo `code_hash` (sha256 con prefijo) y `hint` (últimos 4).
+- `GET /i/:code/:platform` es público y **no lleva secretos**: solo el código que la persona ya tiene. Código inválido ⇒ 200 con un arranque que solo imprime el error (curl -f e irm no muestran nada útil con 4xx).
+- `POST /api/enroll` es público: canje atómico (`useEnrollment` con `used_at IS NULL AND revoked_at IS NULL AND expires_at > now`) dentro de la transacción que rota el token o crea la máquina. Devuelve el instalador normal (`PLATFORMS[..].build`).
+- Generar un código **no** toca el token; el token se rota al canjear (modo máquina). Modo nuevo: `normalizeMachine({name: hostname limpio, client})`.
+- Límite: 10 códigos inexistentes por IP en 15 min ⇒ 429 (también en el arranque). Usados, vencidos o revocados no cuentan.
+- Arranque Windows: todo dentro de `& { … }` y `return` (un `exit` en `irm | iex` cierra la ventana); solo ASCII (PS 5.1 puede decodificar mal acentos); escribe el instalador con BOM en `GetTempPath()`, lo ejecuta con `powershell -ExecutionPolicy Bypass -File` y lo borra.
+- Arranque Linux: exige root, canjea con curl o wget, valida que la respuesta empiece con `#!/usr/bin/env bash`, ejecuta y borra el temporal (`umask 077`).
+- URL: `HUB_PUBLIC_URL` o la del request (`x-forwarded-proto/host`, saneada). El panel avisa si es loopback o http.
 
 ## Respaldos y estado: reglas (no romper)
 
@@ -208,4 +221,3 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.
-- Instalación con una línea (`curl … | sudo bash`) mediante código de un solo uso.

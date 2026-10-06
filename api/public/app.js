@@ -69,6 +69,7 @@ const EVENT_STYLE = {
   snmp_agregado: 'info', snmp_modificado: 'info', snmp_eliminado: 'warn', snmp_alerta: 'bad', snmp_normal: 'good',
   respaldo_creado: 'good', respaldo_fallido: 'bad', respaldo_descargado: 'info', respaldo_eliminado: 'warn', respaldos_configurados: 'info',
   acceso_otorgado: 'info', acceso_revocado: 'warn', clave_rotada: 'warn', reconexion: 'info', accesos_descargados: 'info',
+  codigo_generado: 'info', codigo_canjeado: 'good', codigo_revocado: 'warn', codigo_rechazado: 'bad',
 };
 const EVENT_LABEL = {
   conectada: 'Conectada', servicio_activo: 'Servicio activo', habilitada: 'Habilitada', registrada: 'Registrada',
@@ -88,6 +89,8 @@ const EVENT_LABEL = {
   snmp_alerta: 'Alerta SNMP', snmp_normal: 'SNMP normalizado',
   respaldo_creado: 'Respaldo creado', respaldo_fallido: 'Respaldo fallido', respaldo_descargado: 'Respaldo descargado',
   respaldo_eliminado: 'Respaldo eliminado', respaldos_configurados: 'Respaldos configurados',
+  codigo_generado: 'Código de instalación generado', codigo_canjeado: 'Instalada con código',
+  codigo_revocado: 'Código de instalación revocado', codigo_rechazado: 'Código de instalación rechazado',
 };
 const TYPE_LABEL = { stcp: 'privado' };
 const typeTag = (t) => `<span class="tag ${t}">${TYPE_LABEL[t] || t}</span>`;
@@ -383,6 +386,7 @@ async function renderDrawer() {
       <button class="btn small" data-act="toggle">${m.enabled ? 'Deshabilitar' : 'Habilitar'}</button>
       <button class="btn small" data-act="alerts" title="Avisar si esta máquina se desconecta">${m.alerts ? '🔔 Alertas activadas' : '🔕 Alertas apagadas'}</button>
       <button class="btn small primary" data-act="install">Generar instalador</button>
+      ${role() === 'admin' ? '<button class="btn small" data-act="enroll" title="Código de un solo uso para instalar desde el propio equipo">📲 Instalar con código</button>' : ''}
       <button class="btn small" data-act="rotate">Rotar token</button>
       <button class="btn small danger" data-act="delete">Eliminar</button>
     </div>` : ''}
@@ -496,6 +500,7 @@ $('#drawer').addEventListener('click', async (e) => {
       toast(m.alerts ? 'Alertas apagadas para esta máquina' : 'Alertas activadas para esta máquina');
       refresh();
     }
+    if (act === 'enroll') openEnroll(m);
     if (act === 'rotate' || act === 'install') {
       const msg = act === 'install'
         ? 'Para generar el instalador se crea un token nuevo.\nSi el equipo ya estaba instalado, quedará desconectado hasta que ejecute el instalador nuevo.\n\n¿Continuar?'

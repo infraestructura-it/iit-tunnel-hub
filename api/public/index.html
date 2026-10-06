@@ -92,6 +92,7 @@
             <option value="disabled">Deshabilitadas</option>
           </select>
           <div class="spacer"></div>
+          <button class="btn admin-only" id="enroll-new" title="Código de un solo uso: el equipo se registra al instalar">📲<span class="lbl"> Instalar con código</span></button>
           <button class="btn primary staff-only" id="new-machine">+ Registrar máquina</button>
         </div>
         <div id="machines" class="grid"></div>
@@ -278,6 +279,61 @@
       </form>
       <div class="error" id="client-error"></div>
     </div>
+  </div>
+</div>
+
+<!-- Instalar con código: el equipo cliente descarga el instalador directo del hub (sin archivos con secretos) -->
+<div id="enroll-modal" class="overlay hidden">
+  <div class="modal enroll-modal">
+    <div class="ai-head">
+      <div style="flex:1;min-width:0">
+        <h2>Instalar con código</h2>
+        <div class="sub" id="enroll-sub"></div>
+      </div>
+      <button class="btn icon" data-close title="Cerrar">✕</button>
+    </div>
+
+    <form id="enroll-form" autocomplete="off">
+      <div class="field" id="enroll-client-row">
+        <label for="enroll-client">Cliente de la máquina nueva</label>
+        <select id="enroll-client" name="client"></select>
+        <div class="hint">La máquina se crea al instalar, con el nombre del equipo. Después se le agregan servicios.</div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="enroll-minutes">Vigencia del código</label>
+          <select id="enroll-minutes" name="minutes">
+            <option value="15">15 minutos</option>
+            <option value="30" selected>30 minutos</option>
+            <option value="120">2 horas</option>
+            <option value="1440">24 horas</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="enroll-server">Servidor frps (como lo ve el equipo)</label>
+          <input id="enroll-server" name="serverAddr" placeholder="tuneles.infraestructura-it.com">
+        </div>
+      </div>
+      <button class="btn primary" type="submit" id="enroll-submit">Generar código</button>
+      <div class="error" id="enroll-error"></div>
+    </form>
+
+    <div id="enroll-result" class="enroll-result hidden">
+      <div class="enroll-code"><span id="enroll-code"></span><small id="enroll-expiry"></small></div>
+      <div class="warning hidden" id="enroll-loopback"></div>
+      <div class="enroll-step"><b>Windows</b> · pegue en PowerShell <b>como administrador</b>:</div>
+      <div class="secret"><span id="enroll-cmd-windows"></span><button class="btn small" type="button" data-copy="enroll-cmd-windows">Copiar</button></div>
+      <div class="enroll-step"><b>Linux · Raspberry Pi</b> · pegue en la terminal:</div>
+      <div class="secret"><span id="enroll-cmd-linux"></span><button class="btn small" type="button" data-copy="enroll-cmd-linux">Copiar</button></div>
+      <ul class="enroll-notes">
+        <li>Sirve <b>una sola vez</b> y vence sola. El instalador con el token viaja directo del hub al equipo: no hay archivo que copiar.</li>
+        <li id="enroll-note-mode"></li>
+        <li>El equipo debe llegar al hub por esa URL (en producción, el dominio del hub con HTTPS).</li>
+      </ul>
+    </div>
+
+    <h4 class="section-title">Códigos recientes</h4>
+    <div id="enroll-list"></div>
   </div>
 </div>
 
@@ -550,5 +606,6 @@
 <script src="users.js"></script>
 <script src="estado.js"></script>
 <script src="snmp.js"></script>
+<script src="enroll.js"></script>
 </body>
 </html>

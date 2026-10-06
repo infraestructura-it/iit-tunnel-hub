@@ -141,6 +141,23 @@ En la ventana de credenciales (al registrar, o con **Generar instalador** en el 
 
 Instalación manual (equipos especiales): descargue **Solo frpc.toml** y ejecute `frpc -c frpc-<maquina>.toml`, o en Linux `sudo ./deploy/frpc-install.sh frpc-<maquina>.toml`.
 
+### Instalar con código (opcional, sin archivos con el token)
+
+Alternativa al instalador descargado: el administrador genera un **código de un solo uso** y en el equipo se pega **una línea**. El equipo descarga del hub un arranque mínimo (sin secretos), canjea el código y recibe el instalador con el token directo por la conexión al hub: no hay archivo que pase por correo, USB u OneDrive.
+
+- **📲 Instalar con código** en la barra: crea una **máquina nueva** al instalar, en el cliente elegido, con el nombre del equipo (después se le agregan servicios).
+- **📲 Instalar con código** en el detalle de una máquina: **reinstala esa máquina** (por ejemplo, en un equipo nuevo). Generar el código no desconecta el equipo instalado; al **usarlo** se crea un token nuevo.
+
+| Equipo | Pegar (como administrador / root) |
+|---|---|
+| Windows | `[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://hub.ejemplo.com/i/XXXX-XXXX-XXXX/windows \| iex` |
+| Linux · Raspberry Pi | `curl -fsSL https://hub.ejemplo.com/i/XXXX-XXXX-XXXX/linux \| sudo bash` |
+
+- El código tiene 12 caracteres, sirve **una vez**, vence (15 min a 24 h) y se puede **revocar**. El hub guarda solo su hash.
+- Solo el **administrador** genera códigos. Cada canje queda en la actividad con el nombre y la IP del equipo.
+- Desde una IP, 10 intentos con códigos inexistentes bloquean el canje 15 minutos.
+- **`HUB_PUBLIC_URL`**: URL con la que los equipos llegan al hub (en producción, el dominio del panel con HTTPS, p. ej. `https://hub.infraestructura-it.com`). Sin ella se usa la URL con la que se abrió el panel; si es `127.0.0.1`, el panel avisa que solo sirve en ese mismo equipo. Con `http` el token viaja sin cifrar: úselo solo dentro de su red.
+
 ### Servicios privados (SSH, RDP, VNC sin puerto público)
 
 Con un servicio `tcp`, frps abre un puerto en internet y cualquiera puede intentar entrar (escáneres, fuerza bruta contra RDP). Un servicio **privado** (`stcp`) no abre ningún puerto: solo es alcanzable desde **otra máquina registrada** que actúa como **visitante**, normalmente su PC de soporte.
@@ -342,6 +359,10 @@ Las rutas aceptan `Authorization: Bearer <ADMIN_TOKEN>` (acceso total) o la cook
 | POST | `/api/machines/:id/rotate-token` | Nuevo token y frpc.toml |
 | GET | `/api/machines/:id/frpc.toml` | Configuración actual, sin el token |
 | POST | `/api/machines/:id/installer` | Instalador: `{platform: linux\|windows\|toml, token, serverAddr?}`. Exige el token vigente (403 si no coincide) |
+| GET / POST | `/api/enrollments` | Códigos de instalación (admin). POST `{machine? \| client?, minutes?, serverAddr?}` → `{code, commands:{windows, linux}}` (el código solo se muestra ahí) |
+| DELETE | `/api/enrollments/:id` | Revocar un código vigente (admin) |
+| GET | `/i/:codigo/:windows\|linux` | Arranque a pegar en el equipo (público, sin secretos) |
+| POST | `/api/enroll` | Canje: `{code, platform, hostname}` → instalador con token nuevo (público, un solo uso, límite por IP) |
 | POST | `/api/machines/:id/services` | Agregar servicio |
 | DELETE | `/api/machines/:id/services/:nombre` | Quitar servicio |
 | POST | `/api/machines/:id/services/:nombre/rotate-secret` | Nueva clave de un servicio privado (el dueño se reconecta) |
@@ -397,7 +418,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 186 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado; y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
+Levanta frps, el hub y frpc reales en localhost y verifica 204 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores, la instalación con código (arranque real, canje único, revocación, token anterior anulado, límite por IP) y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado; y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
 
 ## Límites conocidos
 

@@ -27,6 +27,7 @@ const { SnmpMonitor } = require('./snmp-monitor');
 const SD = require('./snmp-devices');
 const { PROFILES: SNMP_PROFILES } = require('./snmp-profiles');
 const { requestContext } = require('./context');
+const E = require('./enroll');
 
 const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -1024,6 +1025,129 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     return [200, { deleted: c.id }];
   }, 'admin');
 
+  // ---------- instalación con código de un solo uso ----------
+
+  const enrollFails = new Map(); // ip → intentos con códigos inexistentes (15 min)
+  const enrollBlocked = (ip) => {
+    const since = Date.now() - 15 * 60 * 1000;
+    const list = (enrollFails.get(ip) || []).filter((x) => x > since);
+    enrollFails.set(ip, list);
+    return list.length >= 10;
+  };
+  const enrollFail = (ip) => enrollFails.set(ip, [...(enrollFails.get(ip) || []), Date.now()]);
+  const enrollStatus = (e) => (e.revoked_at ? 'revocado' : e.used_at ? 'usado' : e.expires_at <= Math.floor(Date.now() / 1000) ? 'vencido' : 'vigente');
+  const enrollView = (e) => ({
+    id: e.id, hint: e.hint, mode: e.machine_id ? 'maquina' : 'nueva',
+    machine: e.machine_id, client: e.client_id ? (store.getClient(e.client_id)?.name ?? null) : null, clientId: e.client_id,
+    serverAddr: e.server_addr, createdBy: e.created_by, createdAt: e.created_at, expiresAt: e.expires_at,
+    status: enrollStatus(e), usedAt: e.used_at, usedIp: e.used_ip, usedHost: e.used_host, usedMachine: e.used_machine,
+  });
+  /** Busca un código vigente. Devuelve { e } o { error } con un mensaje para mostrar en el equipo. */
+  const findEnrollment = (raw, ip) => {
+    const norm = E.normalizeCode(raw);
+    const e = norm && store.enrollmentByHash(E.hashCode(norm));
+    if (!e) { enrollFail(ip); return { error: 'el código no existe: revise que lo copió completo' }; }
+    const st = enrollStatus(e);
+    if (st === 'usado') return { error: 'ese código ya se usó: genere uno nuevo en el panel' };
+    if (st === 'vencido') return { error: 'el código venció: genere uno nuevo en el panel' };
+    if (st === 'revocado') return { error: 'el código fue revocado en el panel' };
+    return { e, norm };
+  };
+
+  route('POST', '/api/enrollments', async (req, _p, ctx) => {
+    const body = await readJson(req);
+    let machineId = null; let clientId = null;
+    if (body.machine) {
+      machineId = mustMachine(String(body.machine), ctx).id;
+    } else if (body.client) {
+      const c = store.getClient(String(body.client)) || store.clientByName(String(body.client));
+      if (!c) throw new M.HttpError(404, 'no existe ese cliente');
+      clientId = c.id;
+    }
+    const minutes = Math.min(Math.max(Math.round(Number(body.minutes) || E.MINUTES.def), E.MINUTES.min), E.MINUTES.max);
+    const serverAddr = M.normalizeServerAddr(body.serverAddr, config.frps.publicAddr);
+    const base = E.baseUrl(req, config);
+    if (!base) throw M.bad('no se pudo determinar la URL del hub: defina HUB_PUBLIC_URL');
+    const code = E.newCode();
+    const norm = E.normalizeCode(code);
+    const e = store.createEnrollment({
+      codeHash: E.hashCode(norm), hint: E.hintOf(norm), machineId, clientId, serverAddr,
+      createdBy: ctx.actor, expiresAt: Math.floor(Date.now() / 1000) + minutes * 60,
+    });
+    const target = machineId ? 'reinstalar esta máquina' : `máquina nueva${clientId ? ' de ' + store.getClient(clientId).name : ' sin cliente'}`;
+    store.event(machineId, 'codigo_generado', `${target} · …${e.hint} · vence en ${minutes} min · servidor ${serverAddr}`, 0);
+    return [201, { enrollment: enrollView(e), code, base, loopback: E.isLoopback(base), commands: E.commands(base, code) }];
+  }, 'admin');
+
+  route('GET', '/api/enrollments', async () => [200, store.listEnrollments().map(enrollView)], 'admin');
+
+  route('DELETE', '/api/enrollments/:id', async (_req, p) => {
+    const e = store.getEnrollment(p.id);
+    if (!e) throw new M.HttpError(404, 'no existe ese código');
+    if (!store.revokeEnrollment(e.id)) throw new M.HttpError(409, `el código ya está ${enrollStatus(e)}`);
+    store.event(e.machine_id, 'codigo_revocado', `…${e.hint}`, 0);
+    return [200, enrollView(store.getEnrollment(e.id))];
+  }, 'admin');
+
+  // Arranque que se pega en el equipo: no lleva secretos, solo el código (que la persona ya tiene)
+  route('GET', '/i/:code/:platform', async (req, p) => {
+    if (!E.PLATFORMS.includes(p.platform)) throw new M.HttpError(404, 'plataforma no soportada (windows o linux)');
+    const ip = clientIp(req);
+    const headers = { 'content-type': 'text/plain; charset=utf-8', 'x-content-type-options': 'nosniff' };
+    if (enrollBlocked(ip)) return [200, E.errorBootstrap(p.platform, 'Demasiados intentos desde esta direccion: espere 15 minutos.'), headers];
+    const r = findEnrollment(p.code, ip);
+    if (r.error) return [200, E.errorBootstrap(p.platform, 'Codigo invalido, vencido o ya usado: genere uno nuevo en el panel.'), headers];
+    const code = `${r.norm.slice(0, 4)}-${r.norm.slice(4, 8)}-${r.norm.slice(8)}`;
+    const base = E.baseUrl(req, config);
+    if (!base) throw M.bad('no se pudo determinar la URL del hub');
+    return [200, p.platform === 'windows' ? E.windowsBootstrap(base, code) : E.linuxBootstrap(base, code), headers];
+  }, 'public');
+
+  // Canje: el equipo recibe el instalador con un token nuevo. Una sola vez por código.
+  route('POST', '/api/enroll', async (req) => {
+    const ip = clientIp(req);
+    if (enrollBlocked(ip)) throw new M.HttpError(429, 'demasiados intentos desde esta dirección; espere 15 minutos');
+    const body = await readJson(req, 4096);
+    const platform = String(body.platform || '');
+    if (!PLATFORMS[platform]) throw M.bad('platform debe ser windows o linux');
+    const host = E.cleanHost(body.hostname);
+    requestContext.getStore().actor = `instalador (${host})`;
+    const r = findEnrollment(body.code, ip);
+    if (r.error) {
+      store.event(null, 'codigo_rechazado', `${r.error} · ${host} · ${ip}`, 60);
+      throw new M.HttpError(/no existe/.test(r.error) ? 404 : 410, r.error);
+    }
+    const e = r.e;
+    if (e.machine_id) {
+      const m0 = store.getMachine(e.machine_id);
+      if (!m0) throw new M.HttpError(404, 'la máquina del código ya no existe');
+      if (!m0.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada en el panel: habilítela y vuelva a intentar');
+    }
+    const token = M.newToken();
+    const machineId = store.transaction(() => {
+      if (!store.useEnrollment(e.id, { ip, host })) throw new M.HttpError(410, 'ese código ya se usó: genere uno nuevo en el panel');
+      let id = e.machine_id;
+      if (id) {
+        store.setTokenHash(id, M.hashToken(token));
+      } else {
+        const client = e.client_id ? store.getClient(e.client_id) : null;
+        const data = M.normalizeMachine({ name: host, client: client ? client.name : '' }, store);
+        store.createMachine({ ...data, clientId: client ? client.id : null, tokenHash: M.hashToken(token) });
+        id = data.id;
+      }
+      store.setEnrollmentMachine(e.id, id);
+      return id;
+    });
+    const m = store.getMachine(machineId);
+    if (!e.machine_id) store.event(m.id, 'registrada', `${m.name} (instalación con código …${e.hint})`, 0);
+    store.event(m.id, 'codigo_canjeado', `…${e.hint} · ${platform} · ${host} · ${ip} · servidor ${e.server_addr}`, 0);
+    const P = PLATFORMS[platform];
+    const grants = store.accessOfVisitor(m.id);
+    const snmpDevs = store.snmpOf(m.id);
+    const text = P.build(m, store.servicesOf(m.id), config.frps, token, e.server_addr, grants.length || snmpDevs.length ? M.accessToml(m, grants, snmpDevs) : '');
+    return [200, text, { 'content-type': 'text/plain; charset=utf-8' }];
+  }, 'public');
+
   /** Identifica a quien llama: token de API (Bearer) o cookie de sesión. Devuelve null si no hay credencial válida. */
   function authenticate(req) {
     if (isAdmin(req)) return new AU.Access({ role: 'admin', via: 'token' });
@@ -1110,7 +1234,7 @@ function main() {
   const app = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
     try {
-      if (pathname.startsWith('/api/')) { stats.api.requests++; return await api(req, res, pathname); }
+      if (pathname.startsWith('/api/') || pathname.startsWith('/i/')) { stats.api.requests++; return await api(req, res, pathname); }
       if (req.method === 'GET') return serveStatic(req, res, pathname);
       return send(res, 405, { error: 'método no permitido' });
     } catch (err) {

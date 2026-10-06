@@ -20,6 +20,8 @@ const config = {
   adminToken: env.ADMIN_TOKEN || '',
   // Cookie de sesión con Secure (solo HTTPS). Detrás de un proxy HTTPS se activa sola con X-Forwarded-Proto.
   cookieSecure: env.COOKIE_SECURE === '1',
+  // URL con la que los equipos cliente llegan al hub (instalación con código). Vacía: la del navegador.
+  hubPublicUrl: (env.HUB_PUBLIC_URL || '').trim().replace(/\/+$/, ''),
 
   // Endpoint que consulta frps (server plugin). Nunca debe quedar expuesto a Internet.
   pluginHost: env.PLUGIN_HOST || '127.0.0.1',
@@ -76,6 +78,9 @@ function validate() {
   const errors = [];
   if (config.adminToken.length < 16) errors.push('ADMIN_TOKEN es obligatorio y debe tener al menos 16 caracteres');
   if (config.frps.tcpPortMin > config.frps.tcpPortMax) errors.push('FRPS_TCP_PORT_MIN no puede ser mayor que FRPS_TCP_PORT_MAX');
+  if (config.hubPublicUrl && !/^https?:\/\/[A-Za-z0-9.\-[\]:]+(\/[A-Za-z0-9._~\-/]*)?$/.test(config.hubPublicUrl)) {
+    errors.push('HUB_PUBLIC_URL debe ser una URL http(s)://host[:puerto][/ruta]');
+  }
   return errors;
 }
 
