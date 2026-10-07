@@ -94,7 +94,7 @@ wait_for_long() { local cond="$1" n=0; while [ $n -lt 70 ]; do eval "$cond" && r
 start_frpc() { "$FRP_DIR/frpc" -c "$1" > "$1.log" 2>&1 & echo $!; }
 
 echo "1. API y frps"
-check "health responde" '[ "$(api GET /health | jq -r .ok)" = "true" ]'
+check "health responde" 'wait_for "[ \"\$(api GET /health | jq -r .ok)\" = true ]"'
 check "sin token → 401" '[ "$(curl -s -o /dev/null -w "%{http_code}" $API/machines)" = "401" ]'
 check "frps alcanzable desde el hub" 'wait_for "[ \"\$(api GET /summary | jq -r .frps.reachable)\" = true ]"'
 
@@ -483,6 +483,7 @@ echo "12. Instalación con código de un solo uso"
 HUBURL="http://127.0.0.1:$PORT"
 enroll() { curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/json" "$API/enroll" -d "{\"code\":\"$1\",\"platform\":\"${2:-linux}\",\"hostname\":\"${3:-x}\"}"; }
 check "solo el administrador genera códigos" '[ "$(scode h3 POST /enrollments -d "{}")" = 403 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" $API/enrollments)" = 401 ]'
+check "frps 127.0.0.1 con el hub abierto por la red: el código usa la IP del hub" '[ "$(api POST /enrollments -H "Host: 10.9.9.9:$PORT" -d "{\"serverAddr\":\"127.0.0.1\"}" | jq -r "[.serverAdjusted, .enrollment.serverAddr] | join(\" \")")" = "true 10.9.9.9" ]'
 check "código para una máquina inexistente → 404" '[ "$(api POST /enrollments -o /dev/null -w "%{http_code}" -d "{\"machine\":\"no-existe\"}")" = 404 ]'
 api POST /enrollments -d '{"client":"clinica-norte","minutes":30}' > "$WORK/enr.json"
 CODE=$(jq -r .code "$WORK/enr.json")

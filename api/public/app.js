@@ -754,6 +754,14 @@ $('#create-form').addEventListener('submit', async (e) => {
 });
 
 const SERVER_KEY = 'iit-hub-server-addr';
+const isLoopHost = (h) => !h || h === 'localhost' || h === '::1' || /^127\./.test(h);
+/** Dirección de frps a proponer: la última usada, FRPS_PUBLIC_ADDR o la del panel, sin preferir 127.0.0.1 si hay otra. */
+function defaultServerAddr() {
+  let saved = '';
+  try { saved = localStorage.getItem(SERVER_KEY) || ''; } catch {}
+  const options = [saved, state.summary?.frps?.publicAddr || '', location.hostname].filter(Boolean);
+  return options.find((h) => !isLoopHost(h)) || options[0] || '';
+}
 let creds = null; // { machine, token } — solo en memoria mientras el modal está abierto
 
 function showCreds(m, token, toml, title) {
@@ -764,9 +772,7 @@ function showCreds(m, token, toml, title) {
   $('#creds-toml').textContent = toml;
   $('#creds-error').textContent = '';
   $('#install-help').classList.add('hidden');
-  let saved = '';
-  try { saved = localStorage.getItem(SERVER_KEY) || ''; } catch {}
-  $('#creds-server').value = saved || state.summary?.frps?.publicAddr || '';
+  $('#creds-server').value = defaultServerAddr();
   $('#creds-modal').classList.remove('hidden');
 }
 

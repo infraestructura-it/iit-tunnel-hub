@@ -440,7 +440,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const platform = String(body.platform || '');
     if (platform !== 'toml' && !PLATFORMS[platform]) throw M.bad('platform debe ser linux, windows o toml');
     if (!M.tokenMatches(body.token, m.token_hash)) throw new M.HttpError(403, 'el token no corresponde a esta máquina (rótelo si lo perdió)');
-    const serverAddr = M.normalizeServerAddr(body.serverAddr, config.frps.publicAddr);
+    const { serverAddr } = E.effectiveServerAddr(M.normalizeServerAddr(body.serverAddr, config.frps.publicAddr), E.baseUrl(req, config));
     const services = store.servicesOf(m.id);
     if (platform === 'toml') {
       return [200, M.frpcToml(m, services, config.frps, body.token, { serverAddr }), {
@@ -1065,9 +1065,9 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       clientId = c.id;
     }
     const minutes = Math.min(Math.max(Math.round(Number(body.minutes) || E.MINUTES.def), E.MINUTES.min), E.MINUTES.max);
-    const serverAddr = M.normalizeServerAddr(body.serverAddr, config.frps.publicAddr);
     const base = E.baseUrl(req, config);
     if (!base) throw M.bad('no se pudo determinar la URL del hub: defina HUB_PUBLIC_URL');
+    const { serverAddr, adjusted } = E.effectiveServerAddr(M.normalizeServerAddr(body.serverAddr, config.frps.publicAddr), base);
     const code = E.newCode();
     const norm = E.normalizeCode(code);
     const e = store.createEnrollment({
@@ -1076,7 +1076,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     });
     const target = machineId ? 'reinstalar esta máquina' : `máquina nueva${clientId ? ' de ' + store.getClient(clientId).name : ' sin cliente'}`;
     store.event(machineId, 'codigo_generado', `${target} · …${e.hint} · vence en ${minutes} min · servidor ${serverAddr}`, 0);
-    return [201, { enrollment: enrollView(e), code, base, loopback: E.isLoopback(base), commands: E.commands(base, code) }];
+    return [201, { enrollment: enrollView(e), code, base, loopback: E.isLoopback(base), serverAdjusted: adjusted, commands: E.commands(base, code) }];
   }, 'admin');
 
   route('GET', '/api/enrollments', async () => [200, store.listEnrollments().map(enrollView)], 'admin');

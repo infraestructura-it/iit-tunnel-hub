@@ -72,7 +72,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (204 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (205 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -127,6 +127,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Arranque Windows: todo dentro de `& { … }` y `return` (un `exit` en `irm | iex` cierra la ventana); solo ASCII (PS 5.1 puede decodificar mal acentos); escribe el instalador con BOM en `GetTempPath()`, lo ejecuta con `powershell -ExecutionPolicy Bypass -File` y lo borra.
 - Arranque Linux: exige root, canjea con curl o wget, valida que la respuesta empiece con `#!/usr/bin/env bash`, ejecuta y borra el temporal (`umask 077`).
 - URL: `HUB_PUBLIC_URL` o la del request (`x-forwarded-proto/host`, saneada). El panel avisa si es loopback o http.
+- `effectiveServerAddr`: si el servidor frps es 127.0.0.1 pero el hub se abrió por una dirección de red, el código y el instalador usan el host del hub (en el equipo, 127.0.0.1 sería él mismo). El panel no propone 127.0.0.1 si conoce otra dirección.
 
 ## Respaldos y estado: reglas (no romper)
 

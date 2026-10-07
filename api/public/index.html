@@ -287,7 +287,7 @@
   <div class="modal enroll-modal">
     <div class="ai-head">
       <div style="flex:1;min-width:0">
-        <h2>Instalar con código</h2>
+        <h2 id="enroll-title">Instalar con código</h2>
         <div class="sub" id="enroll-sub"></div>
       </div>
       <button class="btn icon" data-close title="Cerrar">✕</button>
@@ -321,6 +321,7 @@
     <div id="enroll-result" class="enroll-result hidden">
       <div class="enroll-code"><span id="enroll-code"></span><small id="enroll-expiry"></small></div>
       <div class="warning hidden" id="enroll-loopback"></div>
+      <div class="hint hidden" id="enroll-adjusted" style="color:var(--cyan)"></div>
       <div class="enroll-step"><b>Windows</b> · pegue en PowerShell <b>como administrador</b>:</div>
       <div class="secret"><span id="enroll-cmd-windows"></span><button class="btn small" type="button" data-copy="enroll-cmd-windows">Copiar</button></div>
       <div class="enroll-step"><b>Linux · Raspberry Pi</b> · pegue en la terminal:</div>

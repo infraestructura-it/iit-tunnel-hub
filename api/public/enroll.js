@@ -17,9 +17,8 @@ function openEnroll(machine = null) {
     ? `Reinstalar <b>${esc(machine.name)}</b> (${esc(machine.id)}) desde el propio equipo. El equipo instalado hoy sigue conectado hasta que se use el código.`
     : 'Registra una máquina nueva desde el propio equipo, sin descargar archivos con el token.';
   $('#enroll-client').innerHTML = `<option value="">Sin cliente</option>${(state.me?.clients || []).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}`;
-  let saved = '';
-  try { saved = localStorage.getItem(SERVER_KEY) || ''; } catch {}
-  $('#enroll-server').value = saved || state.summary?.frps?.publicAddr || '';
+  $('#enroll-server').value = defaultServerAddr();
+  $('#enroll-title').textContent = machine ? `Reinstalar ${machine.name} con código` : 'Máquina nueva con código';
   $('#enroll-modal').classList.remove('hidden');
   loadEnrollments();
 }
@@ -69,7 +68,7 @@ $('#enroll-form').addEventListener('submit', async (e) => {
   $('#enroll-submit').disabled = true;
   try {
     const r = await api('POST', '/enrollments', body);
-    try { if (body.serverAddr) localStorage.setItem(SERVER_KEY, body.serverAddr); } catch {}
+    try { localStorage.setItem(SERVER_KEY, r.enrollment.serverAddr); } catch {}
     $('#enroll-code').textContent = r.code;
     $('#enroll-cmd-windows').textContent = r.commands.windows;
     $('#enroll-cmd-linux').textContent = r.commands.linux;
@@ -78,6 +77,10 @@ $('#enroll-form').addEventListener('submit', async (e) => {
     lb.textContent = r.loopback
       ? `⚠ La URL del hub es ${r.base}: solo funciona en este mismo equipo. Defina HUB_PUBLIC_URL (o abra el panel por la IP de red) para instalar en otros equipos.`
       : `⚠ La URL del hub usa http (${r.base}): el token viaja sin cifrar. Úsela solo dentro de su red; en producción, HTTPS.`;
+    const adj = $('#enroll-adjusted');
+    adj.classList.toggle('hidden', !r.serverAdjusted);
+    adj.textContent = r.serverAdjusted ? `ℹ El servidor frps ${body.serverAddr || '127.0.0.1'} solo sirve en el propio hub: el código usa ${r.enrollment.serverAddr}.` : '';
+    $('#enroll-server').value = r.enrollment.serverAddr;
     $('#enroll-note-mode').textContent = enroll.machine
       ? `Al usarlo se crea un token nuevo para ${enroll.machine.id}: si la máquina estaba instalada en otro equipo, ese queda desconectado.`
       : `La máquina aparece en el panel con el nombre del equipo${r.enrollment.client ? `, en el cliente ${r.enrollment.client}` : ''}.`;

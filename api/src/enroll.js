@@ -44,12 +44,20 @@ function baseUrl(req, config) {
   return `${proto}://${host}`;
 }
 
+const isLoopbackHost = (h) => { h = String(h || '').replace(/^\[|\]$/g, ''); return h === 'localhost' || h === '::1' || /^127\./.test(h); };
+
 /** ¿La URL solo sirve en este mismo equipo? (el equipo cliente no la alcanzaría) */
 function isLoopback(url) {
-  try {
-    const h = new URL(url).hostname.replace(/^\[|\]$/g, '');
-    return h === 'localhost' || h === '::1' || /^127\./.test(h);
-  } catch { return true; }
+  try { return isLoopbackHost(new URL(url).hostname); } catch { return true; }
+}
+
+/**
+ * Servidor frps para el equipo: si quedó 127.0.0.1 pero el hub se abrió por una dirección de red,
+ * 127.0.0.1 en el equipo sería él mismo. Se usa la dirección del hub (frps corre en el mismo servidor).
+ */
+function effectiveServerAddr(serverAddr, base) {
+  if (!isLoopbackHost(serverAddr) || !base || isLoopback(base)) return { serverAddr, adjusted: false };
+  return { serverAddr: new URL(base).hostname.replace(/^\[|\]$/g, ''), adjusted: true };
 }
 
 function commands(base, code) {
@@ -139,6 +147,6 @@ function errorBootstrap(platform, msg) {
 }
 
 module.exports = {
-  MINUTES, PLATFORMS, newCode, normalizeCode, hashCode, hintOf, cleanHost, baseUrl, isLoopback, commands,
+  MINUTES, PLATFORMS, newCode, normalizeCode, hashCode, hintOf, cleanHost, baseUrl, isLoopback, isLoopbackHost, effectiveServerAddr, commands,
   windowsBootstrap, linuxBootstrap, errorBootstrap,
 };
