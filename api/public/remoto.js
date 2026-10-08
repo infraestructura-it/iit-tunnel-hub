@@ -1,6 +1,7 @@
 // Sesión remota en el navegador: pantalla (VNC, con noVNC) o terminal (SSH, con xterm.js).
 // La página recibe ?m=<máquina>&s=<servicio>, pide un ticket de un solo uso al hub y abre el WebSocket.
 import RFB from './vendor/novnc/core/rfb.js';
+import { initLogging } from './vendor/novnc/core/util/logging.js';
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
@@ -10,6 +11,35 @@ const TOKEN_KEY = 'iit-hub-admin-token';
 
 let ws = null; let rfb = null; let term = null; let fit = null;
 let finished = false;
+
+// noVNC solo informa el motivo de un fallo por console.error: se guarda para mostrarlo en pantalla
+let vncFailure = '';
+const origError = console.error.bind(console);
+console.error = (...args) => {
+  const text = args.map(String).join(' ');
+  if (/^(Failed (when|while)|RFB failure)/.test(text)) vncFailure = text.replace(/^[^:]*:\s*/, '');
+  origError(...args);
+};
+initLogging('warn'); // noVNC enlaza console.error al importarse: se vuelve a enlazar con el interceptor
+
+/** Traduce el motivo técnico de noVNC a una explicación útil (en especial, wayvnc de Raspberry Pi). */
+function explainVncFailure(reason) {
+  const m = /Unsupported security types \(types: ([^)]*)\)/.exec(reason);
+  if (m) {
+    const t = m[1].split(',').map((x) => x.trim()).filter(Boolean);
+    const names = { 1: 'sin clave', 2: 'VNC', 5: 'RSA-AES', 6: 'RSA-AES sin cifrado', 13: 'RSA-AES-256', 16: 'Tight', 18: 'TLS', 19: 'VeNCrypt (TLS)', 30: 'Apple DH', 129: 'RSA-AES-256' };
+    const offered = t.map((x) => `${x} (${names[x] || '?'})`).join(', ');
+    return `El servidor VNC ofrece métodos de autenticación que el navegador no soporta: ${offered}.\n\n` +
+      'En una Raspberry Pi con wayvnc, agregue a /etc/wayvnc/config la línea\n  allow_broken_crypto=true\n' +
+      '(habilita Apple DH: pide usuario y contraseña de la Raspberry) o use enable_auth=false con address=127.0.0.1, ' +
+      'y reinicie con: sudo systemctl restart wayvnc';
+  }
+  if (/Connection closed|Unexpected server disconnect/.test(reason)) {
+    return `El servidor VNC cerró la conexión durante la negociación (${reason}).\n\n` +
+      'Si es wayvnc con enable_auth=true y sin TLS ni clave RSA, no ofrece ningún método: agregue allow_broken_crypto=true o use enable_auth=false.';
+  }
+  return reason;
+}
 
 function status(text, kind = 'wait') {
   $('#r-status-text').textContent = text;
@@ -93,16 +123,21 @@ function startVnc(t) {
     rfb.scaleViewport = true;
     rfb.background = '#05070b';
     rfb.addEventListener('connect', () => {
+      wasConnected = true;
       status('Conectado', 'on');
       for (const id of ['#r-cad', '#r-scale', '#r-clip']) $(id).disabled = false;
       rfb.focus();
     });
-    rfb.addEventListener('disconnect', (e) => showMessage(e.detail.clean ? 'Sesión terminada' : 'Conexión perdida',
-      e.detail.clean ? 'El equipo cerró la sesión.' : 'Se perdió la conexión con el equipo (red, frpc o servidor VNC).'));
+    let wasConnected = false;
+    rfb.addEventListener('disconnect', (e) => {
+      if (e.detail.clean) return showMessage('Sesión terminada', 'El equipo cerró la sesión.');
+      if (!wasConnected && vncFailure) return showMessage('El servidor VNC no aceptó la conexión', explainVncFailure(vncFailure));
+      showMessage('Conexión perdida', 'Se perdió la conexión con el equipo (red, frpc o servidor VNC).' + (vncFailure ? `\n\nDetalle: ${vncFailure}` : ''));
+    });
     rfb.addEventListener('credentialsrequired', async (e) => {
       const types = e.detail.types || ['password'];
       try {
-        const c = await askCredentials({ title: 'Credenciales VNC', hint: 'Las que usa el servidor VNC del equipo (en Raspberry Pi: su usuario y contraseña).', user: types.includes('username'), pass: types.includes('password') });
+        const c = await askCredentials({ title: 'Credenciales VNC', hint: types.includes('username') ? 'Usuario y contraseña del equipo (en Raspberry Pi: los de su cuenta, p. ej. pi).' : 'Contraseña del servidor VNC del equipo.', user: types.includes('username'), pass: types.includes('password') });
         rfb.sendCredentials({ username: c.username, password: c.password });
       } catch { rfb.disconnect(); }
     });

@@ -141,6 +141,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Solo servicios **stcp** con `browserKind` (`vnc`/`ssh` por nombre `vnc*`/`ssh*` o por puerto 5900–5999/22). `rdp` se detecta pero aún no se abre (pendiente guacd).
 - `NewProxy` de esos stcp agrega `_hub` a `allow_users`; el frpc del hub tiene un visitante `remoto-<id>` en `127.0.0.1:REMOTE_PORT_BASE+id`. Crear/borrar servicio, rotar clave, (des)habilitar o borrar máquina ⇒ `hub.sync()`. Al arrancar por primera vez con esta versión (`settings.remoto_hub_visitante`) se pide reconexión a sus dueños.
 - `POST /api/machines/:id/remote` (staff + `mustMachine` write) entrega un ticket de 60 s y un solo uso, en memoria. El WebSocket (`/api/remote/ws?t=`) no usa cookie: exige ticket válido y, si llega `Origin`, que su host sea el del hub.
+- wayvnc: sin TLS/RSA y con `enable_auth=true` no ofrece ningún método salvo que tenga `allow_broken_crypto=true` (Apple DH, tipo 30). `remoto.js` intercepta `console.error` (y re-llama `initLogging` de noVNC) para mostrar el motivo del fallo.
 - VNC: el hub manda `{type:ready}` (texto) recién con el primer byte del servidor VNC; desde ahí solo binario RFB (noVNC toma el WebSocket abierto). Errores: texto `{type:error}` y cierre 1011.
 - SSH: el hub manda `{type:auth, hubKey}`, recibe `{type:auth, username, password|useHubKey, cols, rows}`; luego binario = teclas/salida y `{type:resize}`. Credenciales no se guardan. Huella por `máquina/servicio` en `settings.ssh_hostkeys` (TOFU); si cambia, se rechaza.
 - Auditoría: `sesion_remota` (inicio) y `sesion_remota_fin` (duración y tráfico) con el actor del ticket (`requestContext.run`).
@@ -235,7 +236,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
 - Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
 - Que la IA use SSH privado: el hub ya es visitante de los SSH stcp (remote.js); falta que ai-scope use ese puerto local.
-- RDP en el navegador: guacd (Apache Guacamole) junto al hub y túnel WebSocket ⇄ guacd; probar wayvnc RSA-AES real con noVNC en una Raspberry.
+- RDP en el navegador: guacd (Apache Guacamole) junto al hub y túnel WebSocket ⇄ guacd.
 - SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.

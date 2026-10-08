@@ -252,6 +252,15 @@ navegador ──WebSocket (sesión del panel)──▶ hub ──▶ frpc del hu
 
 - **Qué servicios:** los **privados (stcp)** llamados `ssh*`/`vnc*` o en los puertos 22 y 5900–5999. En el detalle aparece también **▶ Ver pantalla / Abrir terminal**.
 - **VNC:** visor noVNC con ajuste a la ventana, Ctrl+Alt+Supr, portapapeles y pantalla completa. Pide las credenciales que exija el servidor VNC; en Raspberry Pi OS (wayvnc) son el usuario y la contraseña del equipo.
+  - **wayvnc (Raspberry Pi OS):** de fábrica usa TLS/RSA-AES, que el navegador no soporta. Para que pida usuario y contraseña de la Raspberry, `/etc/wayvnc/config` debe quedar así (y `sudo systemctl restart wayvnc`):
+    ```
+    use_relative_paths=true
+    address=127.0.0.1
+    enable_auth=true
+    enable_pam=true
+    allow_broken_crypto=true
+    ```
+    `allow_broken_crypto` habilita Apple DH (tipo 30), el método con contraseña que noVNC entiende; el tráfico va igual cifrado por el túnel frp. Si la conexión falla, la pestaña muestra los métodos que ofreció el servidor.
 - **SSH:** terminal xterm.js. Usuario y contraseña del equipo, o **la clave SSH del hub** (la de la IA) si el equipo la tiene en `authorized_keys`. La primera vez se guarda la huella del equipo; si cambia, la sesión se rechaza (un administrador puede olvidarla: `DELETE /api/machines/:id/services/:svc/hostkey`).
 - **Quién:** administradores y técnicos del cliente de la máquina. El usuario de cliente no abre sesiones.
 - **Auditoría:** cada sesión queda en la actividad (inicio, quién, desde qué IP, duración y tráfico).
