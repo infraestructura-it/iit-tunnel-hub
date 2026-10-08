@@ -9,6 +9,7 @@ const deny = (reason) => ({ reject: true, reject_reason: reason });
 
 // Usuario imposible (los ids no admiten "!"): con allowUsers vacío frps dejaría entrar al propio dueño
 const NOBODY = '!nadie';
+const { browserKind } = require('./remote');
 
 const HUB_USER = '_hub'; // frpc interno del hub (ver hubfrpc.js); los ids de máquina no admiten "_"
 
@@ -86,7 +87,9 @@ function createPluginHandler(store, frpsStatus, { hub = null } = {}) {
       const visitors = store.accessForService(s.id).map((a) => a.visitor_id);
       store.event(id, 'servicio_activo', `${svcName} (privado · ${visitors.length} acceso${visitors.length === 1 ? '' : 's'})`, 0);
       frpsStatus.invalidate();
-      return { reject: false, unchange: false, content: { ...c, sk: s.secret, allow_users: visitors.length ? visitors : [NOBODY] } };
+      // El hub entra como visitante a los SSH/VNC para las sesiones desde el navegador (remote.js)
+      const allow = browserKind(s) ? [...visitors, HUB_USER] : visitors;
+      return { reject: false, unchange: false, content: { ...c, sk: s.secret, allow_users: allow.length ? allow : [NOBODY] } };
     }
     if (s.type === 'tcp') {
       if (Number(c.remote_port) !== s.remote_port) return reject(`remotePort debe ser ${s.remote_port}`);

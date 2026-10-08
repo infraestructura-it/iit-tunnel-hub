@@ -28,6 +28,8 @@ const SD = require('./snmp-devices');
 const { PROFILES: SNMP_PROFILES } = require('./snmp-profiles');
 const { requestContext } = require('./context');
 const E = require('./enroll');
+const WS = require('./ws');
+const { RemoteService, browserKind, KINDS: REMOTE_KINDS } = require('./remote');
 
 const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -151,6 +153,7 @@ function serviceView(s, machineId, status, access = NO_ACCESS) {
     tlsMode: s.tls_mode,
     publicUrl: M.publicUrl(s, config.frps),
     private: s.type === 'stcp',
+    remote: browserKind(s),
     access: s.type === 'stcp' ? (access.byService.get(s.id) || []).map((a) => accessView(a, status)) : undefined,
     status: proxy ? proxy.status : 'sin_registro',
     connections: proxy?.curConns ?? 0,
@@ -218,7 +221,7 @@ function accessFor(store, u, via) {
 // ---------- rutas de la API ----------
 
 function createApi(store, frps, monitor, ai, plugin, extra = {}) {
-  const { backups, bot = {}, pluginListening = () => true, snmp = null, hub = null } = extra;
+  const { backups, bot = {}, pluginListening = () => true, snmp = null, hub = null, remote = null } = extra;
   const routes = [];
   /**
    * perm: 'public' (sin sesión) · 'session' (cualquier usuario, incluso con cambio de contraseña pendiente)
@@ -366,6 +369,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const m = store.getMachine(created);
     const services = store.servicesOf(created);
     store.event(created, 'registrada', m.name, 0);
+    if (services.some(browserKind)) hub?.sync();
     return [201, {
       machine: machineView(m, services, await frps.status(), access()),
       token,
@@ -401,7 +405,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       fields.alerts = body.alerts ? 1 : 0;
     }
     const m = store.updateMachine(p.id, fields);
-    if (fields.enabled !== undefined) store.event(p.id, fields.enabled ? 'habilitada' : 'deshabilitada', '', 0);
+    if (fields.enabled !== undefined) { store.event(p.id, fields.enabled ? 'habilitada' : 'deshabilitada', '', 0); hub?.sync(); }
     if (fields.alerts !== undefined) store.event(p.id, fields.alerts ? 'alertas_activadas' : 'alertas_desactivadas', '', 0);
     if (fields.client_id !== undefined) store.event(p.id, 'cliente_cambiado', fields.client || 'sin cliente', 0);
     return [200, await view(m, ctx)];
@@ -414,7 +418,8 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const hadSnmp = store.snmpOf(p.id);
     store.deleteMachine(p.id);
     reload(owners);
-    if (hadSnmp.length) { for (const d of hadSnmp) snmp?.forget(d.id); hub?.sync(); } // sus equipos SNMP se borran en cascada
+    if (hadSnmp.length) { for (const d of hadSnmp) snmp?.forget(d.id); } // sus equipos SNMP se borran en cascada
+    hub?.sync(); // y sus visitantes del hub (SNMP y sesiones remotas)
     store.event(p.id, 'eliminada', '', 0);
     return [200, { deleted: p.id }];
   });
@@ -463,6 +468,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const body = await readJson(req);
     const s = store.createService(m.id, M.normalizeService(body, m.id, store, config.frps));
     store.event(m.id, 'servicio_agregado', `${s.name} (${s.type === 'stcp' ? 'privado' : s.type})`, 0);
+    if (browserKind(s)) hub?.sync();
     return [201, serviceView(s, m.id, await frps.status(), access())];
   });
 
@@ -472,8 +478,35 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     if (!s || !store.deleteService(p.id, p.name)) throw new M.HttpError(404, `no existe el servicio "${p.name}"`);
     store.event(p.id, 'servicio_eliminado', p.name, 0);
     if (s.type === 'stcp') reload([p.id]); // frps retira el servicio privado y nadie más entra
+    if (browserKind(s)) hub?.sync();
     return [200, { deleted: p.name }];
   });
+
+  // ---------- sesiones remotas desde el navegador (VNC y SSH) ----------
+
+  // Ticket de un solo uso (60 s) para abrir el WebSocket de la sesión: el navegador no puede mandar
+  // cabeceras en un WebSocket y así tampoco depende de la cookie (sirve también con el token de API).
+  route('POST', '/api/machines/:id/remote', async (req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
+    if (!remote) throw new M.HttpError(503, 'las sesiones remotas no están disponibles');
+    const body = await readJson(req);
+    const s = store.getService(m.id, String(body.service || ''));
+    if (!s) throw new M.HttpError(404, `no existe el servicio "${body.service}"`);
+    const kind = browserKind(s);
+    if (!kind) throw M.bad(`"${s.name}" no admite sesión desde el navegador (solo servicios privados SSH o VNC)`);
+    if (!m.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada');
+    const ticket = remote.createTicket({ machineId: m.id, service: s, actor: ctx.actor });
+    return [201, { ticket, kind, label: REMOTE_KINDS[kind], machine: { id: m.id, name: m.name }, service: s.name, ws: '/api/remote/ws' }];
+  });
+
+  route('GET', '/api/remote/sessions', async () => [200, remote ? remote.active() : []], 'admin');
+
+  route('DELETE', '/api/machines/:id/services/:name/hostkey', async (_req, p, ctx) => {
+    mustMachine(p.id, ctx);
+    if (!remote?.forgetHostKey(p.id, p.name)) throw new M.HttpError(404, 'no hay huella guardada para ese servicio');
+    store.event(p.id, 'huella_ssh_olvidada', p.name, 0);
+    return [200, { forgotten: p.name }];
+  }, 'admin');
 
   // ---------- servicios privados (stcp) y sus accesos ----------
 
@@ -497,6 +530,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     mustMachine(p.id, ctx);
     const s = mustStcp(p.id, p.name);
     store.setServiceSecret(s.id, M.newSecret());
+    if (browserKind(s)) hub?.sync();
     const visitors = store.accessForService(s.id).map((a) => a.visitor_id);
     store.event(p.id, 'clave_rotada', `${p.name}: los visitantes deben actualizar su archivo de accesos${visitors.length ? ' (' + visitors.join(', ') + ')' : ''}`, 0);
     reload([p.id]);
@@ -1041,6 +1075,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     machine: e.machine_id, client: e.client_id ? (store.getClient(e.client_id)?.name ?? null) : null, clientId: e.client_id,
     serverAddr: e.server_addr, createdBy: e.created_by, createdAt: e.created_at, expiresAt: e.expires_at,
     status: enrollStatus(e), usedAt: e.used_at, usedIp: e.used_ip, usedHost: e.used_host, usedMachine: e.used_machine,
+    services: (() => { try { return JSON.parse(e.services || '[]'); } catch { return []; } })(), visitor: e.visitor_id || null,
   });
   /** Busca un código vigente. Devuelve { e } o { error } con un mensaje para mostrar en el equipo. */
   const findEnrollment = (raw, ip) => {
@@ -1064,6 +1099,19 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       if (!c) throw new M.HttpError(404, 'no existe ese cliente');
       clientId = c.id;
     }
+    // Máquina nueva: servicios a crear al canjear (se validan ya) y visitante opcional para los privados
+    let services = []; let visitorId = null;
+    if (!machineId && body.services !== undefined) {
+      if (!Array.isArray(body.services) || body.services.length > 10) throw M.bad('services debe ser una lista de hasta 10 servicios');
+      const names = new Set();
+      services = body.services.map((x) => {
+        const v = M.normalizeService(x || {}, 'validacion-codigo', store, config.frps);
+        if (names.has(v.name)) throw M.bad(`servicio repetido: ${v.name}`);
+        names.add(v.name);
+        return { name: v.name, type: v.type, localIp: v.localIp, localPort: v.localPort, ...(v.tlsMode ? { tlsMode: v.tlsMode } : {}) };
+      });
+      if (body.visitor && services.some((x) => x.type === 'stcp')) visitorId = mustMachine(String(body.visitor), ctx).id;
+    }
     const minutes = Math.min(Math.max(Math.round(Number(body.minutes) || E.MINUTES.def), E.MINUTES.min), E.MINUTES.max);
     const base = E.baseUrl(req, config);
     if (!base) throw M.bad('no se pudo determinar la URL del hub: defina HUB_PUBLIC_URL');
@@ -1071,10 +1119,11 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const code = E.newCode();
     const norm = E.normalizeCode(code);
     const e = store.createEnrollment({
-      codeHash: E.hashCode(norm), hint: E.hintOf(norm), machineId, clientId, serverAddr,
+      codeHash: E.hashCode(norm), hint: E.hintOf(norm), machineId, clientId, serverAddr, services, visitorId,
       createdBy: ctx.actor, expiresAt: Math.floor(Date.now() / 1000) + minutes * 60,
     });
-    const target = machineId ? 'reinstalar esta máquina' : `máquina nueva${clientId ? ' de ' + store.getClient(clientId).name : ' sin cliente'}`;
+    const target = machineId ? 'reinstalar esta máquina'
+      : `máquina nueva${clientId ? ' de ' + store.getClient(clientId).name : ' sin cliente'}${services.length ? ' con ' + services.map((x) => x.name).join(', ') : ''}${visitorId ? ' (acceso desde ' + visitorId + ')' : ''}`;
     store.event(machineId, 'codigo_generado', `${target} · …${e.hint} · vence en ${minutes} min · servidor ${serverAddr}`, 0);
     return [201, { enrollment: enrollView(e), code, base, loopback: E.isLoopback(base), serverAdjusted: adjusted, commands: E.commands(base, code) }];
   }, 'admin');
@@ -1124,6 +1173,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       if (!m0.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada en el panel: habilítela y vuelva a intentar');
     }
     const token = M.newToken();
+    const granted = []; // accesos creados para el visitante (máquina nueva)
     const machineId = store.transaction(() => {
       if (!store.useEnrollment(e.id, { ip, host })) throw new M.HttpError(410, 'ese código ya se usó: genere uno nuevo en el panel');
       let id = e.machine_id;
@@ -1134,12 +1184,27 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
         const data = M.normalizeMachine({ name: host, client: client ? client.name : '' }, store);
         store.createMachine({ ...data, clientId: client ? client.id : null, tokenHash: M.hashToken(token) });
         id = data.id;
+        let wanted = [];
+        try { wanted = JSON.parse(e.services || '[]'); } catch {}
+        for (const sv of wanted) store.createService(id, M.normalizeService(sv, id, store, config.frps));
+        if (e.visitor_id && store.getMachine(e.visitor_id)) {
+          for (const sv of wanted.filter((x) => x.type === 'stcp')) {
+            const a = M.normalizeAccess({ machine: id, service: sv.name, visitor: e.visitor_id }, store);
+            store.createAccess(a.svc.id, a.visitor.id, a.bindPort);
+            granted.push(`${id}/${sv.name} en 127.0.0.1:${a.bindPort}`);
+          }
+        }
       }
       store.setEnrollmentMachine(e.id, id);
       return id;
     });
     const m = store.getMachine(machineId);
-    if (!e.machine_id) store.event(m.id, 'registrada', `${m.name} (instalación con código …${e.hint})`, 0);
+    if (store.servicesOf(m.id).some(browserKind)) hub?.sync();
+    if (!e.machine_id) {
+      const svcs = store.servicesOf(m.id);
+      store.event(m.id, 'registrada', `${m.name} (instalación con código …${e.hint})${svcs.length ? ' · servicios: ' + svcs.map((x) => x.name).join(', ') : ''}`, 0);
+      for (const g of granted) store.event(e.visitor_id, 'acceso_otorgado', `${g} · aplique su archivo de accesos`, 0);
+    }
     store.event(m.id, 'codigo_canjeado', `…${e.hint} · ${platform} · ${host} · ${ip} · servidor ${e.server_addr}`, 0);
     const P = PLATFORMS[platform];
     const grants = store.accessOfVisitor(m.id);
@@ -1214,13 +1279,22 @@ function main() {
   monitor.ai = ai;
   const bot = new TelegramBot({ store, ai, frps, apiBase: config.telegramApiBase });
   // frpc interno del hub: visita los servicios privados que el hub consulta (SNMP por sudp)
+  const remote = new RemoteService({ store, config, frps });
   const hubFrpc = new HubFrpc({
     config, root: path.join(__dirname, '..', '..'),
-    visitors: () => store.listSnmp().filter((d) => d.enabled).map((d) => ({
-      name: `snmp-${d.id}`, type: 'sudp', serverUser: d.machine_id, serverName: M.snmpProxyName(d), secretKey: d.secret, bindPort: d.bind_port,
-    })),
+    visitors: () => [
+      ...store.listSnmp().filter((d) => d.enabled).map((d) => ({
+        name: `snmp-${d.id}`, type: 'sudp', serverUser: d.machine_id, serverName: M.snmpProxyName(d), secretKey: d.secret, bindPort: d.bind_port,
+      })),
+      ...remote.visitors(),
+    ],
   });
   const plugin = createPluginHandler(store, frps, { hub: hubFrpc });
+  // Una sola vez: los SSH/VNC ya publicados deben volver a registrarse para admitir al hub como visitante
+  if (!store.getSetting('remoto_hub_visitante')) {
+    for (const id of new Set(store.listServices().filter(browserKind).map((s) => s.machine_id))) plugin.requestReload(id);
+    store.putSetting('remoto_hub_visitante', true);
+  }
   const snmpMon = new SnmpMonitor({
     store, frps, hub: hubFrpc, notify: (a) => monitor.notify(a), graceSeconds: () => A.loadSettings(store).graceSeconds,
   });
@@ -1229,7 +1303,7 @@ function main() {
     notify: (alert) => monitor.notify(alert),
   });
   let pluginUp = false;
-  const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp, snmp: snmpMon, hub: hubFrpc });
+  const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp, snmp: snmpMon, hub: hubFrpc, remote });
 
   const app = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
@@ -1240,6 +1314,24 @@ function main() {
     } catch (err) {
       return errorResponse(res, err);
     }
+  });
+
+  // WebSocket de las sesiones remotas: /api/remote/ws?t=<ticket>
+  app.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => {});
+    const u = new URL(req.url, 'http://x');
+    if (u.pathname !== '/api/remote/ws') return WS.reject(socket, 404, 'Not Found');
+    // Solo desde el propio panel: el Origin del navegador debe ser el mismo host
+    const origin = req.headers.origin;
+    const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+    if (origin) { let oh = ''; try { oh = new URL(origin).host; } catch {} if (oh !== host) return WS.reject(socket, 403, 'Forbidden'); }
+    const t = remote.takeTicket(u.searchParams.get('t'));
+    if (!t) return WS.reject(socket, 403, 'Forbidden');
+    if (head?.length) socket.unshift(head);
+    const ws = WS.accept(req, socket, { protocols: ['binary'] });
+    if (!ws) return;
+    const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+    remote.attach(ws, t, { ip, run: (fn) => requestContext.run({ actor: t.actor }, fn) });
   });
 
   const pluginServer = http.createServer(async (req, res) => {

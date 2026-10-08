@@ -145,8 +145,8 @@ Instalación manual (equipos especiales): descargue **Solo frpc.toml** y ejecute
 
 Alternativa al instalador descargado: el administrador genera un **código de un solo uso** y en el equipo se pega **una línea**. El equipo descarga del hub un arranque mínimo (sin secretos), canjea el código y recibe el instalador con el token directo por la conexión al hub: no hay archivo que pase por correo, USB u OneDrive.
 
-- **📲 Instalar con código** en la barra: crea una **máquina nueva** al instalar, en el cliente elegido, con el nombre del equipo (después se le agregan servicios).
-- **📲 Instalar con código** en el detalle de una máquina: **reinstala esa máquina** (por ejemplo, en un equipo nuevo). Generar el código no desconecta el equipo instalado; al **usarlo** se crea un token nuevo.
+- **📲 Instalar con código** en la barra: crea una **máquina nueva** al instalar, en el cliente elegido, con el nombre del equipo y los **servicios marcados** (SSH, VNC, Escritorio remoto, Web, con su puerto local). Opcionalmente da acceso a sus servicios privados a una máquina visitante (su PC de soporte, que luego aplica su archivo de accesos).
+- **📲 Instalar con código** en el detalle de una máquina: **reinstala esa máquina** con los servicios que tenga en ese momento (el modal los muestra). Úselo también después de agregar servicios: el equipo solo publica los que tenía al instalar. Generar el código no desconecta el equipo instalado; al **usarlo** se crea un token nuevo.
 
 | Equipo | Pegar (como administrador / root) |
 |---|---|
@@ -241,6 +241,24 @@ No avisan las máquinas que nunca se han conectado, las deshabilitadas ni las qu
 - **IA**: el chat general es de cada usuario y solo ve las máquinas que esa persona puede operar.
 - Deshabilitar un usuario, cambiarle el rol o restablecer su contraseña cierra sus sesiones.
 - El **`ADMIN_TOKEN`** sigue sirviendo para la API (`Authorization: Bearer`) y como llave de emergencia ("Entrar con el token de administración").
+
+## Sesiones remotas en el navegador (pantalla VNC y terminal SSH)
+
+Como Raspberry Pi Connect: en la tarjeta de la máquina, **Conectar por ▾ → 🖥 Pantalla (VNC)** o **⌨ Terminal (SSH)** abre la sesión en una pestaña del navegador. No hay que instalar nada en el PC del técnico ni aplicar archivos de accesos, y la máquina no abre ningún puerto público.
+
+```
+navegador ──WebSocket (sesión del panel)──▶ hub ──▶ frpc del hub (visitante "_hub") ──▶ frps ──▶ frpc de la máquina ──▶ VNC :5900 / SSH :22
+```
+
+- **Qué servicios:** los **privados (stcp)** llamados `ssh*`/`vnc*` o en los puertos 22 y 5900–5999. En el detalle aparece también **▶ Ver pantalla / Abrir terminal**.
+- **VNC:** visor noVNC con ajuste a la ventana, Ctrl+Alt+Supr, portapapeles y pantalla completa. Pide las credenciales que exija el servidor VNC; en Raspberry Pi OS (wayvnc) son el usuario y la contraseña del equipo.
+- **SSH:** terminal xterm.js. Usuario y contraseña del equipo, o **la clave SSH del hub** (la de la IA) si el equipo la tiene en `authorized_keys`. La primera vez se guarda la huella del equipo; si cambia, la sesión se rechaza (un administrador puede olvidarla: `DELETE /api/machines/:id/services/:svc/hostkey`).
+- **Quién:** administradores y técnicos del cliente de la máquina. El usuario de cliente no abre sesiones.
+- **Auditoría:** cada sesión queda en la actividad (inicio, quién, desde qué IP, duración y tráfico).
+- **Seguridad:** el panel pide un ticket de un solo uso (60 s) y abre el WebSocket con él; el hub rechaza otro origen. Las contraseñas pasan por el WebSocket hacia el hub y no se guardan: en producción use HTTPS.
+- **Requisitos:** el frpc del hub (el mismo de SNMP). Al actualizar, las máquinas con SSH/VNC privados se reconectan una vez (~15 s) para admitir al hub como visitante.
+- **RDP** (Escritorio remoto) en el navegador llegará en otra entrega (requiere `guacd`). Mientras tanto, RDP sigue por acceso privado + `mstsc`.
+- `REMOTE_PORT_BASE` (26000): puertos locales del frpc del hub, `base + id del servicio`, solo en 127.0.0.1.
 
 ## Monitoreo SNMP (UPS, switches, impresoras, servidores)
 
@@ -359,9 +377,13 @@ Las rutas aceptan `Authorization: Bearer <ADMIN_TOKEN>` (acceso total) o la cook
 | POST | `/api/machines/:id/rotate-token` | Nuevo token y frpc.toml |
 | GET | `/api/machines/:id/frpc.toml` | Configuración actual, sin el token |
 | POST | `/api/machines/:id/installer` | Instalador: `{platform: linux\|windows\|toml, token, serverAddr?}`. Exige el token vigente (403 si no coincide) |
-| GET / POST | `/api/enrollments` | Códigos de instalación (admin). POST `{machine? \| client?, minutes?, serverAddr?}` → `{code, commands:{windows, linux}}` (el código solo se muestra ahí) |
+| GET / POST | `/api/enrollments` | Códigos de instalación (admin). POST `{machine? \| client?, services?[], visitor?, minutes?, serverAddr?}` → `{code, commands:{windows, linux}}` (el código solo se muestra ahí) |
 | DELETE | `/api/enrollments/:id` | Revocar un código vigente (admin) |
 | GET | `/i/:codigo/:windows\|linux` | Arranque a pegar en el equipo (público, sin secretos) |
+| POST | `/api/machines/:id/remote` | `{service}` → ticket de un solo uso para la sesión en el navegador (staff que opere la máquina) |
+| WS | `/api/remote/ws?t=<ticket>` | Sesión: VNC (bytes RFB) o SSH (`{type:auth}`, teclas binarias, `{type:resize}`) |
+| GET | `/api/remote/sessions` | Sesiones abiertas (admin) |
+| DELETE | `/api/machines/:id/services/:svc/hostkey` | Olvidar la huella SSH guardada (admin) |
 | POST | `/api/enroll` | Canje: `{code, platform, hostname}` → instalador con token nuevo (público, un solo uso, límite por IP) |
 | POST | `/api/machines/:id/services` | Agregar servicio |
 | DELETE | `/api/machines/:id/services/:nombre` | Quitar servicio |
@@ -418,7 +440,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 205 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores, la instalación con código (arranque real, canje único, revocación, token anterior anulado, límite por IP) y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado; y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
+Levanta frps, el hub y frpc reales en localhost y verifica 220 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores, la instalación con código (arranque real, canje único, revocación, token anterior anulado, límite por IP), las sesiones remotas en el navegador (VNC y SSH reales por el túnel privado, ticket de un uso, origen, permisos, huella) y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado; y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
 
 ## Límites conocidos
 

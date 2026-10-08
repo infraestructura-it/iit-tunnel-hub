@@ -36,6 +36,8 @@ const config = {
   hubFrpcPath: env.HUB_FRPC_PATH || '',
   hubFrpcAdminPort: int('HUB_FRPC_ADMIN_PORT', 7401),
   snmpPortBase: int('SNMP_PORT_BASE', 16200),
+  // Sesiones remotas desde el navegador: puerto local del frpc del hub = base + id del servicio
+  remotePortBase: int('REMOTE_PORT_BASE', 26000),
 
   // Alertas: cada cuánto se revisa el estado y zona horaria de los mensajes
   alertCheckSeconds: int('ALERT_CHECK_SECONDS', 15),

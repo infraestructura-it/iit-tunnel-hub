@@ -26,7 +26,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 
 ## Stack y convenciones
 
-- **Node.js ≥ 22.13 sin dependencias npm.** SQLite con el módulo nativo `node:sqlite` (`DatabaseSync`). No agregar paquetes sin necesidad clara.
+- **Node.js ≥ 22.13 sin `npm install`.** SQLite con el módulo nativo `node:sqlite` (`DatabaseSync`). Única excepción: `ssh2` y sus dependencias **vendorizadas** en `api/deps/` (ver `api/deps/LEEME.md`), para la terminal SSH del navegador. No agregar paquetes sin necesidad clara.
 - **Frontend vanilla** HTML/CSS/JS en `api/public/` (sin frameworks, sin build). Estética oscura IIT: fondo `#080b10`, cian/verde/morado, fuentes Syne / Space Mono / DM Mono.
 - Todo el texto de UI, errores de API, eventos y comentarios en **español**.
 - frp **v0.71.0**, configuración en **TOML** (el formato INI está obsoleto). Fijar la versión en `frp.ps1`, `frps/Dockerfile`, `deploy/*.sh` y `test/e2e.sh` a la vez.
@@ -62,6 +62,12 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `test/mock-claude.js`, `test/mock-telegram.js` | Simuladores para las pruebas (validan el formato de la API como lo haría la real) |
 | `api/src/installers.js` | Instaladores autocontenidos por máquina (Linux `.sh`, Windows `.ps1`) con el toml, el token y los accesos incrustados; scripts de accesos (`ACCESS_PLATFORMS`) |
 | `api/src/enroll.js` | Instalación con código de un solo uso: códigos, URL pública del hub y arranques (`irm … \| iex`, `curl … \| sudo bash`) |
+| `api/src/ws.js` | WebSocket mínimo (RFC 6455) sin dependencias: handshake, tramas, ping, cierre y contrapresión |
+| `api/src/remote.js` | Sesiones remotas en el navegador: tipo por servicio (`browserKind`), visitantes stcp del hub, tickets, puente VNC y cliente SSH (ssh2), huellas TOFU, auditoría |
+| `api/public/remoto.html`, `remoto.js`, `remoto.css` | Página de sesión: noVNC (VNC) o xterm.js (SSH), credenciales, portapapeles, pantalla completa |
+| `api/public/vendor/novnc/`, `api/public/vendor/xterm/` | noVNC 1.7.0 (MPL-2.0) y xterm.js 6.0.0 + addon-fit (MIT) |
+| `api/deps/` | ssh2 1.17.0 y dependencias, vendorizadas con `require` relativos (LEEME.md) |
+| `test/ws-client.js` | Cliente WebSocket de prueba (VNC eco / SSH con clave del hub) |
 | `api/public/enroll.js` | Panel: modal "Instalar con código" (máquina nueva por cliente o reinstalar una máquina), lista y revocación |
 | `api/src/frps.js` | Cliente de la API del dashboard de frps (caché 3 s) |
 | `api/src/config.js` | Variables de entorno |
@@ -72,7 +78,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (205 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (220 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -122,12 +128,22 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Solo admin genera (`POST /api/enrollments`). El código (12 caracteres de `ALPHABET`, 60 bits) se muestra **una vez**; en `enrollments` solo `code_hash` (sha256 con prefijo) y `hint` (últimos 4).
 - `GET /i/:code/:platform` es público y **no lleva secretos**: solo el código que la persona ya tiene. Código inválido ⇒ 200 con un arranque que solo imprime el error (curl -f e irm no muestran nada útil con 4xx).
 - `POST /api/enroll` es público: canje atómico (`useEnrollment` con `used_at IS NULL AND revoked_at IS NULL AND expires_at > now`) dentro de la transacción que rota el token o crea la máquina. Devuelve el instalador normal (`PLATFORMS[..].build`).
-- Generar un código **no** toca el token; el token se rota al canjear (modo máquina). Modo nuevo: `normalizeMachine({name: hostname limpio, client})`.
+- Generar un código **no** toca el token; el token se rota al canjear (modo máquina). Modo nuevo: `normalizeMachine({name: hostname limpio, client})`, luego crea `enrollments.services` (validados al generar con `normalizeService`) y, si hay `visitor_id`, los accesos a los stcp, todo en la misma transacción del canje (si algo falla, el código no se gasta).
+- El instalador lleva los servicios que la máquina tiene **al canjear**: agregar servicios después exige reinstalar (código desde su detalle).
 - Límite: 10 códigos inexistentes por IP en 15 min ⇒ 429 (también en el arranque). Usados, vencidos o revocados no cuentan.
 - Arranque Windows: todo dentro de `& { … }` y `return` (un `exit` en `irm | iex` cierra la ventana); solo ASCII (PS 5.1 puede decodificar mal acentos); escribe el instalador con BOM en `GetTempPath()`, lo ejecuta con `powershell -ExecutionPolicy Bypass -File` y lo borra.
 - Arranque Linux: exige root, canjea con curl o wget, valida que la respuesta empiece con `#!/usr/bin/env bash`, ejecuta y borra el temporal (`umask 077`).
 - URL: `HUB_PUBLIC_URL` o la del request (`x-forwarded-proto/host`, saneada). El panel avisa si es loopback o http.
 - `effectiveServerAddr`: si el servidor frps es 127.0.0.1 pero el hub se abrió por una dirección de red, el código y el instalador usan el host del hub (en el equipo, 127.0.0.1 sería él mismo). El panel no propone 127.0.0.1 si conoce otra dirección.
+
+## Sesiones remotas en el navegador: reglas (no romper)
+
+- Solo servicios **stcp** con `browserKind` (`vnc`/`ssh` por nombre `vnc*`/`ssh*` o por puerto 5900–5999/22). `rdp` se detecta pero aún no se abre (pendiente guacd).
+- `NewProxy` de esos stcp agrega `_hub` a `allow_users`; el frpc del hub tiene un visitante `remoto-<id>` en `127.0.0.1:REMOTE_PORT_BASE+id`. Crear/borrar servicio, rotar clave, (des)habilitar o borrar máquina ⇒ `hub.sync()`. Al arrancar por primera vez con esta versión (`settings.remoto_hub_visitante`) se pide reconexión a sus dueños.
+- `POST /api/machines/:id/remote` (staff + `mustMachine` write) entrega un ticket de 60 s y un solo uso, en memoria. El WebSocket (`/api/remote/ws?t=`) no usa cookie: exige ticket válido y, si llega `Origin`, que su host sea el del hub.
+- VNC: el hub manda `{type:ready}` (texto) recién con el primer byte del servidor VNC; desde ahí solo binario RFB (noVNC toma el WebSocket abierto). Errores: texto `{type:error}` y cierre 1011.
+- SSH: el hub manda `{type:auth, hubKey}`, recibe `{type:auth, username, password|useHubKey, cols, rows}`; luego binario = teclas/salida y `{type:resize}`. Credenciales no se guardan. Huella por `máquina/servicio` en `settings.ssh_hostkeys` (TOFU); si cambia, se rechaza.
+- Auditoría: `sesion_remota` (inicio) y `sesion_remota_fin` (duración y tráfico) con el actor del ticket (`requestContext.run`).
 
 ## Respaldos y estado: reglas (no romper)
 
@@ -159,7 +175,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Cambiar accesos, rotar clave, borrar un stcp o borrar una máquina visitante ⇒ `plugin.requestReload(dueño)`: se rechaza **un** Ping, frpc cierra la sesión y reconecta (~15 s) y frps vuelve a preguntar `NewProxy`. El Login limpia la marca.
 - Todo `frpc.toml` lleva `includes = ['<dir>/accesos-<id>.toml']`. frp resuelve rutas relativas contra el **directorio de trabajo** (no el del toml) y falla si la **carpeta** no existe, pero ignora un archivo inexistente: por eso es un archivo en la misma carpeta y no una subcarpeta. Instaladores: `/etc/iit-frpc/` y `__IIT_DIR__\`.
 - El archivo de accesos y los scripts `accesos-<id>.{sh,ps1}` llevan claves pero **no** el token de la máquina. `.ps1` con BOM.
-- La IA no usa stcp (SSH de la IA sigue requiriendo `tcp`): haría falta que el hub sea visitante.
+- La IA no usa stcp (SSH de la IA sigue requiriendo `tcp`); el hub ya es visitante de los SSH para el navegador (remote.js), falta usarlo en ai-scope.
 
 ## IA: reglas (no romper)
 
@@ -218,7 +234,8 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Portal de cliente con alertas propias (Telegram/webhook por cliente).
 - Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
 - Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
-- Que la IA use SSH privado: el frpc del hub ya existe; falta agregar visitantes stcp para los servicios SSH del alcance.
+- Que la IA use SSH privado: el hub ya es visitante de los SSH stcp (remote.js); falta que ai-scope use ese puerto local.
+- RDP en el navegador: guacd (Apache Guacamole) junto al hub y túnel WebSocket ⇄ guacd; probar wayvnc RSA-AES real con noVNC en una Raspberry.
 - SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.

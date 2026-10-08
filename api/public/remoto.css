@@ -1,0 +1,26 @@
+/* Página de sesión remota (VNC / SSH en el navegador) */
+html, body.remote-page { height: 100%; margin: 0; overflow: hidden; background: #05070b; }
+.remote-page { display: flex; flex-direction: column; }
+.rbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; flex-wrap: wrap; }
+.rbar .brand { font-size: 16px; }
+.rtitle { min-width: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rtitle b { color: var(--text); font-family: var(--display); font-size: 15px; }
+.rbar .spacer { flex: 1; }
+.rtools { display: flex; gap: 6px; flex-wrap: wrap; }
+.rstatus { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 3px 10px; border: 1px solid var(--line-2); border-radius: 999px; }
+.rstatus .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); margin: 0; }
+.rstatus[data-state="on"] .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.rstatus[data-state="off"] .dot { background: var(--red); }
+.rmain { position: relative; flex: 1; min-height: 0; width: 100%; max-width: none; margin: 0; padding: 0; }
+.rscreen { position: absolute; inset: 0; }
+.kind-ssh .rscreen { padding: 6px 8px; }
+.kind-ssh .vnc-only { display: none; }
+.rscreen .xterm { height: 100%; }
+.roverlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,7,11,.72); z-index: 10; padding: 16px; }
+.rcard { width: 100%; max-width: 440px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px; padding: 22px; box-shadow: 0 30px 80px rgba(0,0,0,.6); }
+.rcard h3 { margin: 0 0 8px; font-family: var(--display); }
+.rcard textarea { width: 100%; box-sizing: border-box; margin-top: 10px; font-family: var(--code); }
+.rcheck { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin: 4px 0 8px; text-transform: none; letter-spacing: 0; }
+.rcheck input { width: auto; margin: 0; }
+.rmsg-text { color: var(--muted); font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+@media (max-width: 760px) { .rtools .lbl { display: none; } .rbar { gap: 8px; } }

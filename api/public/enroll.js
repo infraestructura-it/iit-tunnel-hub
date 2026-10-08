@@ -13,6 +13,18 @@ function openEnroll(machine = null) {
   $('#enroll-error').textContent = '';
   $('#enroll-result').classList.add('hidden');
   $('#enroll-client-row').classList.toggle('hidden', !!machine);
+  $('#enroll-services-row').classList.toggle('hidden', !!machine);
+  $('#enroll-visitor-row').classList.toggle('hidden', !!machine);
+  $('#enroll-current-row').classList.toggle('hidden', !machine);
+  if (machine) {
+    const svcs = machine.services || [];
+    $('#enroll-current').innerHTML = svcs.length
+      ? svcs.map((x) => `<span class="enroll-chip">${typeTag(x.type)} ${esc(x.name)} <span class="hint" style="margin:0">:${x.localPort}</span></span>`).join('')
+      : '<span class="hint" style="margin:0">Sin servicios: solo la conexión. Agréguelos en el detalle de la máquina antes de generar el código.</span>';
+  }
+  $('#enroll-visitor').innerHTML = '<option value="">Nadie por ahora</option>' + state.machines
+    .map((m) => `<option value="${esc(m.id)}">${esc(m.name)} (${esc(m.id)})${m.online ? '' : ' · fuera de línea'}</option>`).join('');
+  syncVisitorRow();
   $('#enroll-sub').innerHTML = machine
     ? `Reinstalar <b>${esc(machine.name)}</b> (${esc(machine.id)}) desde el propio equipo. El equipo instalado hoy sigue conectado hasta que se use el código.`
     : 'Registra una máquina nueva desde el propio equipo, sin descargar archivos con el token.';
@@ -32,7 +44,8 @@ async function loadEnrollments() {
     box.innerHTML = `<table class="enroll-table"><thead><tr><th>Código</th><th>Para</th><th>Estado</th><th class="hide-sm">Creado</th><th></th></tr></thead><tbody>
       ${list.slice(0, 20).map((e) => {
         const [cls, label] = ENROLL_STATUS[e.status] || ['', e.status];
-        const target = e.mode === 'maquina' ? esc(e.machine) : `nueva · ${esc(e.client || 'sin cliente')}`;
+        const target = e.mode === 'maquina' ? esc(e.machine)
+          : `nueva · ${esc(e.client || 'sin cliente')}${e.services?.length ? `<div class="hint" style="margin:2px 0 0">${e.services.map((x) => esc(x.name)).join(', ')}${e.visitor ? ' · acceso: ' + esc(e.visitor) : ''}</div>` : ''}`;
         const detail = e.status === 'usado'
           ? `${esc(e.usedMachine || '')} · ${esc(e.usedHost || '')} · ${ago(e.usedAt)}`
           : e.status === 'vigente' ? `vence ${remaining(e.expiresAt)}` : '';
@@ -63,7 +76,13 @@ $('#enroll-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = Object.fromEntries(new FormData(e.target));
   const body = { minutes: Number(f.minutes), serverAddr: f.serverAddr.trim() };
-  if (enroll.machine) body.machine = enroll.machine.id; else if (f.client) body.client = f.client;
+  if (enroll.machine) body.machine = enroll.machine.id;
+  else {
+    if (f.client) body.client = f.client;
+    body.services = chosenServices();
+    const visitor = $('#enroll-visitor').value;
+    if (visitor && body.services.some((x) => x.type === 'stcp')) body.visitor = visitor;
+  }
   $('#enroll-error').textContent = '';
   $('#enroll-submit').disabled = true;
   try {
@@ -105,5 +124,18 @@ $('#enroll-modal').addEventListener('click', async (e) => {
   try { await api('DELETE', `/enrollments/${b.dataset.revoke}`); toast('Código revocado'); loadEnrollments(); refresh(); }
   catch (err) { toast(err.message, true); }
 });
+
+/** Servicios marcados en el modal de máquina nueva. */
+function chosenServices() {
+  return $$('#enroll-svcs .enroll-svc').filter((row) => $('input[type=checkbox]', row).checked).map((row) => {
+    const cb = $('input[type=checkbox]', row);
+    return { name: cb.dataset.svc, type: cb.dataset.type, localPort: Number($('input[type=number]', row).value) };
+  });
+}
+function syncVisitorRow() {
+  const anyPrivate = chosenServices().some((x) => x.type === 'stcp');
+  $('#enroll-visitor').disabled = !anyPrivate;
+}
+$('#enroll-svcs').addEventListener('change', syncVisitorRow);
 
 $('#enroll-new').addEventListener('click', () => openEnroll(null));

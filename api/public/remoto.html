@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sesión remota · IIT Tunnel Hub</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="vendor/xterm/xterm.css">
+  <link rel="stylesheet" href="remoto.css">
+</head>
+<body class="remote-page">
+  <header class="rbar">
+    <div class="brand">IIT <span>//</span></div>
+    <div class="rtitle"><b id="r-machine">…</b><span id="r-kind"></span></div>
+    <span class="rstatus" id="r-status"><span class="dot"></span><span id="r-status-text">Conectando…</span></span>
+    <div class="spacer"></div>
+    <div class="rtools" id="r-tools">
+      <button class="btn small vnc-only" id="r-cad" title="Enviar Ctrl+Alt+Supr" disabled>Ctrl+Alt+Supr</button>
+      <button class="btn small vnc-only" id="r-scale" title="Ajustar la pantalla a la ventana" disabled>Ajustar: sí</button>
+      <button class="btn small vnc-only" id="r-clip" title="Copiar y pegar texto con el equipo" disabled>📋<span class="lbl"> Portapapeles</span></button>
+      <button class="btn small" id="r-full" title="Pantalla completa">⛶<span class="lbl"> Pantalla completa</span></button>
+      <button class="btn small danger" id="r-close">Desconectar</button>
+    </div>
+  </header>
+
+  <main class="rmain">
+    <div id="r-screen" class="rscreen"></div>
+
+    <div class="roverlay hidden" id="r-clip-panel">
+      <div class="rcard">
+        <h3>Portapapeles</h3>
+        <div class="hint" style="margin-top:0">Lo que copie en el equipo aparece aquí. Escriba o pegue texto y pulse Enviar para tenerlo en el equipo.</div>
+        <textarea id="r-clip-text" rows="6" spellcheck="false"></textarea>
+        <div class="modal-actions"><button class="btn" data-hide="r-clip-panel">Cerrar</button><button class="btn primary" id="r-clip-send">Enviar al equipo</button></div>
+      </div>
+    </div>
+
+    <form class="roverlay hidden" id="r-auth" autocomplete="off">
+      <div class="rcard">
+        <h3 id="r-auth-title">Credenciales</h3>
+        <div class="hint" id="r-auth-hint" style="margin-top:0"></div>
+        <div class="field" id="r-user-row"><label for="r-user">Usuario</label><input id="r-user" autocapitalize="none" spellcheck="false" autocomplete="username"></div>
+        <div class="field" id="r-pass-row"><label for="r-pass">Contraseña</label><input id="r-pass" type="password" autocomplete="current-password"></div>
+        <label class="rcheck hidden" id="r-hubkey-row"><input type="checkbox" id="r-hubkey"> Usar la clave SSH del hub (la misma de la IA)</label>
+        <div class="modal-actions"><button class="btn" type="button" id="r-auth-cancel">Cancelar</button><button class="btn primary" type="submit">Conectar</button></div>
+      </div>
+    </form>
+
+    <div class="roverlay hidden" id="r-msg">
+      <div class="rcard">
+        <h3 id="r-msg-title">Sesión terminada</h3>
+        <div id="r-msg-text" class="rmsg-text"></div>
+        <div class="modal-actions"><button class="btn" id="r-msg-close">Cerrar pestaña</button><button class="btn primary" id="r-msg-retry">Volver a conectar</button></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="vendor/xterm/xterm.js"></script>
+  <script src="vendor/xterm/addon-fit.js"></script>
+  <script type="module" src="remoto.js"></script>
+</body>
+</html>

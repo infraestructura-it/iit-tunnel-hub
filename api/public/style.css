@@ -463,3 +463,20 @@ b.ko { color: var(--red); font-weight: 500; }
   header.top { flex-wrap: wrap; row-gap: 10px; }
   header.top .user-btn .lbl { display: none; }
 }
+.enroll-svcs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.enroll-svc { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel-2); cursor: pointer; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); margin: 0; }
+.enroll-svc > span { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.enroll-svc input[type=checkbox] { width: auto; margin: 0; flex: none; }
+.enroll-svc input[type=number] { width: 84px; flex: none; padding: 6px 8px; }
+.enroll-svc:has(input[type=checkbox]:checked) { border-color: rgba(34,211,238,.5); }
+.enroll-current { display: flex; flex-wrap: wrap; gap: 8px; }
+.enroll-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line-2); border-radius: 999px; font-size: 13px; }
+@media (max-width: 760px) { .enroll-svcs { grid-template-columns: 1fr; } }
+
+/* Conectar por ▾ (sesiones remotas en el navegador) */
+.connect { position: relative; margin-top: 10px; display: flex; justify-content: flex-end; }
+.connect-btn { border-color: rgba(34,211,238,.5); color: var(--cyan); }
+.connect-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 230px; background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 6px; box-shadow: 0 18px 40px rgba(0,0,0,.5); display: grid; gap: 2px; }
+.connect-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; background: transparent; border: 0; color: var(--text); padding: 8px 10px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 13px; }
+.connect-menu button:hover { background: rgba(34,211,238,.1); }
+.connect-menu small { color: var(--dim); font-size: 11px; }

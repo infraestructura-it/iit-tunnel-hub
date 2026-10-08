@@ -70,6 +70,7 @@ const EVENT_STYLE = {
   respaldo_creado: 'good', respaldo_fallido: 'bad', respaldo_descargado: 'info', respaldo_eliminado: 'warn', respaldos_configurados: 'info',
   acceso_otorgado: 'info', acceso_revocado: 'warn', clave_rotada: 'warn', reconexion: 'info', accesos_descargados: 'info',
   codigo_generado: 'info', codigo_canjeado: 'good', codigo_revocado: 'warn', codigo_rechazado: 'bad',
+  sesion_remota: 'info', sesion_remota_fin: 'info', huella_ssh_olvidada: 'warn',
 };
 const EVENT_LABEL = {
   conectada: 'Conectada', servicio_activo: 'Servicio activo', habilitada: 'Habilitada', registrada: 'Registrada',
@@ -91,6 +92,7 @@ const EVENT_LABEL = {
   respaldo_eliminado: 'Respaldo eliminado', respaldos_configurados: 'Respaldos configurados',
   codigo_generado: 'Código de instalación generado', codigo_canjeado: 'Instalada con código',
   codigo_revocado: 'Código de instalación revocado', codigo_rechazado: 'Código de instalación rechazado',
+  sesion_remota: 'Sesión remota', sesion_remota_fin: 'Sesión remota terminada', huella_ssh_olvidada: 'Huella SSH olvidada',
 };
 const TYPE_LABEL = { stcp: 'privado' };
 const typeTag = (t) => `<span class="tag ${t}">${TYPE_LABEL[t] || t}</span>`;
@@ -328,6 +330,7 @@ function renderMachines() {
       ${m.services.length ? m.services.map(serviceLine).join('') : (m.visits?.length ? '' : '<div class="no-svc">Sin servicios publicados</div>')}
       ${typeof snmpCardLine === 'function' ? snmpCardLine(m) : ''}
       ${m.visits?.length ? `<div class="visits-line">🔑 Entra a ${plural(m.visits.length, 'servicio privado', 'servicios privados')}</div>` : ''}
+      ${connectMenu(m)}
     </article>`;
   }).join('');
 }
@@ -347,9 +350,36 @@ function renderEvents() {
 $('#search').addEventListener('input', renderMachines);
 $('#filter').addEventListener('change', renderMachines);
 $('#machines').addEventListener('click', (e) => {
+  const rem = e.target.closest('[data-remote]');
+  if (rem) { state.connectOpen = null; renderMachines(); return openRemote(rem.dataset.machine, rem.dataset.remote); }
+  const con = e.target.closest('[data-connect]');
+  if (con) { state.connectOpen = state.connectOpen === con.dataset.connect ? null : con.dataset.connect; return renderMachines(); }
   const card = e.target.closest('.card');
   if (card) openDrawer(card.dataset.id);
 });
+document.addEventListener('click', (e) => {
+  if (state.connectOpen && !e.target.closest('.connect')) { state.connectOpen = null; renderMachines(); }
+});
+
+// ---------- sesiones remotas en el navegador (VNC / SSH) ----------
+
+const REMOTE_LABEL = { vnc: '🖥 Pantalla (VNC)', ssh: '⌨ Terminal (SSH)' };
+const remoteServices = (m) => (m.services || []).filter((s) => s.remote && REMOTE_LABEL[s.remote]);
+/** Abre la sesión en otra pestaña (sin noopener: así hereda el token de administración si se usa). */
+function openRemote(machineId, service) {
+  window.open(`remoto.html?m=${encodeURIComponent(machineId)}&s=${encodeURIComponent(service)}`, '_blank');
+}
+/** Botón "Conectar por ▾" de la tarjeta, como Raspberry Pi Connect. */
+function connectMenu(m) {
+  const list = remoteServices(m);
+  if (!isStaff() || !list.length) return '';
+  const open = state.connectOpen === m.id;
+  return `<div class="connect">
+    <button class="btn small connect-btn" data-connect="${esc(m.id)}" ${m.online ? '' : 'title="La máquina está fuera de línea"'}>Conectar por ▾</button>
+    ${open ? `<div class="connect-menu">${list.map((s) => `<button data-remote="${esc(s.name)}" data-machine="${esc(m.id)}">
+      <span>${REMOTE_LABEL[s.remote]}</span><small>${esc(s.name)} · :${s.localPort}${s.status === 'online' ? '' : ' · sin conectar'}</small></button>`).join('')}</div>` : ''}
+  </div>`;
+}
 
 // ---------- detalle ----------
 
@@ -480,6 +510,8 @@ $('#drawer').addEventListener('click', async (e) => {
   }
   const acc = e.target.closest('[data-acc]');
   if (acc) return accessAction(m, acc.dataset.acc, acc.dataset);
+  const orem = e.target.closest('[data-open-remote]');
+  if (orem) return openRemote(m.id, orem.dataset.openRemote);
   const del = e.target.closest('[data-del-svc]');
   if (del) {
     if (!confirm(`¿Eliminar el servicio "${del.dataset.delSvc}"? La máquina deberá actualizar su frpc.toml.`)) return;
@@ -547,6 +579,7 @@ function privateCell(m, s) {
       <span class="lock">🔒 Privado · sin puerto público</span>
       <div class="chips">${chips || '<span style="color:var(--dim)">Nadie tiene acceso todavía</span>'}</div>
       <div class="actions">
+        ${s.remote && REMOTE_LABEL[s.remote] && isStaff() ? `<button class="btn small primary" data-open-remote="${esc(s.name)}" title="Abrir en una pestaña del navegador">▶ ${s.remote === 'vnc' ? 'Ver pantalla' : 'Abrir terminal'}</button>` : ''}
         <button class="btn small primary" data-acc="grant" data-svc="${esc(m.id)}/${esc(s.name)}">+ Acceso</button>
         <button class="btn small" data-acc="rotate" data-svc="${esc(s.name)}" title="Genera una clave nueva: los visitantes deben actualizar sus accesos">Rotar clave</button>
       </div>

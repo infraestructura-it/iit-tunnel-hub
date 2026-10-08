@@ -18,6 +18,7 @@ RUN ARCH="${TARGETARCH:-amd64}" \
 WORKDIR /app
 COPY package.json ./
 COPY src ./src
+COPY deps ./deps
 COPY public ./public
 
 RUN mkdir -p /data && chown node:node /data

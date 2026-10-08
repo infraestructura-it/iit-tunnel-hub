@@ -297,7 +297,26 @@
       <div class="field" id="enroll-client-row">
         <label for="enroll-client">Cliente de la máquina nueva</label>
         <select id="enroll-client" name="client"></select>
-        <div class="hint">La máquina se crea al instalar, con el nombre del equipo. Después se le agregan servicios.</div>
+        <div class="hint">La máquina se crea al instalar, con el nombre del equipo.</div>
+      </div>
+      <div class="field" id="enroll-services-row">
+        <label>Servicios que publicará</label>
+        <div class="enroll-svcs" id="enroll-svcs">
+          <label class="enroll-svc"><input type="checkbox" data-svc="ssh" data-type="stcp" checked><span><b>SSH</b> <span class="tag stcp">privado</span></span><input type="number" min="1" max="65535" value="22" aria-label="Puerto SSH"></label>
+          <label class="enroll-svc"><input type="checkbox" data-svc="vnc" data-type="stcp"><span><b>VNC</b> <span class="tag stcp">privado</span></span><input type="number" min="1" max="65535" value="5900" aria-label="Puerto VNC"></label>
+          <label class="enroll-svc"><input type="checkbox" data-svc="rdp" data-type="stcp"><span><b>Escritorio remoto</b> <span class="tag stcp">privado</span></span><input type="number" min="1" max="65535" value="3389" aria-label="Puerto RDP"></label>
+          <label class="enroll-svc"><input type="checkbox" data-svc="web" data-type="http"><span><b>Web</b> <span class="tag http">http</span></span><input type="number" min="1" max="65535" value="80" aria-label="Puerto web"></label>
+        </div>
+        <div class="hint">Puerto local en el equipo. Más servicios se agregan después en su detalle (y se reinstala con código).</div>
+      </div>
+      <div class="field" id="enroll-visitor-row">
+        <label for="enroll-visitor">Dar acceso a los servicios privados desde</label>
+        <select id="enroll-visitor"></select>
+        <div class="hint">Normalmente su PC de soporte. Después ejecute en ese equipo su archivo de accesos.</div>
+      </div>
+      <div class="field hidden" id="enroll-current-row">
+        <label>Se instalará con</label>
+        <div id="enroll-current" class="enroll-current"></div>
       </div>
       <div class="row">
         <div class="field">

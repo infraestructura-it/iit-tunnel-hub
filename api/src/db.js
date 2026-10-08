@@ -215,9 +215,14 @@ ${SERVICES_TABLE('services')}
       used_ip       TEXT,
       used_host     TEXT,
       used_machine  TEXT,
-      revoked_at    INTEGER
+      revoked_at    INTEGER,
+      services      TEXT NOT NULL DEFAULT '[]',  -- máquina nueva: servicios a crear al canjear
+      visitor_id    TEXT                         -- máquina nueva: visitante con acceso a sus servicios privados
     );
   `);
+  const enCols = new Set(db.prepare('PRAGMA table_info(enrollments)').all().map((c) => c.name));
+  if (!enCols.has('services')) db.exec("ALTER TABLE enrollments ADD COLUMN services TEXT NOT NULL DEFAULT '[]'");
+  if (!enCols.has('visitor_id')) db.exec('ALTER TABLE enrollments ADD COLUMN visitor_id TEXT');
   return new Store(db);
 }
 
@@ -558,9 +563,10 @@ class Store {
 
   // ---------- códigos de instalación ----------
   createEnrollment(e) {
-    const r = this.db.prepare(`INSERT INTO enrollments (code_hash, hint, machine_id, client_id, server_addr, created_by, created_at, expires_at)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(e.codeHash, e.hint, e.machineId ?? null, e.clientId ?? null, e.serverAddr, e.createdBy ?? null, now(), e.expiresAt);
+    const r = this.db.prepare(`INSERT INTO enrollments (code_hash, hint, machine_id, client_id, server_addr, created_by, created_at, expires_at, services, visitor_id)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(e.codeHash, e.hint, e.machineId ?? null, e.clientId ?? null, e.serverAddr, e.createdBy ?? null, now(), e.expiresAt,
+        JSON.stringify(e.services || []), e.visitorId ?? null);
     return this.getEnrollment(Number(r.lastInsertRowid));
   }
   getEnrollment(id) { return this.db.prepare('SELECT * FROM enrollments WHERE id = ?').get(Number(id)) || null; }

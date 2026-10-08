@@ -485,7 +485,8 @@ enroll() { curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/
 check "solo el administrador genera códigos" '[ "$(scode h3 POST /enrollments -d "{}")" = 403 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" $API/enrollments)" = 401 ]'
 check "frps 127.0.0.1 con el hub abierto por la red: el código usa la IP del hub" '[ "$(api POST /enrollments -H "Host: 10.9.9.9:$PORT" -d "{\"serverAddr\":\"127.0.0.1\"}" | jq -r "[.serverAdjusted, .enrollment.serverAddr] | join(\" \")")" = "true 10.9.9.9" ]'
 check "código para una máquina inexistente → 404" '[ "$(api POST /enrollments -o /dev/null -w "%{http_code}" -d "{\"machine\":\"no-existe\"}")" = 404 ]'
-api POST /enrollments -d '{"client":"clinica-norte","minutes":30}' > "$WORK/enr.json"
+check "servicio inválido en el código → 400" '[ "$(api POST /enrollments -o /dev/null -w "%{http_code}" -d "{\"services\":[{\"name\":\"ssh\",\"type\":\"ftp\",\"localPort\":22}]}")" = 400 ]'
+api POST /enrollments -d "{\"client\":\"clinica-norte\",\"minutes\":30,\"services\":[{\"name\":\"ssh\",\"type\":\"stcp\",\"localPort\":22},{\"name\":\"web\",\"type\":\"http\",\"localPort\":18999}],\"visitor\":\"$ID\"}" > "$WORK/enr.json"
 CODE=$(jq -r .code "$WORK/enr.json")
 check "código de 12 caracteres con comandos para Windows y Linux" '[[ "$CODE" =~ ^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$ ]] && jq -r .commands.windows "$WORK/enr.json" | grep -qF "irm $HUBURL/i/$CODE/windows | iex" && jq -r .commands.linux "$WORK/enr.json" | grep -qF "curl -fsSL $HUBURL/i/$CODE/linux | sudo bash"'
 check "el hub guarda solo el hash del código" '! grep -qa "${CODE//-/}" "$WORK"/hub.db*'
@@ -505,6 +506,9 @@ check "la máquina nueva queda en el cliente con el nombre del equipo" '[ "$(api
 awk "/^cat > .*<<'IIT_FRPC_TOML'/{f=1;next} /^IIT_FRPC_TOML/{f=0} f" "$WORK/canjeado.sh" | sed "s|/etc/iit-frpc/|$WORK/enr/|" > "$WORK/enr/frpc.toml"
 EPID=$(start_frpc "$WORK/enr/frpc.toml"); PIDS+=($EPID)
 check "el token entregado conecta la máquina" 'wait_for "[ \"\$(api GET /machines/$EM | jq -r .online)\" = true ]"'
+check "la máquina nace con los servicios elegidos en el código" '[ "$(api GET /machines/$EM | jq -r "[.services[].name] | sort | join(\",\")")" = "ssh,web" ] && grep -q "name = \"ssh\"" "$WORK/enr/frpc.toml"'
+check "y el visitante elegido recibe acceso a su servicio privado" '[ "$(api GET /machines/$ID | jq -r "[.visits[] | select(.machine==\"$EM\") | .service] | join(\",\")")" = ssh ]'
+check "su servicio web responde por el túnel desde el primer momento" 'wait_for "[ \"\$(curl -s -H \"Host: web-$EM.test.local\" http://127.0.0.1:18080/)\" = hola-desde-la-maquina ]"'
 check "el código no sirve dos veces" '[ "$(enroll "$CODE")" = 410 ]'
 check "con un código usado, el arranque solo muestra el error" 'curl -s "$HUBURL/i/$CODE/linux" | grep -q "^echo \"X Codigo invalido"'
 api POST /enrollments -d "{\"machine\":\"$EM\"}" > "$WORK/enr2.json"
@@ -523,7 +527,48 @@ for i in $(seq 1 10); do enroll AAAA-BBBB-CCCC >/dev/null; done
 check "10 códigos inexistentes desde una IP → 429" '[ "$(enroll "$C3")" = 429 ]'
 api DELETE /machines/$EM >/dev/null
 
-echo "13. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
+echo "13. Sesiones remotas en el navegador (VNC y SSH por el túnel privado)"
+# "Servidor VNC" de prueba: saluda como RFB y devuelve lo que recibe
+cat > "$WORK/fake_vnc.py" <<'PY2'
+import socket, threading
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', 18590)); s.listen(5)
+def h(c):
+    c.sendall(b'RFB 003.008\n')
+    while True:
+        d = c.recv(4096)
+        if not d: break
+        c.sendall(d)
+    c.close()
+while True:
+    c, _ = s.accept(); threading.Thread(target=h, args=(c,), daemon=True).start()
+PY2
+python3 "$WORK/fake_vnc.py" & PIDS+=($!)
+SSHSVC=""; [ "$SSHD" = 1 ] && SSHSVC=',{"name":"ssh","type":"stcp","localPort":18022}'
+api POST /machines -d "{\"name\":\"Remota\",\"id\":\"remota\",\"services\":[{\"name\":\"vnc\",\"type\":\"stcp\",\"localPort\":18590},{\"name\":\"web\",\"type\":\"http\",\"localPort\":18999}$SSHSVC]}" > "$WORK/rem.json"
+mkdir -p "$WORK/rem" && jq -r .frpcToml "$WORK/rem.json" > "$WORK/rem/frpc.toml"
+( cd "$WORK/rem" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & PIDS+=($!)
+check "la máquina con VNC y SSH privados se conecta" 'wait_for_long "[ \"\$(api GET /machines/remota | jq -r \"[.services[] | select(.private) | .status] | unique | join(\\\",\\\")\")\" = online ]"'
+check "los servicios privados SSH/VNC se marcan para abrir en el navegador" '[ "$(api GET /machines/remota | jq -r "[.services[] | select(.remote) | .name] | sort | join(\",\")")" = "$([ "$SSHD" = 1 ] && echo ssh,vnc || echo vnc)" ]'
+check "un servicio http no abre sesión en el navegador → 400" '[ "$(api POST /machines/remota/remote -o /dev/null -w "%{http_code}" -d "{\"service\":\"web\"}")" = 400 ]'
+check "el usuario cliente no abre sesiones remotas → 403" '[ "$(scode h3 POST /machines/remota/remote -d "{\"service\":\"vnc\"}")" = 403 ]'
+rticket() { api POST /machines/remota/remote -d "{\"service\":\"$1\"}" | jq -r .ticket; }
+wsc() { node "$ROOT/test/ws-client.js" "$@" || true; } # el cliente sale con 1 si la sesión falla: se evalúa su salida
+WSU="ws://127.0.0.1:$PORT/api/remote/ws?t="
+T1=$(rticket vnc)
+check "VNC: el navegador recibe el saludo RFB y el eco por el túnel privado" 'wait_for_long "node $ROOT/test/ws-client.js \"$WSU$(rticket vnc)\" vnc | grep -q \"^OK\""'
+check "el ticket de sesión sirve una sola vez" 'wsc "$WSU$T1" vnc >/dev/null; wsc "$WSU$T1" vnc | grep -q "ERROR rechazado"'
+check "WebSocket desde otro origen → rechazado" 'wsc "$WSU$(rticket vnc)" vnc root http://malo.example | grep -q "ERROR rechazado"'
+check "ticket inventado → rechazado" 'wsc "${WSU}inventado" vnc | grep -q "ERROR rechazado"'
+if [ "$SSHD" = 1 ]; then
+  check "SSH: terminal en el navegador con la clave del hub, ajusta el tamaño" 'wait_for_long "node $ROOT/test/ws-client.js \"$WSU$(rticket ssh)\" ssh root | grep -q \"^OK terminal 120x40\""'
+  check "la huella SSH del equipo queda guardada (TOFU)" '[ "$(api DELETE /machines/remota/services/ssh/hostkey | jq -r .forgotten)" = ssh ]'
+else
+  echo "  (SSH en el navegador omitido: requiere root y sshd)"
+fi
+check "cada sesión queda en la actividad con su autor y duración" '[ "$(api GET "/events?machine=remota" | jq "[.[] | select(.kind==\"sesion_remota\")] | length")" -ge 1 ] && api GET "/events?machine=remota" | jq -r ".[] | select(.kind==\"sesion_remota_fin\") | .detail" | grep -q " s · "'
+api DELETE /machines/remota >/dev/null
+
+echo "14. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
 SNMPOK=0
 if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/snmpd ] && command -v snmpsim-command-responder >/dev/null; then SNMPOK=1; fi
 if [ $SNMPOK = 1 ]; then
@@ -614,7 +659,7 @@ else
   echo "  - (pruebas SNMP omitidas: requieren root, snmpd y snmpsim-command-responder)"
 fi
 
-echo "14. Respaldos y estado del hub"
+echo "15. Respaldos y estado del hub"
 H=$(curl -s -w " %{http_code}" $API/health)
 check "health público: 200 con base y frps bien" '[ "${H##* }" = 200 ] && echo "${H% *}" | jq -e ".ok and .checks.db and .checks.frps" >/dev/null'
 autos() { api GET /backups | jq '[.list[] | select(.kind=="auto")] | length'; }
@@ -649,7 +694,7 @@ api GET /status > "$WORK/status.json"
 check "estado: frps, plugin, base y monitor" 'jq -e ".frps.reachable and .plugin.listening and (.plugin.calls > 0) and .db.writable and (.monitor.lastCheckAt != null) and (.hub.uptimeSeconds > 0)" "$WORK/status.json" >/dev/null'
 check "estado: advierte administradores sin 2FA" 'jq -e "[.warnings[].text] | any(test(\"sin verificación en dos pasos\"))" "$WORK/status.json" >/dev/null'
 
-echo "15. Configuración y limpieza"
+echo "16. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
 check "agregar servicio" '[ "$(api POST /machines/$ID/services -o /dev/null -w "%{http_code}" -d "{\"name\":\"extra\",\"type\":\"http\",\"localPort\":3000}")" = "201" ]'
 check "eliminar servicio" '[ "$(api DELETE /machines/$ID/services/extra | jq -r .deleted)" = "extra" ]'
@@ -658,7 +703,7 @@ check "máquina eliminada ya no recibe tráfico" 'http_blocked'
 others() { curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq '[.[] | select(.user != "_hub")] | length'; }
 check "máquina eliminada es expulsada de frps" 'wait_for_long "[ \$(others) = 0 ]"'
 
-echo "16. Servidor frps caído"
+echo "17. Servidor frps caído"
 : > "$WORK/hooks.log"
 kill $FRPS_PID 2>/dev/null
 check "frps sin respuesta → alerta server_down" 'wait_for_long "grep -q server_down \"$WORK/hooks.log\""'
