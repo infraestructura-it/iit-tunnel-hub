@@ -23,5 +23,13 @@ services:
       - hub
     restart: unless-stopped
 
+  # Escritorio remoto (RDP) en el navegador: el hub le habla en 127.0.0.1:4822 y guacd entra a los
+  # puertos locales del frpc del hub (127.0.0.1:REMOTE_PORT_BASE+id), por eso también usa la red del host
+  guacd:
+    image: guacamole/guacd:1.5.5
+    network_mode: host
+    command: ["/opt/guacamole/sbin/guacd", "-b", "127.0.0.1", "-l", "4822", "-f"]
+    restart: unless-stopped
+
 volumes:
   hub-data:

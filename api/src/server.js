@@ -482,7 +482,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     return [200, { deleted: p.name }];
   });
 
-  // ---------- sesiones remotas desde el navegador (VNC y SSH) ----------
+  // ---------- sesiones remotas desde el navegador (VNC, SSH y RDP) ----------
 
   // Ticket de un solo uso (60 s) para abrir el WebSocket de la sesión: el navegador no puede mandar
   // cabeceras en un WebSocket y así tampoco depende de la cookie (sirve también con el token de API).
@@ -493,9 +493,24 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const s = store.getService(m.id, String(body.service || ''));
     if (!s) throw new M.HttpError(404, `no existe el servicio "${body.service}"`);
     const kind = browserKind(s);
-    if (!kind) throw M.bad(`"${s.name}" no admite sesión desde el navegador (solo servicios privados SSH o VNC)`);
+    if (!kind) throw M.bad(`"${s.name}" no admite sesión desde el navegador (solo servicios privados SSH, VNC o RDP)`);
     if (!m.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada');
-    const ticket = remote.createTicket({ machineId: m.id, service: s, actor: ctx.actor });
+    let rdp = null;
+    if (kind === 'rdp') {
+      if (!(await remote.guacdReachable())) {
+        const g = remote.config.guacd;
+        throw new M.HttpError(503, `el escritorio remoto necesita guacd y no responde en ${g.host}:${g.port}. Inícielo junto al hub (ver README, "Escritorio remoto")`);
+      }
+      // Primero el navegador pregunta el tipo; las credenciales llegan en la segunda llamada y viajan con el ticket
+      if (!body.credentials || typeof body.credentials !== 'object') {
+        return [200, { needCredentials: true, kind, label: REMOTE_KINDS[kind], machine: { id: m.id, name: m.name }, service: s.name }];
+      }
+      const c = body.credentials;
+      const str = (v, max) => String(v ?? '').slice(0, max);
+      rdp = { username: str(c.username, 128).trim(), password: str(c.password, 256), domain: str(c.domain, 128).trim(), layout: str(c.layout, 32) };
+      if (/[\x00-\x1f]/.test(rdp.username + rdp.domain)) throw M.bad('usuario o dominio no válidos');
+    }
+    const ticket = remote.createTicket({ machineId: m.id, service: s, actor: ctx.actor, rdp });
     return [201, { ticket, kind, label: REMOTE_KINDS[kind], machine: { id: m.id, name: m.name }, service: s.name, ws: '/api/remote/ws' }];
   });
 
@@ -1294,6 +1309,12 @@ function main() {
   if (!store.getSetting('remoto_hub_visitante')) {
     for (const id of new Set(store.listServices().filter(browserKind).map((s) => s.machine_id))) plugin.requestReload(id);
     store.putSetting('remoto_hub_visitante', true);
+    store.putSetting('remoto_hub_visitante_rdp', true);
+  }
+  // Igual para los RDP ya publicados cuando llegó el escritorio remoto en el navegador
+  if (!store.getSetting('remoto_hub_visitante_rdp')) {
+    for (const id of new Set(store.listServices().filter((s) => browserKind(s) === 'rdp').map((s) => s.machine_id))) plugin.requestReload(id);
+    store.putSetting('remoto_hub_visitante_rdp', true);
   }
   const snmpMon = new SnmpMonitor({
     store, frps, hub: hubFrpc, notify: (a) => monitor.notify(a), graceSeconds: () => A.loadSettings(store).graceSeconds,
@@ -1328,10 +1349,10 @@ function main() {
     const t = remote.takeTicket(u.searchParams.get('t'));
     if (!t) return WS.reject(socket, 403, 'Forbidden');
     if (head?.length) socket.unshift(head);
-    const ws = WS.accept(req, socket, { protocols: ['binary'] });
+    const ws = WS.accept(req, socket, { protocols: t.kind === 'rdp' ? ['guacamole'] : ['binary'] });
     if (!ws) return;
     const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
-    remote.attach(ws, t, { ip, run: (fn) => requestContext.run({ actor: t.actor }, fn) });
+    remote.attach(ws, t, { ip, query: u.search.slice(1), run: (fn) => requestContext.run({ actor: t.actor }, fn) });
   });
 
   const pluginServer = http.createServer(async (req, res) => {

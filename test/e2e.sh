@@ -35,6 +35,7 @@ export FRPS_TCP_PORT_MIN=21000 FRPS_TCP_PORT_MAX=21010
 export FRPS_API_URL=http://127.0.0.1:7500 FRPS_API_PASSWORD="dash-e2e"
 export ALERT_CHECK_SECONDS=1
 export ANTHROPIC_BASE_URL=http://127.0.0.1:19900 TELEGRAM_API_BASE=http://127.0.0.1:19800
+export GUACD_PORT=18822 REMOTE_PORT_BASE=26000
 
 API="http://127.0.0.1:$PORT/api"
 AUTH=(-H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json")
@@ -527,7 +528,7 @@ for i in $(seq 1 10); do enroll AAAA-BBBB-CCCC >/dev/null; done
 check "10 códigos inexistentes desde una IP → 429" '[ "$(enroll "$C3")" = 429 ]'
 api DELETE /machines/$EM >/dev/null
 
-echo "13. Sesiones remotas en el navegador (VNC y SSH por el túnel privado)"
+echo "13. Sesiones remotas en el navegador (VNC, SSH y RDP por el túnel privado)"
 # "Servidor VNC" de prueba: saluda como RFB y devuelve lo que recibe
 cat > "$WORK/fake_vnc.py" <<'PY2'
 import socket, threading
@@ -544,11 +545,11 @@ while True:
 PY2
 python3 "$WORK/fake_vnc.py" & PIDS+=($!)
 SSHSVC=""; [ "$SSHD" = 1 ] && SSHSVC=',{"name":"ssh","type":"stcp","localPort":18022}'
-api POST /machines -d "{\"name\":\"Remota\",\"id\":\"remota\",\"services\":[{\"name\":\"vnc\",\"type\":\"stcp\",\"localPort\":18590},{\"name\":\"web\",\"type\":\"http\",\"localPort\":18999}$SSHSVC]}" > "$WORK/rem.json"
+api POST /machines -d "{\"name\":\"Remota\",\"id\":\"remota\",\"services\":[{\"name\":\"vnc\",\"type\":\"stcp\",\"localPort\":18590},{\"name\":\"web\",\"type\":\"http\",\"localPort\":18999},{\"name\":\"escritorio\",\"type\":\"stcp\",\"localPort\":18591}$SSHSVC]}" > "$WORK/rem.json"
 mkdir -p "$WORK/rem" && jq -r .frpcToml "$WORK/rem.json" > "$WORK/rem/frpc.toml"
 ( cd "$WORK/rem" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & PIDS+=($!)
 check "la máquina con VNC y SSH privados se conecta" 'wait_for_long "[ \"\$(api GET /machines/remota | jq -r \"[.services[] | select(.private) | .status] | unique | join(\\\",\\\")\")\" = online ]"'
-check "los servicios privados SSH/VNC se marcan para abrir en el navegador" '[ "$(api GET /machines/remota | jq -r "[.services[] | select(.remote) | .name] | sort | join(\",\")")" = "$([ "$SSHD" = 1 ] && echo ssh,vnc || echo vnc)" ]'
+check "los servicios privados SSH/VNC/RDP se marcan para abrir en el navegador" '[ "$(api GET /machines/remota | jq -r "[.services[] | select(.remote) | .name] | sort | join(\",\")")" = "$([ "$SSHD" = 1 ] && echo escritorio,ssh,vnc || echo escritorio,vnc)" ]'
 check "un servicio http no abre sesión en el navegador → 400" '[ "$(api POST /machines/remota/remote -o /dev/null -w "%{http_code}" -d "{\"service\":\"web\"}")" = 400 ]'
 check "el usuario cliente no abre sesiones remotas → 403" '[ "$(scode h3 POST /machines/remota/remote -d "{\"service\":\"vnc\"}")" = 403 ]'
 rticket() { api POST /machines/remota/remote -d "{\"service\":\"$1\"}" | jq -r .ticket; }
@@ -565,6 +566,15 @@ if [ "$SSHD" = 1 ]; then
 else
   echo "  (SSH en el navegador omitido: requiere root y sshd)"
 fi
+# Escritorio remoto: sin guacd → 503 claro; con el guacd simulado, saludo, parámetros fijados por el hub y eco
+check "RDP sin guacd → 503 que explica qué falta" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"escritorio\"}" -o "$WORK/rdp503.json" -w "%{http_code}")" = 503 ] && grep -q guacd "$WORK/rdp503.json"'
+python3 "$ROOT/test/fake-guacd.py" 18822 "$WORK/guacd-connect.json" & PIDS+=($!)
+wait_for "(echo > /dev/tcp/127.0.0.1/18822) 2>/dev/null"
+check "RDP: primero pide credenciales (sin ticket)" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"escritorio\"}" | jq -r "[.needCredentials, .kind, (.ticket // \"sin\")] | join(\",\")")" = "true,rdp,sin" ]'
+RT=$(api POST /machines/remota/remote -d '{"service":"escritorio","credentials":{"username":"tecnico","password":"Clave Win 1","domain":"OFICINA","layout":"es-latam-qwerty"}}' | jq -r .ticket)
+check "RDP: el hub saluda a guacd, responde el ping y reenvía instrucciones (UTF-8)" 'wsc "$WSU$RT" rdp | grep -q "^OK"'
+check "RDP: guacd recibe destino local del hub, credenciales y teclado; sin unidades compartidas" 'jq -e ".hostname==\"127.0.0.1\" and (.port|tonumber) > 26000 and .username==\"tecnico\" and .password==\"Clave Win 1\" and .domain==\"OFICINA\" and .\"ignore-cert\"==\"true\" and .\"server-layout\"==\"es-latam-qwerty\" and .\"enable-drive\"==\"false\"" "$WORK/guacd-connect.json" >/dev/null'
+check "RDP: el ticket con credenciales sirve una sola vez" 'wsc "$WSU$RT" rdp | grep -q "ERROR rechazado"'
 check "cada sesión queda en la actividad con su autor y duración" '[ "$(api GET "/events?machine=remota" | jq "[.[] | select(.kind==\"sesion_remota\")] | length")" -ge 1 ] && api GET "/events?machine=remota" | jq -r ".[] | select(.kind==\"sesion_remota_fin\") | .detail" | grep -q " s · "'
 api DELETE /machines/remota >/dev/null
 

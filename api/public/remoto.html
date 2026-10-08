@@ -16,6 +16,7 @@
     <div class="spacer"></div>
     <div class="rtools" id="r-tools">
       <button class="btn small vnc-only" id="r-cad" title="Enviar Ctrl+Alt+Supr" disabled>Ctrl+Alt+Supr</button>
+      <button class="btn small rdp-only" id="r-win" title="Enviar la tecla Windows" disabled>⊞<span class="lbl"> Win</span></button>
       <button class="btn small vnc-only" id="r-scale" title="Ajustar la pantalla a la ventana" disabled>Ajustar: sí</button>
       <button class="btn small vnc-only" id="r-clip" title="Copiar y pegar texto con el equipo" disabled>📋<span class="lbl"> Portapapeles</span></button>
       <button class="btn small" id="r-full" title="Pantalla completa">⛶<span class="lbl"> Pantalla completa</span></button>
@@ -41,6 +42,18 @@
         <div class="hint" id="r-auth-hint" style="margin-top:0"></div>
         <div class="field" id="r-user-row"><label for="r-user">Usuario</label><input id="r-user" autocapitalize="none" spellcheck="false" autocomplete="username"></div>
         <div class="field" id="r-pass-row"><label for="r-pass">Contraseña</label><input id="r-pass" type="password" autocomplete="current-password"></div>
+        <div class="field hidden" id="r-domain-row"><label for="r-domain">Dominio <small>(opcional)</small></label><input id="r-domain" autocapitalize="none" spellcheck="false" placeholder="EMPRESA o vacío"></div>
+        <div class="field hidden" id="r-layout-row"><label for="r-layout">Teclado del equipo</label>
+          <select id="r-layout">
+            <option value="es-latam-qwerty">Español (Latinoamérica)</option>
+            <option value="es-es-qwerty">Español (España)</option>
+            <option value="en-us-qwerty">Inglés (EE. UU.)</option>
+            <option value="pt-br-qwerty">Portugués (Brasil)</option>
+            <option value="fr-fr-azerty">Francés</option>
+            <option value="de-de-qwertz">Alemán</option>
+            <option value="it-it-qwerty">Italiano</option>
+            <option value="failsafe">Otro (modo seguro)</option>
+          </select></div>
         <label class="rcheck hidden" id="r-hubkey-row"><input type="checkbox" id="r-hubkey"> Usar la clave SSH del hub (la misma de la IA)</label>
         <div class="modal-actions"><button class="btn" type="button" id="r-auth-cancel">Cancelar</button><button class="btn primary" type="submit">Conectar</button></div>
       </div>

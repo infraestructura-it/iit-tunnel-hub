@@ -15,6 +15,11 @@ html, body.remote-page { height: 100%; margin: 0; overflow: hidden; background: 
 .rscreen { position: absolute; inset: 0; }
 .kind-ssh .rscreen { padding: 6px 8px; }
 .kind-ssh .vnc-only { display: none; }
+.rdp-only { display: none; }
+.kind-rdp .rdp-only { display: inline-flex; }
+.kind-rdp .rscreen { overflow: hidden; background: #05070b; }
+.kind-rdp .rscreen > div { margin: 0 auto; }
+.kind-rdp #r-scale { display: none; }
 .rscreen .xterm { height: 100%; }
 .roverlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,7,11,.72); z-index: 10; padding: 16px; }
 .rcard { width: 100%; max-width: 440px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px; padding: 22px; box-shadow: 0 30px 80px rgba(0,0,0,.6); }

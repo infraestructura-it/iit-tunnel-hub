@@ -1,7 +1,9 @@
-// Sesión remota en el navegador: pantalla (VNC, con noVNC) o terminal (SSH, con xterm.js).
+// Sesión remota en el navegador: pantalla (VNC, con noVNC), terminal (SSH, con xterm.js) o escritorio de Windows
+// (RDP, con guacamole-common-js; el hub habla con guacd).
 // La página recibe ?m=<máquina>&s=<servicio>, pide un ticket de un solo uso al hub y abre el WebSocket.
 import RFB from './vendor/novnc/core/rfb.js';
 import { initLogging } from './vendor/novnc/core/util/logging.js';
+import Guacamole from './vendor/guacamole/guacamole-common.min.js';
 
 const $ = (s) => document.querySelector(s);
 const params = new URLSearchParams(location.search);
@@ -58,14 +60,14 @@ function showMessage(title, text, { retry = true } = {}) {
   document.title = `${title} · IIT Tunnel Hub`;
 }
 
-async function ticket() {
+async function ticket(extra = {}) {
   let token = null;
   try { token = sessionStorage.getItem(TOKEN_KEY); } catch {}
   const res = await fetch(`/api/machines/${encodeURIComponent(machineId)}/remote`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json', 'x-requested-with': 'iit-panel', ...(token ? { authorization: 'Bearer ' + token } : {}) },
-    body: JSON.stringify({ service }),
+    body: JSON.stringify({ service, ...extra }),
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) throw new Error('Su sesión del panel terminó: ingrese de nuevo en el panel y vuelva a abrir la conexión.');
@@ -81,7 +83,7 @@ function openSocket(t) {
 }
 
 /** Credenciales: VNC (lo que pida el servidor) o SSH (usuario y contraseña, o la clave del hub). */
-function askCredentials({ title, hint, user = true, pass = true, hubKey = false }) {
+function askCredentials({ title, hint, user = true, pass = true, hubKey = false, rdp = false }) {
   return new Promise((resolve, reject) => {
     const f = $('#r-auth');
     $('#r-auth-title').textContent = title;
@@ -89,6 +91,12 @@ function askCredentials({ title, hint, user = true, pass = true, hubKey = false 
     $('#r-user-row').classList.toggle('hidden', !user);
     $('#r-pass-row').classList.toggle('hidden', !pass);
     $('#r-hubkey-row').classList.toggle('hidden', !hubKey);
+    $('#r-domain-row').classList.toggle('hidden', !rdp);
+    $('#r-layout-row').classList.toggle('hidden', !rdp);
+    try {
+      if (rdp && !$('#r-domain').value) $('#r-domain').value = localStorage.getItem(`iit-remote-domain:${machineId}/${service}`) || '';
+      if (rdp) $('#r-layout').value = localStorage.getItem(`iit-remote-layout:${machineId}/${service}`) || 'es-latam-qwerty';
+    } catch {}
     $('#r-hubkey').checked = false;
     $('#r-pass').disabled = false;
     try { if (user && !$('#r-user').value) $('#r-user').value = localStorage.getItem(`iit-remote-user:${machineId}/${service}`) || ''; } catch {}
@@ -98,7 +106,11 @@ function askCredentials({ title, hint, user = true, pass = true, hubKey = false 
     f.onsubmit = (e) => {
       e.preventDefault();
       const out = { username: $('#r-user').value.trim(), password: $('#r-pass').value, useHubKey: hubKey && $('#r-hubkey').checked };
-      try { if (out.username) localStorage.setItem(`iit-remote-user:${machineId}/${service}`, out.username); } catch {}
+      if (rdp) Object.assign(out, { domain: $('#r-domain').value.trim(), layout: $('#r-layout').value });
+      try {
+        if (out.username) localStorage.setItem(`iit-remote-user:${machineId}/${service}`, out.username);
+        if (rdp) { localStorage.setItem(`iit-remote-domain:${machineId}/${service}`, out.domain); localStorage.setItem(`iit-remote-layout:${machineId}/${service}`, out.layout); }
+      } catch {}
       f.classList.add('hidden');
       resolve(out);
     };
@@ -155,7 +167,8 @@ function startVnc(t) {
   ws = sock;
 }
 
-$('#r-cad').onclick = () => rfb?.sendCtrlAltDel();
+$('#r-cad').onclick = () => { if (rfb) rfb.sendCtrlAltDel(); else if (gclient) pressCombo([0xffe3, 0xffe9, 0xffff]); };
+$('#r-win').onclick = () => { pressCombo([0xffeb]); };
 $('#r-scale').onclick = () => {
   if (!rfb) return;
   rfb.scaleViewport = !rfb.scaleViewport;
@@ -163,8 +176,117 @@ $('#r-scale').onclick = () => {
   $('#r-scale').textContent = `Ajustar: ${rfb.scaleViewport ? 'sí' : 'no'}`;
 };
 $('#r-clip').onclick = () => $('#r-clip-panel').classList.remove('hidden');
-$('#r-clip-send').onclick = () => { rfb?.clipboardPasteFrom($('#r-clip-text').value); $('#r-clip-panel').classList.add('hidden'); rfb?.focus(); };
+$('#r-clip-send').onclick = () => {
+  const text = $('#r-clip-text').value;
+  if (rfb) { rfb.clipboardPasteFrom(text); rfb.focus(); }
+  if (gclient) {
+    const w = new Guacamole.StringWriter(gclient.createClipboardStream('text/plain'));
+    w.sendText(text); w.sendEnd();
+  }
+  $('#r-clip-panel').classList.add('hidden');
+};
 document.addEventListener('click', (e) => { const id = e.target.dataset?.hide; if (id) $('#' + id).classList.add('hidden'); });
+
+// ---------- RDP (escritorio de Windows) ----------
+
+let gclient = null;
+function pressCombo(keys) {
+  if (!gclient) return;
+  for (const k of keys) gclient.sendKeyEvent(1, k);
+  for (const k of [...keys].reverse()) gclient.sendKeyEvent(0, k);
+}
+
+/** Mensaje claro según el código de estado de Guacamole (guacd manda el detalle en inglés; el hub, en español). */
+function explainGuac(st) {
+  const code = Number(st?.code); const msg = String(st?.message || '');
+  const fixed = {
+    769: ['Acceso denegado', 'Usuario o contraseña de Windows incorrectos (o la cuenta no tiene permiso de Escritorio remoto).'],
+    771: ['Acceso denegado', 'Windows no permitió iniciar la sesión con ese usuario.'],
+    519: ['No se pudo conectar', 'El equipo no respondió: revise que esté en línea y que Escritorio remoto esté activado (puerto 3389).'],
+    521: ['Sesión tomada', 'Otra persona inició sesión en el equipo y cerró esta conexión.'],
+    522: ['Sesión terminada', 'La sesión de Windows terminó por inactividad.'],
+    523: ['Sesión terminada', 'La sesión de Windows se cerró.'],
+  };
+  if (fixed[code]) return fixed[code];
+  if (code === 515) return ['No se pudo conectar', `El equipo no aceptó la conexión RDP: revise que Escritorio remoto esté activado y que el servicio apunte al puerto 3389.${msg ? `\n\nDetalle: ${msg}` : ''}`];
+  return ['No se pudo conectar', msg && !/^\d+$/.test(msg) ? msg : `Error ${Number.isFinite(code) ? code : ''} en la sesión.`];
+}
+
+async function startRdp(info) {
+  document.body.classList.add('kind-rdp');
+  status('Esperando credenciales…');
+  let c;
+  try {
+    c = await askCredentials({ title: 'Escritorio remoto (Windows)', hint: `Usuario y contraseña de Windows en ${info.machine.name}. No se guardan en el hub.`, rdp: true });
+  } catch { return showMessage('Sesión cancelada', ''); }
+  status('Conectando por el túnel…');
+  let t;
+  try { t = await ticket({ credentials: c }); } catch (err) { return showMessage('No se pudo abrir la sesión', err.message); }
+  const screen = $('#r-screen');
+  const tunnel = new Guacamole.WebSocketTunnel(t.ws);
+  const client = new Guacamole.Client(tunnel);
+  gclient = client;
+  const display = client.getDisplay();
+  const el = display.getElement();
+  screen.appendChild(el);
+
+  // Escala: la sesión pide el tamaño de la ventana; si Windows no acepta el cambio, se reduce para que quepa
+  const rescale = () => {
+    const w = display.getWidth(); const h = display.getHeight();
+    if (!w || !h) return;
+    display.scale(Math.min(screen.clientWidth / w, screen.clientHeight / h, 1));
+  };
+  display.onresize = rescale;
+  let resizeTimer = null;
+  new ResizeObserver(() => {
+    rescale();
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (connected) client.sendSize(screen.clientWidth, screen.clientHeight); }, 400);
+  }).observe(screen);
+
+  let connected = false; let failed = false;
+  client.onstatechange = (st) => {
+    if (st === 3) {
+      connected = true;
+      status('Conectado', 'on');
+      for (const id of ['#r-cad', '#r-win', '#r-clip']) $(id).disabled = false;
+      document.title = `${t.machine.name} · Escritorio remoto`;
+    } else if (st === 5 && !failed) {
+      showMessage(connected ? 'Sesión terminada' : 'No se pudo conectar', connected ? 'Se cerró el escritorio remoto.' : 'El hub cerró la conexión.');
+    }
+  };
+  const onErr = (st) => { if (failed) return; failed = true; const [title, text] = explainGuac(st); showMessage(title, text); };
+  client.onerror = onErr;
+  tunnel.onerror = onErr;
+  client.onclipboard = (stream, mimetype) => {
+    if (!/^text\//.test(mimetype)) return;
+    const r = new Guacamole.StringReader(stream);
+    let data = '';
+    r.ontext = (x) => { data += x; };
+    r.onend = () => { $('#r-clip-text').value = data; };
+  };
+
+  // Ratón sobre la pantalla; teclado en toda la página salvo cuando hay un formulario abierto
+  const mouse = new Guacamole.Mouse(el);
+  mouse.onEach(['mousedown', 'mouseup', 'mousemove'], (e) => client.sendMouseState(e.state, true));
+  mouse.on('mouseout', () => display.showCursor(false));
+  display.showCursor(false);
+  const typing = () => !$('#r-clip-panel').classList.contains('hidden') || !$('#r-auth').classList.contains('hidden') || !$('#r-msg').classList.contains('hidden');
+  const kb = new Guacamole.Keyboard(document);
+  kb.onkeydown = (k) => { if (typing() || !connected) return true; client.sendKeyEvent(1, k); return false; };
+  kb.onkeyup = (k) => { if (typing() || !connected) return; client.sendKeyEvent(0, k); };
+  window.addEventListener('blur', () => kb.reset());
+
+  let audio = [];
+  try { audio = Guacamole.AudioPlayer.getSupportedTypes(); } catch {}
+  let tz = '';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch {}
+  const q = new URLSearchParams({ t: t.ticket, width: String(screen.clientWidth), height: String(screen.clientHeight), dpi: '96', timezone: tz });
+  for (const a of audio) q.append('audio', a);
+  status('Iniciando sesión en Windows…');
+  client.connect(q.toString());
+  window.addEventListener('beforeunload', () => { try { client.disconnect(); } catch {} });
+}
 
 // ---------- SSH ----------
 
@@ -216,7 +338,7 @@ $('#r-full').onclick = () => {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen?.();
 };
-$('#r-close').onclick = () => { finished = true; try { rfb?.disconnect(); ws?.close(); } catch {} window.close(); setTimeout(() => showMessage('Sesión terminada', 'Puede cerrar esta pestaña.'), 200); };
+$('#r-close').onclick = () => { finished = true; try { rfb?.disconnect(); ws?.close(); gclient?.disconnect(); } catch {} window.close(); setTimeout(() => showMessage('Sesión terminada', 'Puede cerrar esta pestaña.'), 200); };
 $('#r-msg-close').onclick = () => window.close();
 $('#r-msg-retry').onclick = () => location.reload();
 window.addEventListener('beforeunload', () => { try { rfb?.disconnect(); ws?.close(); } catch {} });
@@ -230,7 +352,8 @@ window.addEventListener('beforeunload', () => { try { rfb?.disconnect(); ws?.clo
     $('#r-kind').textContent = ` · ${t.label} · ${t.service}`;
     document.title = `${t.machine.name} · ${t.label} · IIT Tunnel Hub`;
     status('Conectando por el túnel…');
-    if (t.kind === 'vnc') startVnc(t);
+    if (t.kind === 'rdp') startRdp(t);
+    else if (t.kind === 'vnc') startVnc(t);
     else if (t.kind === 'ssh') startSsh(t);
     else showMessage('No soportado', `El tipo ${t.kind} aún no se abre en el navegador.`, { retry: false });
   } catch (err) {

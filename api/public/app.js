@@ -363,7 +363,7 @@ document.addEventListener('click', (e) => {
 
 // ---------- sesiones remotas en el navegador (VNC / SSH) ----------
 
-const REMOTE_LABEL = { vnc: '🖥 Pantalla (VNC)', ssh: '⌨ Terminal (SSH)' };
+const REMOTE_LABEL = { vnc: '🖥 Pantalla (VNC)', ssh: '⌨ Terminal (SSH)', rdp: '🪟 Escritorio remoto (RDP)' };
 const remoteServices = (m) => (m.services || []).filter((s) => s.remote && REMOTE_LABEL[s.remote]);
 /** Abre la sesión en otra pestaña (sin noopener: así hereda el token de administración si se usa). */
 function openRemote(machineId, service) {
@@ -579,7 +579,7 @@ function privateCell(m, s) {
       <span class="lock">🔒 Privado · sin puerto público</span>
       <div class="chips">${chips || '<span style="color:var(--dim)">Nadie tiene acceso todavía</span>'}</div>
       <div class="actions">
-        ${s.remote && REMOTE_LABEL[s.remote] && isStaff() ? `<button class="btn small primary" data-open-remote="${esc(s.name)}" title="Abrir en una pestaña del navegador">▶ ${s.remote === 'vnc' ? 'Ver pantalla' : 'Abrir terminal'}</button>` : ''}
+        ${s.remote && REMOTE_LABEL[s.remote] && isStaff() ? `<button class="btn small primary" data-open-remote="${esc(s.name)}" title="Abrir en una pestaña del navegador">▶ ${({ vnc: 'Ver pantalla', ssh: 'Abrir terminal', rdp: 'Abrir escritorio' })[s.remote]}</button>` : ''}
         <button class="btn small primary" data-acc="grant" data-svc="${esc(m.id)}/${esc(s.name)}">+ Acceso</button>
         <button class="btn small" data-acc="rotate" data-svc="${esc(s.name)}" title="Genera una clave nueva: los visitantes deben actualizar sus accesos">Rotar clave</button>
       </div>

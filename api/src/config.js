@@ -38,6 +38,15 @@ const config = {
   snmpPortBase: int('SNMP_PORT_BASE', 16200),
   // Sesiones remotas desde el navegador: puerto local del frpc del hub = base + id del servicio
   remotePortBase: int('REMOTE_PORT_BASE', 26000),
+  // Escritorio remoto (RDP) en el navegador: guacd (Apache Guacamole) y la dirección con la que guacd llega
+  // a los puertos locales del frpc del hub (127.0.0.1 si corre en el mismo equipo o en Docker con red del host;
+  // host.docker.internal con Docker Desktop en Windows)
+  guacd: {
+    host: env.GUACD_HOST || '127.0.0.1',
+    port: int('GUACD_PORT', 4822),
+    // En Windows guacd solo corre en Docker Desktop: desde el contenedor, el equipo es host.docker.internal
+    targetHost: env.GUACD_TARGET_HOST || (process.platform === 'win32' ? 'host.docker.internal' : '127.0.0.1'),
+  },
 
   // Alertas: cada cuánto se revisa el estado y zona horaria de los mensajes
   alertCheckSeconds: int('ALERT_CHECK_SECONDS', 15),

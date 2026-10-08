@@ -7,14 +7,17 @@
 // Ningún puerto queda público: el hub entra como visitante "_hub" del servicio privado de la máquina.
 // VNC: el hub solo transporta los bytes RFB (el visor es noVNC en el navegador).
 // SSH: el hub es el cliente SSH (ssh2) y el navegador muestra la terminal (xterm.js).
+// RDP: el hub habla con guacd (Apache Guacamole) y el navegador dibuja con guacamole-common-js (ver guac.js).
 
 const fs = require('node:fs');
 const net = require('node:net');
 const crypto = require('node:crypto');
 const { Client: SshClient } = require('../deps/ssh2');
+const { URLSearchParams } = require('node:url');
+const G = require('./guac');
 
 const KINDS = { vnc: 'Pantalla (VNC)', ssh: 'Terminal (SSH)', rdp: 'Escritorio remoto (RDP)' };
-const BROWSER_KINDS = new Set(['vnc', 'ssh']); // RDP llega en otra entrega (guacd)
+const BROWSER_KINDS = new Set(['vnc', 'ssh', 'rdp']); // RDP necesita guacd junto al hub
 const TICKET_TTL_MS = 60 * 1000;
 const MAX_SESSIONS = 20;
 
@@ -56,12 +59,25 @@ class RemoteService {
     return out;
   }
 
-  createTicket({ machineId, service, actor }) {
+  /** rdp = { username, password, domain, layout } solo para RDP: viaja en memoria con el ticket (60 s, un uso). */
+  createTicket({ machineId, service, actor, rdp = null }) {
     const now = Date.now();
     for (const [k, t] of this.tickets) if (t.exp < now) this.tickets.delete(k);
     const ticket = crypto.randomBytes(24).toString('base64url');
-    this.tickets.set(ticket, { machineId, serviceId: service.id, kind: browserKind(service), actor, exp: now + TICKET_TTL_MS });
+    this.tickets.set(ticket, { machineId, serviceId: service.id, kind: browserKind(service), actor, rdp, exp: now + TICKET_TTL_MS });
     return ticket;
+  }
+
+  /** ¿Responde guacd? Se revisa antes de entregar un ticket RDP para dar un error claro. */
+  guacdReachable(timeoutMs = 1500) {
+    const { host, port } = this.config.guacd;
+    return new Promise((resolve) => {
+      const s = net.connect({ host, port });
+      const done = (ok) => { clearTimeout(t); s.destroy(); resolve(ok); };
+      const t = setTimeout(() => done(false), timeoutMs);
+      s.on('connect', () => done(true));
+      s.on('error', () => done(false));
+    });
   }
 
   takeTicket(ticket) {
@@ -72,10 +88,13 @@ class RemoteService {
   }
 
   /** Atiende un WebSocket ya aceptado con su ticket validado. */
-  attach(ws, t, { ip, run }) {
+  attach(ws, t, { ip, run, query = '' }) {
     const svc = this.store.listServices().find((s) => s.id === t.serviceId);
     const m = svc && this.store.getMachine(svc.machine_id);
-    const fail = (msg) => { try { ws.send(JSON.stringify({ type: 'error', message: msg })); } catch {} ws.close(1011, msg.slice(0, 100)); };
+    // RDP habla Guacamole también para los errores: instrucción "error" y el código de estado como motivo del cierre
+    const fail = t.kind === 'rdp'
+      ? (msg, status = G.STATUS.SERVER_ERROR) => { try { ws.send(G.encode('error', msg, status)); } catch {} ws.close(1000, String(status)); }
+      : (msg) => { try { ws.send(JSON.stringify({ type: 'error', message: msg })); } catch {} ws.close(1011, msg.slice(0, 100)); };
     if (!svc || !m || m.id !== t.machineId) return fail('el servicio ya no existe');
     if (!m.enabled) return fail('la máquina está deshabilitada');
     if (this.sessions.size >= MAX_SESSIONS) return fail('demasiadas sesiones abiertas en el hub');
@@ -97,6 +116,7 @@ class RemoteService {
     ws.on('close', () => sess.end());
     if (t.kind === 'vnc') return this.#vnc(sess, port, fail);
     if (t.kind === 'ssh') return this.#ssh(sess, port, fail);
+    if (t.kind === 'rdp') return this.#rdp(sess, port, fail, t.rdp || {}, query);
     return fail('tipo de sesión no soportado');
   }
 
@@ -179,6 +199,55 @@ class RemoteService {
       client.connect(cfg);
     });
     ws.send(JSON.stringify({ type: 'auth', hubKey: fs.existsSync(this.config.ai.sshKeyPath + '.pub') }));
+  }
+
+  // RDP: guacd hace de cliente RDP contra el visitante local; el hub reenvía instrucciones completas en ambos sentidos
+  async #rdp(sess, port, fail, cred, query) {
+    const { ws } = sess;
+    const q = new URLSearchParams(query);
+    const size = { width: clampInt(q.get('width'), 320, 7680, 1280), height: clampInt(q.get('height'), 240, 4320, 720), dpi: clampInt(q.get('dpi'), 48, 400, 96) };
+    const audio = q.getAll('audio').filter((a) => /^audio\/L(8|16)(;[a-z0-9=;,]*)?$/i.test(a)).slice(0, 4);
+    const timezone = /^[A-Za-z_]+(\/[A-Za-z0-9_+-]+){0,2}$/.test(q.get('timezone') || '') ? q.get('timezone') : '';
+    let closed = false;
+    ws.on('close', () => { closed = true; });
+    let conn;
+    try {
+      conn = await G.guacdConnect({
+        host: this.config.guacd.host, port: this.config.guacd.port, size, audio, timezone,
+        params: G.rdpParams({ host: this.config.guacd.targetHost, port, ...cred, timezone }),
+      });
+    } catch (e) {
+      const why = e.guacd ? `${e.message}: el escritorio remoto necesita guacd junto al hub (ver README, "Escritorio remoto")` : e.message;
+      return fail(why, e.status);
+    }
+    const { sock, decoder, parser } = conn;
+    if (closed) return sock.destroy();
+    // El navegador queda "abierto" con la instrucción interna (opcode vacío) que lleva el id del túnel
+    ws.send(G.encode('', conn.id || crypto.randomUUID()));
+    if (conn.rest) ws.send(conn.rest);
+    sock.on('data', (chunk) => {
+      let r;
+      try { r = parser.push(decoder.write(chunk)); } catch (e) { return fail(e.message); }
+      sess.bytesIn += chunk.length;
+      if (!r.done.length) return;
+      const text = r.done.join('');
+      if (!ws.send(text)) { sock.pause(); ws.once('drain', () => sock.resume()); }
+    });
+    sock.on('error', () => {});
+    sock.on('close', () => { if (!ws.closed) ws.close(1000, '0'); });
+    const fromBrowser = new G.GuacParser({ maxBuffer: 1024 * 1024 });
+    ws.on('message', (data) => {
+      let r;
+      try { r = fromBrowser.push(typeof data === 'string' ? data : data.toString('utf8'), { parse: true }); } catch { return fail('instrucción no válida del navegador', G.STATUS.CLIENT_BAD_REQUEST); }
+      for (let i = 0; i < r.done.length; i++) {
+        const [op, ...args] = r.parsed[i];
+        // Instrucciones internas del túnel (ping del navegador): se responden aquí y no van a guacd
+        if (op === '') { if (args[0] === 'ping') ws.send(G.encode('', 'ping', args[1] ?? '')); continue; }
+        sess.bytesOut += r.done[i].length;
+        if (!sock.write(r.done[i])) { ws.pause(); sock.once('drain', () => ws.resume()); }
+      }
+    });
+    ws.on('close', () => { try { sock.end(G.encode('disconnect')); } catch {} setTimeout(() => sock.destroy(), 1000).unref?.(); });
   }
 
   /** Primera vez: se guarda la huella del equipo. Después debe coincidir (protege contra suplantación). */
