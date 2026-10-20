@@ -263,6 +263,16 @@ navegador ──WebSocket (sesión del panel)──▶ hub ──▶ frpc del hu
     allow_broken_crypto=true
     ```
     `allow_broken_crypto` habilita Apple DH (tipo 30), el método con contraseña que noVNC entiende; el tráfico va igual cifrado por el túnel frp. Si la conexión falla, la pestaña muestra los métodos que ofreció el servidor.
+    ⚠ Apple DH y RSA-AES usan WebCrypto, que el navegador solo habilita con el panel en **HTTPS** (o en `http://127.0.0.1` del propio hub). Con el panel en `http://<IP o dominio>`, use contraseña VNC clásica o `enable_auth=false` + `address=127.0.0.1` (solo entra el túnel/agente).
+  - **RealVNC Server** (`vncserver-x11`, ocupa el 5900; wayvnc no puede correr a la vez): contraseña VNC clásica, que funciona también en http y en RealVNC Viewer:
+    ```bash
+    sudo systemctl disable --now wayvnc
+    sudo vncpasswd -service                       # usa los primeros 8 caracteres
+    sudo mkdir -p /root/.vnc/config.d
+    echo 'Authentication=VncAuth' | sudo tee -a /root/.vnc/config.d/vncserver-x11
+    echo 'Encryption=PreferOff'   | sudo tee -a /root/.vnc/config.d/vncserver-x11
+    sudo systemctl restart vncserver-x11-serviced
+    ```
 - **SSH:** terminal xterm.js. Usuario y contraseña del equipo, o **la clave SSH del hub** (la de la IA) si el equipo la tiene en `authorized_keys`. La primera vez se guarda la huella del equipo; si cambia, la sesión se rechaza (un administrador puede olvidarla: `DELETE /api/machines/:id/services/:svc/hostkey`).
 - **Quién:** administradores y técnicos del cliente de la máquina. El usuario de cliente no abre sesiones.
 - **Auditoría:** cada sesión queda en la actividad (inicio, quién, desde qué IP, duración y tráfico).

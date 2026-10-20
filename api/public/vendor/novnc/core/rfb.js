@@ -1559,6 +1559,13 @@ export default class RFB extends EventTargetMixin {
             securityTypePlain,
         ];
 
+        // IIT Tunnel Hub: RA2ne y ARD usan WebCrypto (crypto.subtle), que el navegador solo ofrece en HTTPS o
+        // localhost. En http se descartan para que se elija otro método (p. ej. contraseña VNC) en vez de fallar.
+        if (!(window.crypto && window.crypto.subtle) &&
+            (type === securityTypeRA2ne || type === securityTypeARD)) {
+            return false;
+        }
+
         return clientTypes.includes(type);
     }
 

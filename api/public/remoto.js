@@ -31,6 +31,11 @@ function explainVncFailure(reason) {
     const t = m[1].split(',').map((x) => x.trim()).filter(Boolean);
     const names = { 1: 'sin clave', 2: 'VNC', 5: 'RSA-AES', 6: 'RSA-AES sin cifrado', 13: 'RSA-AES-256', 16: 'Tight', 18: 'TLS', 19: 'VeNCrypt (TLS)', 30: 'Apple DH', 129: 'RSA-AES-256' };
     const offered = t.map((x) => `${x} (${names[x] || '?'})`).join(', ');
+    if (!window.isSecureContext && t.some((x) => ['6', '30'].includes(x))) {
+      return `El servidor VNC ofrece ${offered}, que en el navegador solo funcionan si el panel se abre por HTTPS (o en el propio hub, http://127.0.0.1).\n\n` +
+        'Opciones: abrir el panel por HTTPS, o usar contraseña VNC clásica en el equipo ' +
+        '(RealVNC Server: Authentication=VncAuth y Encryption=PreferOff; wayvnc: enable_auth=false con address=127.0.0.1).';
+    }
     return `El servidor VNC ofrece métodos de autenticación que el navegador no soporta: ${offered}.\n\n` +
       'En una Raspberry Pi con wayvnc, agregue a /etc/wayvnc/config la línea\n  allow_broken_crypto=true\n' +
       '(habilita Apple DH: pide usuario y contraseña de la Raspberry) o use enable_auth=false con address=127.0.0.1, ' +
