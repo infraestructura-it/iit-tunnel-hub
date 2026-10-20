@@ -121,6 +121,45 @@ $('#r-hubkey').addEventListener('change', (e) => { $('#r-pass').disabled = e.tar
 
 // ---------- VNC ----------
 
+/** noVNC sobre un canal ya abierto: WebSocket del hub (túnel) o canal de datos WebRTC (directo). */
+function attachRfb(channel, t, via) {
+  status('Negociando con el servidor VNC…');
+  rfb = new RFB($('#r-screen'), channel, { shared: true });
+  rfb.scaleViewport = true;
+  rfb.background = '#05070b';
+  let wasConnected = false;
+  rfb.addEventListener('connect', () => {
+    wasConnected = true;
+    status(via === 'directo' ? 'Conectado · directo (WebRTC)' : 'Conectado · por el túnel', 'on');
+    for (const id of ['#r-cad', '#r-scale', '#r-clip']) $(id).disabled = false;
+    rfb.focus();
+  });
+  rfb.addEventListener('disconnect', (e) => {
+    if (e.detail.clean) return showMessage('Sesión terminada', 'El equipo cerró la sesión.');
+    if (!wasConnected && vncFailure) return showMessage('El servidor VNC no aceptó la conexión', explainVncFailure(vncFailure));
+    showMessage('Conexión perdida', (via === 'directo'
+      ? 'Se cortó la conexión directa con el equipo (red o servidor VNC).'
+      : 'Se perdió la conexión con el equipo (red, frpc o servidor VNC).') + (vncFailure ? `\n\nDetalle: ${vncFailure}` : ''));
+  });
+  rfb.addEventListener('credentialsrequired', async (e) => {
+    const types = e.detail.types || ['password'];
+    try {
+      const c = await askCredentials({ title: 'Credenciales VNC', hint: types.includes('username') ? 'Usuario y contraseña del equipo (en Raspberry Pi: los de su cuenta, p. ej. pi).' : 'Contraseña del servidor VNC del equipo.', user: types.includes('username'), pass: types.includes('password') });
+      rfb.sendCredentials({ username: c.username, password: c.password });
+    } catch { rfb.disconnect(); }
+  });
+  rfb.addEventListener('serververification', (e) => {
+    // El túnel (o el agente autenticado del equipo) ya identifica a la máquina; se acepta y se muestra la huella
+    status('Verificando servidor…');
+    try { console.info('Clave pública del servidor VNC', e.detail.publickey); } catch {}
+    rfb.approveServer();
+  });
+  rfb.addEventListener('securityfailure', (e) => showMessage('Acceso denegado', e.detail.reason || 'El servidor VNC rechazó las credenciales.'));
+  rfb.addEventListener('clipboard', (e) => { $('#r-clip-text').value = e.detail.text; });
+  rfb.addEventListener('desktopname', (e) => { document.title = `${e.detail.name} · ${t.machine.name} · VNC`; });
+}
+
+// Por el túnel: el hub conecta con el visitante stcp y transporta los bytes RFB por su WebSocket
 function startVnc(t) {
   document.body.classList.add('kind-vnc');
   const sock = openSocket(t);
@@ -130,41 +169,70 @@ function startVnc(t) {
     if (msg.type === 'error') return showMessage('No se pudo conectar', msg.message);
     if (msg.type !== 'ready') return;
     // Desde aquí el WebSocket transporta RFB: noVNC toma el control del canal ya abierto
-    status('Negociando con el servidor VNC…');
-    rfb = new RFB($('#r-screen'), sock, { shared: true });
-    rfb.scaleViewport = true;
-    rfb.background = '#05070b';
-    rfb.addEventListener('connect', () => {
-      wasConnected = true;
-      status('Conectado', 'on');
-      for (const id of ['#r-cad', '#r-scale', '#r-clip']) $(id).disabled = false;
-      rfb.focus();
-    });
-    let wasConnected = false;
-    rfb.addEventListener('disconnect', (e) => {
-      if (e.detail.clean) return showMessage('Sesión terminada', 'El equipo cerró la sesión.');
-      if (!wasConnected && vncFailure) return showMessage('El servidor VNC no aceptó la conexión', explainVncFailure(vncFailure));
-      showMessage('Conexión perdida', 'Se perdió la conexión con el equipo (red, frpc o servidor VNC).' + (vncFailure ? `\n\nDetalle: ${vncFailure}` : ''));
-    });
-    rfb.addEventListener('credentialsrequired', async (e) => {
-      const types = e.detail.types || ['password'];
-      try {
-        const c = await askCredentials({ title: 'Credenciales VNC', hint: types.includes('username') ? 'Usuario y contraseña del equipo (en Raspberry Pi: los de su cuenta, p. ej. pi).' : 'Contraseña del servidor VNC del equipo.', user: types.includes('username'), pass: types.includes('password') });
-        rfb.sendCredentials({ username: c.username, password: c.password });
-      } catch { rfb.disconnect(); }
-    });
-    rfb.addEventListener('serververification', (e) => {
-      // El túnel ya autentica a la máquina; se acepta y se muestra la huella por transparencia
-      status('Verificando servidor…');
-      try { console.info('Clave pública del servidor VNC', e.detail.publickey); } catch {}
-      rfb.approveServer();
-    });
-    rfb.addEventListener('securityfailure', (e) => showMessage('Acceso denegado', e.detail.reason || 'El servidor VNC rechazó las credenciales.'));
-    rfb.addEventListener('clipboard', (e) => { $('#r-clip-text').value = e.detail.text; });
-    rfb.addEventListener('desktopname', (e) => { document.title = `${e.detail.name} · ${t.machine.name} · VNC`; });
+    attachRfb(sock, t, 'tunel');
   };
   sock.onclose = (e) => { if (!rfb) showMessage('No se pudo conectar', e.reason || 'El hub cerró la conexión.'); };
   ws = sock;
+}
+
+/** Espera a reunir los candidatos ICE (señalización sin "trickle": una oferta completa). */
+function iceGathered(pc, ms) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); } });
+  });
+}
+
+// Directo: el agente del equipo responde la oferta WebRTC y la pantalla viaja navegador ⇄ equipo.
+// Si el canal no se abre a tiempo (firewall, NAT estricto sin TURN), se usa el túnel.
+let pc = null;
+function startVncRtc(t) {
+  document.body.classList.add('kind-vnc');
+  status('Conectando directo (WebRTC)…');
+  const sock = openSocket(t);
+  ws = sock;
+  let settled = false;
+  const fallback = async (why) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    console.info('WebRTC directo no disponible:', why);
+    try { pc?.close(); } catch {}
+    try { sock.close(); } catch {}
+    status('Conectando por el túnel…');
+    try { startVnc(await ticket({ transport: 'tunnel' })); }
+    catch (err) { showMessage('No se pudo abrir la sesión', `La conexión directa falló (${why}) y por el túnel tampoco: ${err.message}`); }
+  };
+  const timer = setTimeout(() => fallback('el canal directo no se abrió a tiempo'), 10000);
+  sock.onmessage = async (ev) => {
+    if (typeof ev.data !== 'string') return;
+    let msg = {}; try { msg = JSON.parse(ev.data); } catch {}
+    try {
+      if (msg.type === 'rtc') {
+        pc = new RTCPeerConnection({ iceServers: msg.iceServers || [] });
+        const dc = pc.createDataChannel('rfb', { ordered: true });
+        dc.binaryType = 'arraybuffer';
+        dc.onopen = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          sock.send(JSON.stringify({ type: 'conectado' }));
+          attachRfb(dc, t, 'directo');
+        };
+        pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') fallback('la red no permitió la conexión directa'); };
+        await pc.setLocalDescription(await pc.createOffer());
+        await iceGathered(pc, 2500);
+        sock.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
+      } else if (msg.type === 'answer') {
+        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      } else if (msg.type === 'error') {
+        if (!settled) fallback(msg.message);
+        else if (!rfb) showMessage('No se pudo conectar', msg.message);
+      }
+    } catch (err) { fallback(err.message); }
+  };
+  sock.onclose = () => { if (!settled) fallback('el hub cerró la señalización'); };
 }
 
 $('#r-cad').onclick = () => { if (rfb) rfb.sendCtrlAltDel(); else if (gclient) pressCombo([0xffe3, 0xffe9, 0xffff]); };
@@ -341,7 +409,7 @@ $('#r-full').onclick = () => {
 $('#r-close').onclick = () => { finished = true; try { rfb?.disconnect(); ws?.close(); gclient?.disconnect(); } catch {} window.close(); setTimeout(() => showMessage('Sesión terminada', 'Puede cerrar esta pestaña.'), 200); };
 $('#r-msg-close').onclick = () => window.close();
 $('#r-msg-retry').onclick = () => location.reload();
-window.addEventListener('beforeunload', () => { try { rfb?.disconnect(); ws?.close(); } catch {} });
+window.addEventListener('beforeunload', () => { try { rfb?.disconnect(); ws?.close(); pc?.close(); } catch {} });
 
 (async () => {
   if (!machineId || !service) return showMessage('Faltan datos', 'Abra la sesión desde el panel (botón "Conectar por").', { retry: false });
@@ -353,6 +421,7 @@ window.addEventListener('beforeunload', () => { try { rfb?.disconnect(); ws?.clo
     document.title = `${t.machine.name} · ${t.label} · IIT Tunnel Hub`;
     status('Conectando por el túnel…');
     if (t.kind === 'rdp') startRdp(t);
+    else if (t.kind === 'vnc' && t.webrtc && window.RTCPeerConnection) startVncRtc(t);
     else if (t.kind === 'vnc') startVnc(t);
     else if (t.kind === 'ssh') startSsh(t);
     else showMessage('No soportado', `El tipo ${t.kind} aún no se abre en el navegador.`, { retry: false });

@@ -8,6 +8,9 @@ data/
 *.db-shm
 node_modules/
 
+# Binarios del agente WebRTC (se generan con agente/compilar.sh)
+agente/dist/
+
 # Configuraciones e instaladores de máquinas: llevan el token
 frpc-*.toml
 instalar-*

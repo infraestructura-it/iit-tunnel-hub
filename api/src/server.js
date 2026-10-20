@@ -175,6 +175,8 @@ function clientMachineView(v) {
   };
 }
 
+let agentInfo = () => null; // la fija main() con el registro de agentes WebRTC
+
 function machineView(m, services, status, access = NO_ACCESS) {
   const live = status.clients.get(m.id);
   return {
@@ -206,6 +208,7 @@ function machineView(m, services, status, access = NO_ACCESS) {
     updatedAt: m.updated_at,
     services: services.map((s) => serviceView(s, m.id, status, access)),
     visits: (access.byVisitor.get(m.id) || []).map((a) => accessView(a, status)),
+    agent: agentInfo(m.id),
   };
 }
 
@@ -457,7 +460,8 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     store.event(m.id, 'instalador_generado', `${platform} · servidor ${serverAddr}`, 0);
     const grants = store.accessOfVisitor(m.id);
     const snmp = store.snmpOf(m.id);
-    return [200, P.build(m, services, config.frps, body.token, serverAddr, grants.length || snmp.length ? M.accessToml(m, grants, snmp) : ''), {
+    const agentOpts = { hubUrl: E.baseUrl(req, config), agent: services.some((x) => browserKind(x) === 'vnc') };
+    return [200, P.build(m, services, config.frps, body.token, serverAddr, grants.length || snmp.length ? M.accessToml(m, grants, snmp) : '', agentOpts), {
       'content-type': P.type,
       'content-disposition': `attachment; filename="instalar-${m.id}.${P.ext}"`,
     }];
@@ -495,8 +499,10 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const kind = browserKind(s);
     if (!kind) throw M.bad(`"${s.name}" no admite sesión desde el navegador (solo servicios privados SSH, VNC o RDP)`);
     if (!m.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada');
+    // Pantalla por WebRTC directo si el agente del equipo está conectado (el navegador puede pedir el túnel)
+    const rtc = kind === 'vnc' && body.transport !== 'tunnel' && remote.agentOnline(m.id);
     // Antes de abrir: ¿el equipo está conectado y publica este servicio? (si no, el error del visor sería genérico)
-    const live = await frps.status();
+    const live = rtc ? { reachable: false } : await frps.status();
     if (live.reachable) {
       const online = live.clients.has(m.id);
       const proxy = live.proxies.get(`${m.id}.${s.name}`);
@@ -521,11 +527,21 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       rdp = { username: str(c.username, 128).trim(), password: str(c.password, 256), domain: str(c.domain, 128).trim(), layout: str(c.layout, 32) };
       if (/[\x00-\x1f]/.test(rdp.username + rdp.domain)) throw M.bad('usuario o dominio no válidos');
     }
-    const ticket = remote.createTicket({ machineId: m.id, service: s, actor: ctx.actor, rdp });
-    return [201, { ticket, kind, label: REMOTE_KINDS[kind], machine: { id: m.id, name: m.name }, service: s.name, ws: '/api/remote/ws' }];
+    const ticket = remote.createTicket({ machineId: m.id, service: s, actor: ctx.actor, rdp, rtc });
+    return [201, { ticket, kind, label: REMOTE_KINDS[kind], machine: { id: m.id, name: m.name }, service: s.name, ws: '/api/remote/ws', webrtc: rtc }];
   });
 
   route('GET', '/api/remote/sessions', async () => [200, remote ? remote.active() : []], 'admin');
+
+  // Binarios del agente WebRTC para los instaladores (públicos: no llevan secretos)
+  route('GET', '/descargas/:file', async (_req, p, _ctx, res) => {
+    if (!/^iit-agente-linux-(arm|arm64|amd64)$|^SHA256SUMS$/.test(p.file)) throw new M.HttpError(404, 'no existe');
+    const file = path.join(config.agentDistDir, p.file);
+    let st; try { st = fs.statSync(file); } catch { throw new M.HttpError(404, 'el hub no tiene ese binario del agente (agente/compilar.sh)'); }
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': st.size, 'x-content-type-options': 'nosniff' });
+    fs.createReadStream(file).pipe(res);
+    return null;
+  }, 'public');
 
   route('DELETE', '/api/machines/:id/services/:name/hostkey', async (_req, p, ctx) => {
     mustMachine(p.id, ctx);
@@ -1255,7 +1271,9 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const P = PLATFORMS[platform];
     const grants = store.accessOfVisitor(m.id);
     const snmpDevs = store.snmpOf(m.id);
-    const text = P.build(m, store.servicesOf(m.id), config.frps, token, e.server_addr, grants.length || snmpDevs.length ? M.accessToml(m, grants, snmpDevs) : '');
+    const svcsNow = store.servicesOf(m.id);
+    const agentOpts = { hubUrl: E.baseUrl(req, config), agent: svcsNow.some((x) => browserKind(x) === 'vnc') };
+    const text = P.build(m, svcsNow, config.frps, token, e.server_addr, grants.length || snmpDevs.length ? M.accessToml(m, grants, snmpDevs) : '', agentOpts);
     return [200, text, { 'content-type': 'text/plain; charset=utf-8' }];
   }, 'public');
 
@@ -1292,7 +1310,9 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
         if (r.perm === 'admin' && !ctx.isAdmin) return send(res, 403, { error: 'solo un administrador puede hacer esto' });
         if (r.perm === 'staff' && !ctx.isStaff) return send(res, 403, { error: 'su usuario solo puede consultar' });
       }
-      const [status, data, headers] = await requestContext.run({ actor: ctx ? ctx.actor : null }, () => r.handler(req, params, ctx));
+      const out = await requestContext.run({ actor: ctx ? ctx.actor : null }, () => r.handler(req, params, ctx, res));
+      if (out === null) return; // el handler ya respondió (descargas por stream)
+      const [status, data, headers] = out;
       return send(res, status, data, headers);
     }
     const exists = routes.some((r) => r.re.test(pathname));
@@ -1326,6 +1346,7 @@ function main() {
   const bot = new TelegramBot({ store, ai, frps, apiBase: config.telegramApiBase });
   // frpc interno del hub: visita los servicios privados que el hub consulta (SNMP por sudp)
   const remote = new RemoteService({ store, config, frps });
+  agentInfo = (id) => remote.agentInfo(id);
   const hubFrpc = new HubFrpc({
     config, root: path.join(__dirname, '..', '..'),
     visitors: () => [
@@ -1360,7 +1381,7 @@ function main() {
   const app = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
     try {
-      if (pathname.startsWith('/api/') || pathname.startsWith('/i/')) { stats.api.requests++; return await api(req, res, pathname); }
+      if (pathname.startsWith('/api/') || pathname.startsWith('/i/') || pathname.startsWith('/descargas/')) { stats.api.requests++; return await api(req, res, pathname); }
       if (req.method === 'GET') return serveStatic(req, res, pathname);
       return send(res, 405, { error: 'método no permitido' });
     } catch (err) {
@@ -1372,6 +1393,22 @@ function main() {
   app.on('upgrade', (req, socket, head) => {
     socket.on('error', () => {});
     const u = new URL(req.url, 'http://x');
+    // Agente WebRTC del equipo: se autentica con el id y el token de la máquina (los mismos de frpc)
+    if (u.pathname === '/api/agent/ws') {
+      const id = String(req.headers['x-iit-machine'] || '').slice(0, 64);
+      const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+      const m = id && store.getMachine(id);
+      if (req.headers.origin || !m || !m.enabled || !M.tokenMatches(token, m.token_hash)) {
+        if (m) store.event(m.id, 'agente_rechazado', `token inválido o máquina deshabilitada · ${ip}`, 600);
+        return WS.reject(socket, 401, 'Unauthorized');
+      }
+      if (head?.length) socket.unshift(head);
+      const ws = WS.accept(req, socket, { protocols: [] });
+      if (!ws) return;
+      remote.attachAgent(ws, m.id, { version: req.headers['x-iit-version'] || '', ip });
+      return;
+    }
     if (u.pathname !== '/api/remote/ws') return WS.reject(socket, 404, 'Not Found');
     // Solo desde el propio panel: el Origin del navegador debe ser el mismo host
     const origin = req.headers.origin;

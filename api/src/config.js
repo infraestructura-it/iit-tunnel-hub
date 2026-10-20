@@ -13,6 +13,14 @@ function int(name, def) {
   return n;
 }
 
+function iceServers(v) {
+  if (v === undefined || v === '') return [{ urls: ['stun:stun.l.google.com:19302'] }];
+  let list;
+  try { list = JSON.parse(v); } catch { throw new Error('WEBRTC_ICE_SERVERS debe ser JSON'); }
+  if (!Array.isArray(list)) throw new Error('WEBRTC_ICE_SERVERS debe ser una lista');
+  return list.map((s) => ({ urls: [].concat(s.urls || []).map(String), ...(s.username ? { username: String(s.username) } : {}), ...(s.credential ? { credential: String(s.credential) } : {}) }));
+}
+
 const config = {
   // Panel + API de administración
   host: env.HOST || '0.0.0.0',
@@ -41,6 +49,11 @@ const config = {
   // Escritorio remoto (RDP) en el navegador: guacd (Apache Guacamole) y la dirección con la que guacd llega
   // a los puertos locales del frpc del hub (127.0.0.1 si corre en el mismo equipo o en Docker con red del host;
   // host.docker.internal con Docker Desktop en Windows)
+  // Pantalla por WebRTC (agente en el equipo): servidores STUN/TURN que usan navegador y agente.
+  // JSON como el de RTCPeerConnection, p. ej. [{"urls":"turn:turn.ejemplo.com:3478","username":"u","credential":"c"}]
+  webrtc: { iceServers: iceServers(env.WEBRTC_ICE_SERVERS) },
+  // Binarios del agente que descargan los instaladores (agente/compilar.sh)
+  agentDistDir: env.AGENT_DIST_DIR || path.join(__dirname, '..', '..', 'agente', 'dist'),
   guacd: {
     host: env.GUACD_HOST || '127.0.0.1',
     port: int('GUACD_PORT', 4822),

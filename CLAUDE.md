@@ -64,6 +64,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/src/enroll.js` | Instalación con código de un solo uso: códigos, URL pública del hub y arranques (`irm … \| iex`, `curl … \| sudo bash`) |
 | `api/src/ws.js` | WebSocket mínimo (RFC 6455) sin dependencias: handshake, tramas, ping, cierre y contrapresión |
 | `api/src/remote.js` | Sesiones remotas en el navegador: tipo por servicio (`browserKind`), visitantes stcp del hub, tickets, puente VNC, cliente SSH (ssh2), RDP vía guacd, huellas TOFU, auditoría |
+| `agente/main.go`, `agente/compilar.sh` | Agente WebRTC del equipo (Go + pion/webrtc 4.1.6, gorilla/websocket): WebSocket al hub con el token de la máquina, responde ofertas y une el canal de datos `rfb` con el VNC local; `probar` hace de navegador en las pruebas. `dist/` no va a Git |
 | `api/src/guac.js` | Protocolo de Guacamole: parser de instrucciones (largos en puntos de código), saludo con guacd y parámetros RDP |
 | `guacd-local.ps1` | Windows: crea/arranca guacd en Docker Desktop (`iit-guacd`, 127.0.0.1:4822) y prueba que llega a los puertos locales |
 | `test/fake-guacd.py` | guacd simulado para las pruebas (saludo, guarda los parámetros de `connect`, eco) |
@@ -81,7 +82,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (231 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (238 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -151,6 +152,9 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - VNC: el hub manda `{type:ready}` (texto) recién con el primer byte del servidor VNC; desde ahí solo binario RFB (noVNC toma el WebSocket abierto). Errores: texto `{type:error}` y cierre 1011.
 - SSH: el hub manda `{type:auth, hubKey}`, recibe `{type:auth, username, password|useHubKey, cols, rows}`; luego binario = teclas/salida y `{type:resize}`. Credenciales no se guardan. Huella por `máquina/servicio` en `settings.ssh_hostkeys` (TOFU); si cambia, se rechaza.
 - RDP: el hub es cliente de **guacd** (`GUACD_HOST:GUACD_PORT`) y le pide conectar a `GUACD_TARGET_HOST:<visitante>` (Windows: `host.docker.internal` por defecto). `POST …/remote` sin `credentials` ⇒ `{needCredentials:true}` (y 503 si guacd no responde); con `credentials` ⇒ ticket que las lleva en memoria. WebSocket con subprotocolo `guacamole`: el hub hace el saludo (`select rdp` → `args` → `size/audio/video/image/timezone` → `connect` con valores en el orden de `args` → `ready`), manda `0.,<id>;` para abrir el túnel del navegador, responde los `ping` internos y reenvía **solo instrucciones completas** (guacamole-common-js falla con una instrucción partida). Errores: instrucción `error` + cierre con el código de estado como motivo. Parámetros fijos: `ignore-cert`, sin `enable-drive`/`enable-printing`/`enable-sftp`; teclado `server-layout` de una lista (`LAYOUTS`).
+- WebRTC (pantalla): `/api/agent/ws` (sin Origin; cabeceras `X-IIT-Machine`, `Authorization: Bearer <token de la máquina>`, `X-IIT-Version`) ⇒ `remote.attachAgent`; uno por máquina (el nuevo reemplaza al anterior). `POST …/remote` con kind `vnc`, agente conectado y sin `transport:'tunnel'` ⇒ `webrtc:true` (sin chequeo de frps). WebSocket de la página en modo rtc: hub manda `{type:rtc, iceServers}`, la página manda `{type:offer, sdp}` (sin trickle, candidatos reunidos), el hub lo pasa al agente `{type:offer, id, sdp, target:'local_ip:local_port', ice}`, el agente responde `{type:answer|error, id}` y al cerrar `{type:estado, estado:'cerrado', bytesIn, bytesOut}`; la página cerrada ⇒ `{type:cerrar, id}` y el fin se audita con el tráfico (o a los 3 s). La página: canal `rfb` ordenado, `binaryType arraybuffer`, noVNC lo usa como socket; si no abre en 10 s ⇒ ticket nuevo con `transport:'tunnel'`.
+- `ws.js` termina la conexión con el `end` del socket (el upgrade HTTP admite medio cierre: sin esto, un cliente que corta sin trama de cierre dejaba la sesión abierta).
+- Agente: solo IPv4 UDP (`SetNetworkTypes`), mensajes ≤16 KB, contrapresión por `bufferedAmount`; destino validado como IP:puerto. Go sin proxy.golang.org: `go.mod` reemplaza `golang.org/x/*` por sus espejos de GitHub; compilar con `GOPROXY=direct GOSUMDB=off`.
 - Auditoría: `sesion_remota` (inicio) y `sesion_remota_fin` (duración y tráfico) con el actor del ticket (`requestContext.run`).
 
 ## Respaldos y estado: reglas (no romper)
@@ -244,6 +248,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
 - Que la IA use SSH privado: el hub ya es visitante de los SSH stcp (remote.js); falta que ai-scope use ese puerto local.
 - RDP en el navegador: probado con xrdp + guacd 1.3 (Ubuntu) por el túnel real; falta probar contra Windows real y guacd en Docker Desktop (`host.docker.internal` hacia puertos solo 127.0.0.1). Pendiente: subir/bajar archivos, guacd en `/api/status`.
+- WebRTC: agente para Windows (captura de pantalla propia o TightVNC), TURN propio en el VPS, servir `agente/dist` en la imagen Docker (hoy `AGENT_DIST_DIR` apunta al repo), probar en una Raspberry real por ZeroTier.
 - SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.

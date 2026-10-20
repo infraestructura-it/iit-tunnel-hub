@@ -9,14 +9,14 @@ $env:ADMIN_TOKEN = "prueba-local-1234567890"
 $env:HOST = "0.0.0.0"; $env:PORT = "8090"
 $env:PLUGIN_HOST = "127.0.0.1"; $env:PLUGIN_PORT = "9100"
 $env:DB_PATH = "$root\data\hub.db"
-$env:FRPS_PUBLIC_ADDR = "10.147.19.141"; $env:FRPS_BIND_PORT = "7000"
+$env:FRPS_PUBLIC_ADDR = "hubups.infraestructura-it.com"; $env:FRPS_BIND_PORT = "7000"
 $env:FRPS_SUBDOMAIN_HOST = "localhost"
 $env:FRPS_VHOST_HTTP_PORT = "8081"; $env:FRPS_VHOST_HTTPS_PORT = "8443"
 $env:FRPS_TCP_PORT_MIN = "20000"; $env:FRPS_TCP_PORT_MAX = "20010"
 # En PowerShell asignar "" BORRA la variable; se usa un valor fijo para que frps y frpc coincidan
 $env:FRP_AUTH_TOKEN = "iit-local-frp"
 $env:FRPS_API_URL = "http://127.0.0.1:7500"; $env:FRPS_API_USER = "admin"; $env:FRPS_API_PASSWORD = "dash123"
-$env:HUB_PUBLIC_URL = "http://10.147.19.141:8090"
+$env:HUB_PUBLIC_URL = "http://hubups.infraestructura-it.com:8090"
 
 # ---------- comprobaciones ----------
 # Detiene un frps anterior que pudiera haber quedado corriendo con otra configuración

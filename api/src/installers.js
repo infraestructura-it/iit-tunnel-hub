@@ -18,8 +18,15 @@ function header(machine, comment) {
 
 // ---------- Linux: Raspberry Pi, tarjetas ARM, PC, servidores ----------
 
-function linuxInstaller(machine, services, frps, token, serverAddr, access = '') {
+/**
+ * opts.hubUrl + opts.agent: además instala iit-agente (pantalla por WebRTC directo), descargado del propio hub.
+ * El agente usa el mismo id y token de la máquina; si no se puede descargar, la pantalla sigue yendo por el túnel.
+ */
+function linuxInstaller(machine, services, frps, token, serverAddr, access = '', opts = {}) {
   const accessPath = accessFileName(machine.id, '/etc/iit-frpc/');
+  const hubUrl = /^https?:\/\/[A-Za-z0-9.:\[\]-]+$/.test(opts.hubUrl || '') ? opts.hubUrl : '';
+  const agent = !!(opts.agent && hubUrl);
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) throw new Error('token con caracteres inesperados');
   const toml = frpcToml(machine, services, frps, token, { serverAddr, certDir: '/etc/iit-frpc/certs', accessFile: accessPath });
   if ([toml, access].some((x) => x.split('\n').some((l) => ['IIT_FRPC_TOML', 'IIT_ACCESOS'].includes(l.trim())))) throw new Error('marcador reservado en la configuración');
 
@@ -38,6 +45,8 @@ SERVER="${serverAddr}:${frps.bindPort}"
 DIR=/etc/iit-frpc
 BIN=/usr/local/bin/iit-frpc
 UNIT=/etc/systemd/system/iit-frpc.service
+AGENT_BIN=/usr/local/bin/iit-agente
+AGENT_UNIT=/etc/systemd/system/iit-agente.service
 
 ok()   { printf '\\033[32m✔\\033[0m %s\\n' "$*"; }
 info() { printf '\\033[36m→\\033[0m %s\\n' "$*"; }
@@ -50,6 +59,11 @@ fi
 
 has_systemd() { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }
 
+stop_agent() {
+  if has_systemd; then systemctl disable --now iit-agente >/dev/null 2>&1 || true; fi
+  pkill -f "$AGENT_BIN -config" 2>/dev/null || true
+}
+
 stop_frpc() {
   if has_systemd; then systemctl disable --now iit-frpc >/dev/null 2>&1 || true; fi
   pkill -f "$BIN -c $DIR/frpc.toml" 2>/dev/null || true
@@ -61,7 +75,8 @@ stop_frpc() {
 if [ "\${1:-}" = "--desinstalar" ]; then
   info "Desinstalando IIT frpc…"
   stop_frpc
-  rm -f "$UNIT" "$BIN"; rm -rf "$DIR"
+  stop_agent
+  rm -f "$UNIT" "$BIN" "$AGENT_UNIT" "$AGENT_BIN"; rm -rf "$DIR"
   has_systemd && systemctl daemon-reload || true
   ok "Desinstalado. La máquina ya no se conecta al servidor."
   exit 0
@@ -148,7 +163,47 @@ else
   LOGHINT="tail -n 50 $DIR/frpc.log"
 fi
 
-info "Verificando conexión con el servidor…"
+${agent ? `# Agente de pantalla (WebRTC directo): opcional, si falla la pantalla sigue por el túnel
+install_agent() {
+  info "Instalando el agente de pantalla (WebRTC)…"
+  local TMPA; TMPA="$(mktemp)"
+  if ! fetch "${hubUrl}/descargas/iit-agente-linux-$ARCH" > "$TMPA" 2>/dev/null || [ ! -s "$TMPA" ]; then
+    rm -f "$TMPA"; err "No se pudo descargar el agente desde el hub: la pantalla irá por el túnel"; return 0
+  fi
+  stop_agent
+  install -m 755 "$TMPA" "$AGENT_BIN"; rm -f "$TMPA"
+  cat > "$DIR/agente.json" <<'IIT_AGENTE'
+{"hub":"${hubUrl}","machine":"${machine.id}","token":"${token}"}
+IIT_AGENTE
+  chmod 600 "$DIR/agente.json"
+  if has_systemd; then
+    cat > "$AGENT_UNIT" <<IIT_AGENT_UNIT
+[Unit]
+Description=IIT Tunnel Hub · agente de pantalla ($MACHINE_ID)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$AGENT_BIN -config $DIR/agente.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+IIT_AGENT_UNIT
+    systemctl daemon-reload
+    systemctl enable --now iit-agente >/dev/null
+    ok "Agente de pantalla activo (WebRTC directo)"
+  else
+    nohup "$AGENT_BIN" -config "$DIR/agente.json" > "$DIR/agente.log" 2>&1 &
+    if command -v crontab >/dev/null 2>&1; then
+      ( (crontab -l 2>/dev/null | grep -v 'iit-agente' || true); echo "@reboot $AGENT_BIN -config $DIR/agente.json > $DIR/agente.log 2>&1 # iit-agente" ) | crontab -
+    fi
+    ok "Agente de pantalla corriendo"
+  fi
+}
+case "$ARCH" in amd64|arm64|arm) install_agent ;; esac
+` : ''}info "Verificando conexión con el servidor…"
 for _ in $(seq 1 15); do
   sleep 1
   LOG="$(read_log || true)"

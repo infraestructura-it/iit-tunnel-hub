@@ -21,6 +21,8 @@ class WsConn extends EventEmitter {
     socket.on('data', (d) => this.#onData(d));
     socket.on('drain', () => this.emit('drain'));
     socket.on('close', () => this.#finish());
+    // El socket del upgrade HTTP admite medio cierre: si el otro extremo cierra sin trama de cierre, se termina aquí
+    socket.on('end', () => this.terminate());
     socket.on('error', () => this.#finish());
     this.pinger = setInterval(() => {
       if (!this.alive) return this.terminate();

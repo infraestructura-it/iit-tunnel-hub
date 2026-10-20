@@ -315,7 +315,7 @@ function renderMachines() {
   el.innerHTML = list.map((m) => {
     const st = machineState(m);
     const conn = m.online
-      ? `<span>IP <b>${esc(m.connection.clientIp)}</b> · ${esc(m.connection.hostname)}</span><span>Conectada ${ago(m.connection.connectedSince)} · frpc ${esc(m.connection.version)}</span>`
+      ? `<span>IP <b>${esc(m.connection.clientIp)}</b> · ${esc(m.connection.hostname)}</span><span>Conectada ${ago(m.connection.connectedSince)} · frpc ${esc(m.connection.version)}${m.agent ? ` · <span title="Agente WebRTC conectado: la pantalla va directo">agente ${esc(m.agent.version)}</span>` : ''}</span>`
       : `<span>${m.enabled && m.lastLogin && m.stateSince ? `<b class="down">Sin conexión ${ago(m.stateSince)}</b>` : STATE_LABEL[st]}</span><span>Último login: <b>${m.lastLogin ? ago(m.lastLogin.at) : 'nunca'}</b>${m.lastLogin ? ' · ' + esc(m.lastLogin.address) : ''}</span>`;
     return `<article class="card ${st}" data-id="${esc(m.id)}">
       <div class="card-head">
@@ -377,7 +377,7 @@ function connectMenu(m) {
   return `<div class="connect">
     <button class="btn small connect-btn" data-connect="${esc(m.id)}" ${m.online ? '' : 'title="La máquina está fuera de línea"'}>Conectar por ▾</button>
     ${open ? `<div class="connect-menu">${list.map((s) => `<button data-remote="${esc(s.name)}" data-machine="${esc(m.id)}">
-      <span>${REMOTE_LABEL[s.remote]}</span><small>${esc(s.name)} · :${s.localPort}${s.status === 'online' ? '' : ' · sin conectar'}</small></button>`).join('')}</div>` : ''}
+      <span>${REMOTE_LABEL[s.remote]}${s.remote === 'vnc' && m.agent ? ' <small style="color:var(--green)">· directo</small>' : ''}</span><small>${esc(s.name)} · :${s.localPort}${s.status === 'online' ? '' : ' · sin conectar'}</small></button>`).join('')}</div>` : ''}
   </div>`;
 }
 

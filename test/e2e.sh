@@ -590,6 +590,27 @@ RT=$(api POST /machines/remota/remote -d '{"service":"escritorio","credentials":
 check "RDP: el hub saluda a guacd, responde el ping y reenvía instrucciones (UTF-8)" 'wsc "$WSU$RT" rdp | grep -q "^OK"'
 check "RDP: guacd recibe destino local del hub, credenciales y teclado; sin unidades compartidas" 'jq -e ".hostname==\"127.0.0.1\" and (.port|tonumber) > 26000 and .username==\"tecnico\" and .password==\"Clave Win 1\" and .domain==\"OFICINA\" and .\"ignore-cert\"==\"true\" and .\"server-layout\"==\"es-latam-qwerty\" and .\"enable-drive\"==\"false\"" "$WORK/guacd-connect.json" >/dev/null'
 check "RDP: el ticket con credenciales sirve una sola vez" 'wsc "$WSU$RT" rdp | grep -q "ERROR rechazado"'
+# Pantalla por WebRTC directo con el agente del equipo (si está compilado: agente/compilar.sh)
+AGENTE="$ROOT/agente/dist/iit-agente-linux-amd64"
+if [ -x "$AGENTE" ]; then
+  RTOKEN=$(jq -r .token "$WORK/rem.json")
+  check "el hub entrega el binario del agente (y nada fuera de la lista)" '[ "$(curl -s -o "$WORK/agente.bin" -w "%{http_code}" "http://127.0.0.1:$PORT/descargas/iit-agente-linux-amd64")" = 200 ] && cmp -s "$WORK/agente.bin" "$AGENTE" && [ "$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/descargas/..%2Fhub.db")" = 404 ]'
+  echo "{\"hub\":\"http://127.0.0.1:$PORT\",\"machine\":\"remota\",\"token\":\"falso-$RTOKEN\"}" > "$WORK/agente-malo.json"
+  "$AGENTE" -config "$WORK/agente-malo.json" > "$WORK/agente-malo.log" 2>&1 & AMALO=$!; PIDS+=($AMALO)
+  check "agente con token falso → rechazado y auditado" 'wait_for "grep -q \"HTTP 401\" $WORK/agente-malo.log" && [ "$(api GET /machines/remota | jq -r .agent)" = null ] && api GET "/events?machine=remota" | jq -e "any(.[]; .kind==\"agente_rechazado\")" >/dev/null'
+  kill $AMALO 2>/dev/null
+  echo "{\"hub\":\"http://127.0.0.1:$PORT\",\"machine\":\"remota\",\"token\":\"$RTOKEN\"}" > "$WORK/agente.json"
+  "$AGENTE" -config "$WORK/agente.json" > "$WORK/agente.log" 2>&1 & PIDS+=($!)
+  check "el agente se conecta con el token de la máquina" 'wait_for "[ \"\$(api GET /machines/remota | jq -r .agent.online)\" = true ]"'
+  check "con agente, la pantalla se ofrece por WebRTC; con transport=tunnel, por el túnel" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"vnc\"}" | jq -r .webrtc)" = true ] && [ "$(api POST /machines/remota/remote -d "{\"service\":\"vnc\",\"transport\":\"tunnel\"}" | jq -r .webrtc)" = false ]'
+  check "VNC por WebRTC directo: oferta, respuesta del agente, canal rfb, saludo y eco" '"$AGENTE" probar "$WSU$(api POST /machines/remota/remote -d "{\"service\":\"vnc\"}" | jq -r .ticket)" | grep -q "^OK"'
+  finrtc() { api GET "/events?machine=remota" | jq -r '.[] | select(.kind=="sesion_remota_fin") | .detail' | grep "WebRTC"; }
+  check "la sesión directa queda auditada con su tráfico" 'wait_for "finrtc | grep -qE \" s · [1-9][0-9.]* (B|KB)\""'
+  api POST /machines/remota/installer -d "{\"platform\":\"linux\",\"token\":\"$RTOKEN\"}" > "$WORK/inst-agente.sh"
+  check "el instalador Linux de una máquina con VNC instala el agente desde el hub" 'bash -n "$WORK/inst-agente.sh" && grep -q "/descargas/iit-agente-linux-\$ARCH" "$WORK/inst-agente.sh" && grep -q "\"machine\":\"remota\"" "$WORK/inst-agente.sh"'
+else
+  echo "  (WebRTC omitido: compile el agente con agente/compilar.sh)"
+fi
 check "cada sesión queda en la actividad con su autor y duración" '[ "$(api GET "/events?machine=remota" | jq "[.[] | select(.kind==\"sesion_remota\")] | length")" -ge 1 ] && api GET "/events?machine=remota" | jq -r ".[] | select(.kind==\"sesion_remota_fin\") | .detail" | grep -q " s · "'
 api DELETE /machines/remota >/dev/null
 

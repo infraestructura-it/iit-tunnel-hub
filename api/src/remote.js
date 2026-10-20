@@ -8,6 +8,9 @@
 // VNC: el hub solo transporta los bytes RFB (el visor es noVNC en el navegador).
 // SSH: el hub es el cliente SSH (ssh2) y el navegador muestra la terminal (xterm.js).
 // RDP: el hub habla con guacd (Apache Guacamole) y el navegador dibuja con guacamole-common-js (ver guac.js).
+// VNC por WebRTC: si el equipo tiene el agente (iit-agente) conectado, el hub solo hace de señalización:
+//   navegador ⇄ hub ⇄ agente intercambian oferta/respuesta y la pantalla viaja directo navegador ⇄ equipo
+//   por un canal de datos WebRTC "rfb" (noVNC lo usa como si fuera el WebSocket).
 
 const fs = require('node:fs');
 const net = require('node:net');
@@ -44,7 +47,36 @@ class RemoteService {
     Object.assign(this, { store, config, frps, hub, log });
     this.tickets = new Map(); // ticket → { machineId, serviceId, kind, actor, exp }
     this.sessions = new Set();
+    this.agents = new Map(); // máquina → { ws, version, since, ip, pending: Map(id → handler) }
   }
+
+  // ---------- agente WebRTC del equipo ----------
+
+  /** Registra el WebSocket del agente de una máquina (ya autenticado con su token). Reemplaza al anterior. */
+  attachAgent(ws, machineId, { version = '', ip = '' } = {}) {
+    const old = this.agents.get(machineId);
+    if (old) { try { old.ws.close(1000, 'reemplazado por otra conexión del agente'); } catch {} }
+    const a = { ws, version: String(version).slice(0, 20), ip, since: Math.floor(Date.now() / 1000), pending: new Map() };
+    this.agents.set(machineId, a);
+    ws.on('message', (data, binary) => {
+      if (binary) return;
+      let m; try { m = JSON.parse(data); } catch { return; }
+      const h = m && a.pending.get(String(m.id || ''));
+      if (h) h(m);
+    });
+    ws.on('close', () => {
+      if (this.agents.get(machineId) === a) this.agents.delete(machineId);
+      for (const h of a.pending.values()) h({ type: 'error', message: 'el agente del equipo se desconectó' });
+      a.pending.clear();
+    });
+  }
+
+  agentInfo(machineId) {
+    const a = this.agents.get(machineId);
+    return a ? { online: true, version: a.version, since: a.since } : null;
+  }
+
+  agentOnline(machineId) { return this.agents.has(machineId); }
 
   /** Visitantes stcp del frpc del hub para todos los servicios con acceso desde el navegador. */
   visitors() {
@@ -60,11 +92,11 @@ class RemoteService {
   }
 
   /** rdp = { username, password, domain, layout } solo para RDP: viaja en memoria con el ticket (60 s, un uso). */
-  createTicket({ machineId, service, actor, rdp = null }) {
+  createTicket({ machineId, service, actor, rdp = null, rtc = false }) {
     const now = Date.now();
     for (const [k, t] of this.tickets) if (t.exp < now) this.tickets.delete(k);
     const ticket = crypto.randomBytes(24).toString('base64url');
-    this.tickets.set(ticket, { machineId, serviceId: service.id, kind: browserKind(service), actor, rdp, exp: now + TICKET_TTL_MS });
+    this.tickets.set(ticket, { machineId, serviceId: service.id, kind: browserKind(service), actor, rdp, rtc, exp: now + TICKET_TTL_MS });
     return ticket;
   }
 
@@ -99,11 +131,11 @@ class RemoteService {
     if (!m.enabled) return fail('la máquina está deshabilitada');
     if (this.sessions.size >= MAX_SESSIONS) return fail('demasiadas sesiones abiertas en el hub');
     const port = visitorPort(this.config.remotePortBase, svc);
-    if (!port) return fail('el servicio no tiene puerto local en el hub');
+    if (!port && !t.rtc) return fail('el servicio no tiene puerto local en el hub');
 
-    const sess = { ws, svc, m, kind: t.kind, actor: t.actor, ip, start: Date.now(), bytesIn: 0, bytesOut: 0 };
+    const sess = { ws, svc, m, kind: t.kind, actor: t.actor, ip, start: Date.now(), bytesIn: 0, bytesOut: 0, rtc: !!t.rtc };
     this.sessions.add(sess);
-    const label = `${KINDS[t.kind]} · ${svc.name} · ${ip}`;
+    const label = `${KINDS[t.kind]} · ${svc.name} · ${ip}${t.rtc ? ' · WebRTC' : ''}`;
     run(() => this.store.event(m.id, 'sesion_remota', `inicio · ${label}`, 0));
     let ended = false;
     sess.end = (why = '') => {
@@ -113,7 +145,9 @@ class RemoteService {
       const secs = Math.round((Date.now() - sess.start) / 1000);
       run(() => this.store.event(m.id, 'sesion_remota_fin', `${label} · ${secs} s · ${fmtBytes(sess.bytesIn + sess.bytesOut)}${why ? ' · ' + why : ''}`, 0));
     };
-    ws.on('close', () => sess.end());
+    // WebRTC: el fin se registra cuando el agente informa el tráfico (o a los 3 s)
+    ws.on('close', () => { if (!sess.rtc) sess.end(); });
+    if (t.kind === 'vnc' && t.rtc) return this.#vncRtc(sess, fail);
     if (t.kind === 'vnc') return this.#vnc(sess, port, fail);
     if (t.kind === 'ssh') return this.#ssh(sess, port, fail);
     if (t.kind === 'rdp') return this.#rdp(sess, port, fail, t.rdp || {}, query);
@@ -145,6 +179,51 @@ class RemoteService {
       if (!tcp.write(data)) { ws.pause(); tcp.once('drain', () => ws.resume()); }
     });
     ws.on('close', () => tcp.destroy());
+  }
+
+  // VNC por WebRTC: el hub lleva la oferta del navegador al agente y la respuesta de vuelta; el resto es directo
+  #vncRtc(sess, fail) {
+    const { ws, svc, m } = sess;
+    const id = crypto.randomBytes(9).toString('base64url');
+    const agent = this.agents.get(m.id);
+    if (!agent) return fail('el agente del equipo no está conectado');
+    let offered = false;
+    const toPage = (o) => { try { ws.send(JSON.stringify(o)); } catch {} };
+    agent.pending.set(id, (msg) => {
+      if (msg.type === 'answer') toPage({ type: 'answer', sdp: String(msg.sdp || '') });
+      else if (msg.type === 'error') toPage({ type: 'error', message: String(msg.message || 'error del agente') });
+      else if (msg.type === 'estado' && msg.estado === 'cerrado') {
+        sess.bytesIn = Number(msg.bytesIn) || 0; sess.bytesOut = Number(msg.bytesOut) || 0;
+        if (ws.closed) finish();
+      }
+    });
+    const timer = setTimeout(() => { if (!offered) fail('no llegó la oferta WebRTC del navegador'); }, 30000);
+    ws.on('message', (data, binary) => {
+      if (binary) return;
+      let msg; try { msg = JSON.parse(data); } catch { return; }
+      if (msg.type === 'offer' && !offered && typeof msg.sdp === 'string' && msg.sdp.length < 64 * 1024) {
+        offered = true;
+        clearTimeout(timer);
+        const a = this.agents.get(m.id);
+        if (!a) return toPage({ type: 'error', message: 'el agente del equipo se desconectó' });
+        if (a !== agent) a.pending.set(id, agent.pending.get(id));
+        a.ws.send(JSON.stringify({ type: 'offer', id, sdp: msg.sdp, target: `${svc.local_ip || '127.0.0.1'}:${svc.local_port}`, ice: this.config.webrtc.iceServers }));
+      }
+    });
+    let closing = null;
+    const finish = () => {
+      clearTimeout(closing);
+      for (const a of new Set([agent, this.agents.get(m.id)])) a?.pending.delete(id);
+      sess.end();
+    };
+    ws.on('close', () => {
+      clearTimeout(timer);
+      const a = this.agents.get(m.id);
+      if (!a || !offered) return finish();
+      try { a.ws.send(JSON.stringify({ type: 'cerrar', id })); } catch {}
+      closing = setTimeout(finish, 3000);
+    });
+    toPage({ type: 'rtc', iceServers: this.config.webrtc.iceServers });
   }
 
   // SSH: el hub es el cliente; el navegador manda {type:auth} y luego teclas (binario) y {type:resize}

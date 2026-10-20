@@ -270,6 +270,22 @@ navegador ──WebSocket (sesión del panel)──▶ hub ──▶ frpc del hu
 - **Requisitos:** el frpc del hub (el mismo de SNMP). Al actualizar, las máquinas con SSH/VNC privados se reconectan una vez (~15 s) para admitir al hub como visitante.
 - `REMOTE_PORT_BASE` (26000): puertos locales del frpc del hub, `base + id del servicio`, solo en 127.0.0.1.
 
+### Pantalla por WebRTC directo (como Raspberry Pi Connect)
+
+Si el equipo tiene el **agente** (`iit-agente`), la pantalla VNC no pasa por el hub: el navegador y el equipo se conectan **directo** por WebRTC y el hub solo los presenta (señalización). Menos latencia y nada de tráfico de pantalla por el servidor.
+
+```
+navegador ⇄ hub ⇄ agente        oferta/respuesta WebRTC (WebSocket, unos KB)
+navegador ════════════ equipo   canal de datos WebRTC "rfb" (cifrado DTLS) ⇄ wayvnc 127.0.0.1:5900
+```
+
+- **Instalación:** el instalador Linux (descargado o con código) instala el agente si la máquina tiene un servicio VNC: lo descarga **del propio hub** (`/descargas/iit-agente-linux-<arm|arm64|amd64>`), escribe `/etc/iit-frpc/agente.json` (600) y lo deja como servicio `iit-agente`. Usa el mismo id y token de la máquina; al reinstalar (token nuevo) se actualiza.
+- **En el panel:** "Conectar por ▾ → Pantalla (VNC)" muestra **· directo** cuando el agente está conectado, y la tarjeta muestra "agente 1.0.0". La pestaña dice **Conectado · directo (WebRTC)** o **Conectado · por el túnel**.
+- **Respaldo automático:** si el canal directo no se abre en 10 s (firewall, NAT estricto), la misma pestaña se conecta por el túnel frp, como antes.
+- **Red:** en la misma ZeroTier/LAN conecta sin nada más. Entre redes distintas usa STUN (`stun.l.google.com` por defecto); para NAT estrictos defina un servidor TURN propio en `WEBRTC_ICE_SERVERS` (JSON, p. ej. `[{"urls":"turn:turn.infraestructura-it.com:3478","username":"u","credential":"c"}]`).
+- **Seguridad:** el agente entra al hub con el token de la máquina (sin token válido ⇒ 401 y evento `agente_rechazado`); solo conecta el canal al IP:puerto del servicio VNC que el hub tiene registrado; la contraseña de wayvnc se sigue pidiendo igual.
+- **Binarios:** `agente/` (Go + pion/webrtc). `./agente/compilar.sh` genera `agente/dist/` (no va a Git; viene en los zips de actualización). Por ahora solo Linux (Raspberry Pi y PC); Windows sigue con Escritorio remoto.
+
 ### Escritorio remoto de Windows (RDP)
 
 ```
@@ -477,7 +493,7 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ./test/e2e.sh
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 231 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores, la instalación con código (arranque real, canje único, revocación, token anterior anulado, límite por IP), las sesiones remotas en el navegador (VNC y SSH reales por el túnel privado, RDP con guacd simulado, ticket de un uso, origen, permisos, huella) y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado; y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
+Levanta frps, el hub y frpc reales en localhost y verifica 238 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores, la instalación con código (arranque real, canje único, revocación, token anterior anulado, límite por IP), las sesiones remotas en el navegador (VNC y SSH reales por el túnel privado, RDP con guacd simulado, pantalla por WebRTC directo con el agente real, ticket de un uso, origen, permisos, huella) y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado; y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
 
 ## Límites conocidos
 
