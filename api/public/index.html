@@ -299,10 +299,14 @@
         <select id="enroll-client" name="client"></select>
         <div class="hint">La máquina se crea al instalar, con el nombre del equipo.</div>
       </div>
+      <div class="field">
+        <label class="enroll-opt"><input type="checkbox" id="enroll-auto" checked><span><b>Servicios según el sistema</b><small>Linux / Raspberry: SSH :22 + VNC :5900 · Windows: SSH :22 + Escritorio remoto :3389 (privados). Se agregan al instalar los que falten.</small></span></label>
+        <label class="enroll-opt" id="enroll-reuse-row"><input type="checkbox" id="enroll-reuse" checked><span><b>Si el equipo ya está registrado, reinstalarlo</b><small>Si el cliente ya tiene una máquina con el nombre del equipo, se reinstala esa (token nuevo) en vez de crear otra.</small></span></label>
+      </div>
       <div class="field" id="enroll-services-row">
-        <label>Servicios que publicará</label>
+        <label>Servicios adicionales</label>
         <div class="enroll-svcs" id="enroll-svcs">
-          <label class="enroll-svc"><input type="checkbox" data-svc="ssh" data-type="stcp" checked><span><b>SSH</b> <span class="tag stcp">privado</span></span><input type="number" min="1" max="65535" value="22" aria-label="Puerto SSH"></label>
+          <label class="enroll-svc"><input type="checkbox" data-svc="ssh" data-type="stcp"><span><b>SSH</b> <span class="tag stcp">privado</span></span><input type="number" min="1" max="65535" value="22" aria-label="Puerto SSH"></label>
           <label class="enroll-svc"><input type="checkbox" data-svc="vnc" data-type="stcp"><span><b>VNC</b> <span class="tag stcp">privado</span></span><input type="number" min="1" max="65535" value="5900" aria-label="Puerto VNC"></label>
           <label class="enroll-svc"><input type="checkbox" data-svc="rdp" data-type="stcp"><span><b>Escritorio remoto</b> <span class="tag stcp">privado</span></span><input type="number" min="1" max="65535" value="3389" aria-label="Puerto RDP"></label>
           <label class="enroll-svc"><input type="checkbox" data-svc="web" data-type="http"><span><b>Web</b> <span class="tag http">http</span></span><input type="number" min="1" max="65535" value="80" aria-label="Puerto web"></label>

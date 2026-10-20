@@ -14,6 +14,29 @@ const CODE_LEN = 12;                                  // 60 bits: imposible de a
 const MINUTES = { min: 5, def: 30, max: 1440 };
 const PLATFORMS = ['windows', 'linux'];
 
+/** Servicios privados que se agregan al canjear según el sistema del equipo (si el código lo pide). */
+const AUTO_SERVICES = {
+  linux: [{ name: 'ssh', type: 'stcp', localPort: 22 }, { name: 'vnc', type: 'stcp', localPort: 5900 }],
+  windows: [{ name: 'ssh', type: 'stcp', localPort: 22 }, { name: 'rdp', type: 'stcp', localPort: 3389 }],
+};
+
+/**
+ * Servicios a crear en una máquina al canjear: los pedidos que aún no tiene. Se omite uno si ya existe
+ * un servicio con ese nombre o un privado en el mismo puerto local (no se duplica ni se pisa).
+ */
+function missingServices(existing, wanted) {
+  const names = new Set(existing.map((s) => s.name));
+  const ports = new Set(existing.filter((s) => s.type === 'stcp').map((s) => Number(s.local_port ?? s.localPort)));
+  const out = [];
+  for (const w of wanted) {
+    if (names.has(w.name) || (w.type === 'stcp' && ports.has(Number(w.localPort)))) continue;
+    names.add(w.name);
+    if (w.type === 'stcp') ports.add(Number(w.localPort));
+    out.push(w);
+  }
+  return out;
+}
+
 function newCode() {
   let s = '';
   for (let i = 0; i < CODE_LEN; i++) s += ALPHABET[crypto.randomInt(ALPHABET.length)];
@@ -147,6 +170,6 @@ function errorBootstrap(platform, msg) {
 }
 
 module.exports = {
-  MINUTES, PLATFORMS, newCode, normalizeCode, hashCode, hintOf, cleanHost, baseUrl, isLoopback, isLoopbackHost, effectiveServerAddr, commands,
+  MINUTES, PLATFORMS, AUTO_SERVICES, missingServices, newCode, normalizeCode, hashCode, hintOf, cleanHost, baseUrl, isLoopback, isLoopbackHost, effectiveServerAddr, commands,
   windowsBootstrap, linuxBootstrap, errorBootstrap,
 };

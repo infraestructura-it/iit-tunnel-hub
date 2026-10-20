@@ -1091,6 +1091,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     serverAddr: e.server_addr, createdBy: e.created_by, createdAt: e.created_at, expiresAt: e.expires_at,
     status: enrollStatus(e), usedAt: e.used_at, usedIp: e.used_ip, usedHost: e.used_host, usedMachine: e.used_machine,
     services: (() => { try { return JSON.parse(e.services || '[]'); } catch { return []; } })(), visitor: e.visitor_id || null,
+    autoServices: !!e.auto_services, reuse: !!e.reuse,
   });
   /** Busca un código vigente. Devuelve { e } o { error } con un mensaje para mostrar en el equipo. */
   const findEnrollment = (raw, ip) => {
@@ -1125,8 +1126,12 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
         names.add(v.name);
         return { name: v.name, type: v.type, localIp: v.localIp, localPort: v.localPort, ...(v.tlsMode ? { tlsMode: v.tlsMode } : {}) };
       });
-      if (body.visitor && services.some((x) => x.type === 'stcp')) visitorId = mustMachine(String(body.visitor), ctx).id;
     }
+    // Por defecto: servicios según el sistema (SSH+VNC en Linux, SSH+RDP en Windows) y, en máquina nueva,
+    // reutilizar la máquina del mismo cliente con el mismo nombre de equipo en vez de crear "nombre-2"
+    const autoServices = body.autoServices !== false;
+    const reuse = !machineId && body.reuse !== false;
+    if (!machineId && body.visitor && (autoServices || services.some((x) => x.type === 'stcp'))) visitorId = mustMachine(String(body.visitor), ctx).id;
     const minutes = Math.min(Math.max(Math.round(Number(body.minutes) || E.MINUTES.def), E.MINUTES.min), E.MINUTES.max);
     const base = E.baseUrl(req, config);
     if (!base) throw M.bad('no se pudo determinar la URL del hub: defina HUB_PUBLIC_URL');
@@ -1134,11 +1139,12 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const code = E.newCode();
     const norm = E.normalizeCode(code);
     const e = store.createEnrollment({
-      codeHash: E.hashCode(norm), hint: E.hintOf(norm), machineId, clientId, serverAddr, services, visitorId,
+      codeHash: E.hashCode(norm), hint: E.hintOf(norm), machineId, clientId, serverAddr, services, visitorId, autoServices, reuse,
       createdBy: ctx.actor, expiresAt: Math.floor(Date.now() / 1000) + minutes * 60,
     });
-    const target = machineId ? 'reinstalar esta máquina'
-      : `máquina nueva${clientId ? ' de ' + store.getClient(clientId).name : ' sin cliente'}${services.length ? ' con ' + services.map((x) => x.name).join(', ') : ''}${visitorId ? ' (acceso desde ' + visitorId + ')' : ''}`;
+    const target = (machineId ? 'reinstalar esta máquina'
+      : `máquina nueva${clientId ? ' de ' + store.getClient(clientId).name : ' sin cliente'}${services.length ? ' con ' + services.map((x) => x.name).join(', ') : ''}${visitorId ? ' (acceso desde ' + visitorId + ')' : ''}`)
+      + (autoServices ? ' · servicios según el sistema' : '') + (reuse ? ' · reutiliza la del mismo nombre' : '');
     store.event(machineId, 'codigo_generado', `${target} · …${e.hint} · vence en ${minutes} min · servidor ${serverAddr}`, 0);
     return [201, { enrollment: enrollView(e), code, base, loopback: E.isLoopback(base), serverAdjusted: adjusted, commands: E.commands(base, code) }];
   }, 'admin');
@@ -1182,16 +1188,24 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       throw new M.HttpError(/no existe/.test(r.error) ? 404 : 410, r.error);
     }
     const e = r.e;
+    // Máquina nueva con "reutilizar": si el cliente ya tiene una máquina con el nombre de este equipo, se reinstala esa
+    let reused = null;
+    if (!e.machine_id && e.reuse) {
+      const same = store.listMachines().filter((m) => (m.client_id || null) === (e.client_id || null) && m.name.toLowerCase() === host.toLowerCase());
+      reused = same.find((m) => m.enabled) || null;
+      if (!reused && same.length) throw new M.HttpError(409, `la máquina "${same[0].name}" está deshabilitada en el panel: habilítela o bórrela y vuelva a intentar`);
+    }
     if (e.machine_id) {
       const m0 = store.getMachine(e.machine_id);
       if (!m0) throw new M.HttpError(404, 'la máquina del código ya no existe');
       if (!m0.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada en el panel: habilítela y vuelva a intentar');
     }
     const token = M.newToken();
-    const granted = []; // accesos creados para el visitante (máquina nueva)
+    const granted = []; // accesos creados para el visitante
+    const addedNames = []; // servicios agregados en este canje
     const machineId = store.transaction(() => {
       if (!store.useEnrollment(e.id, { ip, host })) throw new M.HttpError(410, 'ese código ya se usó: genere uno nuevo en el panel');
-      let id = e.machine_id;
+      let id = e.machine_id || reused?.id || null;
       if (id) {
         store.setTokenHash(id, M.hashToken(token));
       } else {
@@ -1199,15 +1213,19 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
         const data = M.normalizeMachine({ name: host, client: client ? client.name : '' }, store);
         store.createMachine({ ...data, clientId: client ? client.id : null, tokenHash: M.hashToken(token) });
         id = data.id;
-        let wanted = [];
-        try { wanted = JSON.parse(e.services || '[]'); } catch {}
-        for (const sv of wanted) store.createService(id, M.normalizeService(sv, id, store, config.frps));
-        if (e.visitor_id && store.getMachine(e.visitor_id)) {
-          for (const sv of wanted.filter((x) => x.type === 'stcp')) {
-            const a = M.normalizeAccess({ machine: id, service: sv.name, visitor: e.visitor_id }, store);
-            store.createAccess(a.svc.id, a.visitor.id, a.bindPort);
-            granted.push(`${id}/${sv.name} en 127.0.0.1:${a.bindPort}`);
-          }
+      }
+      // Servicios: los marcados al generar (máquina nueva) + los del sistema, solo los que la máquina aún no tiene
+      let wanted = [];
+      if (!e.machine_id) { try { wanted = JSON.parse(e.services || '[]'); } catch {} }
+      if (e.auto_services) wanted = [...wanted, ...E.AUTO_SERVICES[platform]];
+      const added = E.missingServices(store.servicesOf(id), wanted);
+      for (const sv of added) store.createService(id, M.normalizeService(sv, id, store, config.frps));
+      if (added.length) addedNames.push(...added.map((x) => x.name));
+      if (e.visitor_id && e.visitor_id !== id && store.getMachine(e.visitor_id)) {
+        for (const sv of added.filter((x) => x.type === 'stcp')) {
+          const a = M.normalizeAccess({ machine: id, service: sv.name, visitor: e.visitor_id }, store);
+          store.createAccess(a.svc.id, a.visitor.id, a.bindPort);
+          granted.push(`${id}/${sv.name} en 127.0.0.1:${a.bindPort}`);
         }
       }
       store.setEnrollmentMachine(e.id, id);
@@ -1215,12 +1233,14 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     });
     const m = store.getMachine(machineId);
     if (store.servicesOf(m.id).some(browserKind)) hub?.sync();
-    if (!e.machine_id) {
+    if (!e.machine_id && !reused) {
       const svcs = store.servicesOf(m.id);
       store.event(m.id, 'registrada', `${m.name} (instalación con código …${e.hint})${svcs.length ? ' · servicios: ' + svcs.map((x) => x.name).join(', ') : ''}`, 0);
-      for (const g of granted) store.event(e.visitor_id, 'acceso_otorgado', `${g} · aplique su archivo de accesos`, 0);
+    } else if (addedNames.length) {
+      store.event(m.id, 'servicios_agregados', `${addedNames.join(', ')} (instalación con código …${e.hint})`, 0);
     }
-    store.event(m.id, 'codigo_canjeado', `…${e.hint} · ${platform} · ${host} · ${ip} · servidor ${e.server_addr}`, 0);
+    for (const g of granted) store.event(e.visitor_id, 'acceso_otorgado', `${g} · aplique su archivo de accesos`, 0);
+    store.event(m.id, 'codigo_canjeado', `…${e.hint} · ${platform} · ${host} · ${ip} · servidor ${e.server_addr}${reused ? ' · reinstaló la máquina existente' : ''}`, 0);
     const P = PLATFORMS[platform];
     const grants = store.accessOfVisitor(m.id);
     const snmpDevs = store.snmpOf(m.id);

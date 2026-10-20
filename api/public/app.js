@@ -69,7 +69,7 @@ const EVENT_STYLE = {
   snmp_agregado: 'info', snmp_modificado: 'info', snmp_eliminado: 'warn', snmp_alerta: 'bad', snmp_normal: 'good',
   respaldo_creado: 'good', respaldo_fallido: 'bad', respaldo_descargado: 'info', respaldo_eliminado: 'warn', respaldos_configurados: 'info',
   acceso_otorgado: 'info', acceso_revocado: 'warn', clave_rotada: 'warn', reconexion: 'info', accesos_descargados: 'info',
-  codigo_generado: 'info', codigo_canjeado: 'good', codigo_revocado: 'warn', codigo_rechazado: 'bad',
+  codigo_generado: 'info', servicios_agregados: 'info', codigo_canjeado: 'good', codigo_revocado: 'warn', codigo_rechazado: 'bad',
   sesion_remota: 'info', sesion_remota_fin: 'info', huella_ssh_olvidada: 'warn',
 };
 const EVENT_LABEL = {
@@ -90,7 +90,7 @@ const EVENT_LABEL = {
   snmp_alerta: 'Alerta SNMP', snmp_normal: 'SNMP normalizado',
   respaldo_creado: 'Respaldo creado', respaldo_fallido: 'Respaldo fallido', respaldo_descargado: 'Respaldo descargado',
   respaldo_eliminado: 'Respaldo eliminado', respaldos_configurados: 'Respaldos configurados',
-  codigo_generado: 'Código de instalación generado', codigo_canjeado: 'Instalada con código',
+  codigo_generado: 'Código de instalación generado', servicios_agregados: 'Servicios agregados al instalar', codigo_canjeado: 'Instalada con código',
   codigo_revocado: 'Código de instalación revocado', codigo_rechazado: 'Código de instalación rechazado',
   sesion_remota: 'Sesión remota', sesion_remota_fin: 'Sesión remota terminada', huella_ssh_olvidada: 'Huella SSH olvidada',
 };

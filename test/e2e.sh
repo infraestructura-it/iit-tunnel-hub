@@ -487,7 +487,7 @@ check "solo el administrador genera códigos" '[ "$(scode h3 POST /enrollments -
 check "frps 127.0.0.1 con el hub abierto por la red: el código usa la IP del hub" '[ "$(api POST /enrollments -H "Host: 10.9.9.9:$PORT" -d "{\"serverAddr\":\"127.0.0.1\"}" | jq -r "[.serverAdjusted, .enrollment.serverAddr] | join(\" \")")" = "true 10.9.9.9" ]'
 check "código para una máquina inexistente → 404" '[ "$(api POST /enrollments -o /dev/null -w "%{http_code}" -d "{\"machine\":\"no-existe\"}")" = 404 ]'
 check "servicio inválido en el código → 400" '[ "$(api POST /enrollments -o /dev/null -w "%{http_code}" -d "{\"services\":[{\"name\":\"ssh\",\"type\":\"ftp\",\"localPort\":22}]}")" = 400 ]'
-api POST /enrollments -d "{\"client\":\"clinica-norte\",\"minutes\":30,\"services\":[{\"name\":\"ssh\",\"type\":\"stcp\",\"localPort\":22},{\"name\":\"web\",\"type\":\"http\",\"localPort\":18999}],\"visitor\":\"$ID\"}" > "$WORK/enr.json"
+api POST /enrollments -d "{\"client\":\"clinica-norte\",\"minutes\":30,\"autoServices\":false,\"reuse\":false,\"services\":[{\"name\":\"ssh\",\"type\":\"stcp\",\"localPort\":22},{\"name\":\"web\",\"type\":\"http\",\"localPort\":18999}],\"visitor\":\"$ID\"}" > "$WORK/enr.json"
 CODE=$(jq -r .code "$WORK/enr.json")
 check "código de 12 caracteres con comandos para Windows y Linux" '[[ "$CODE" =~ ^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$ ]] && jq -r .commands.windows "$WORK/enr.json" | grep -qF "irm $HUBURL/i/$CODE/windows | iex" && jq -r .commands.linux "$WORK/enr.json" | grep -qF "curl -fsSL $HUBURL/i/$CODE/linux | sudo bash"'
 check "el hub guarda solo el hash del código" '! grep -qa "${CODE//-/}" "$WORK"/hub.db*'
@@ -512,18 +512,30 @@ check "y el visitante elegido recibe acceso a su servicio privado" '[ "$(api GET
 check "su servicio web responde por el túnel desde el primer momento" 'wait_for "[ \"\$(curl -s -H \"Host: web-$EM.test.local\" http://127.0.0.1:18080/)\" = hola-desde-la-maquina ]"'
 check "el código no sirve dos veces" '[ "$(enroll "$CODE")" = 410 ]'
 check "con un código usado, el arranque solo muestra el error" 'curl -s "$HUBURL/i/$CODE/linux" | grep -q "^echo \"X Codigo invalido"'
-api POST /enrollments -d "{\"machine\":\"$EM\"}" > "$WORK/enr2.json"
+api POST /enrollments -d "{\"machine\":\"$EM\",\"autoServices\":false}" > "$WORK/enr2.json"
 kill $EPID 2>/dev/null; sleep 0.5; EPID=$(start_frpc "$WORK/enr/frpc.toml"); PIDS+=($EPID)
 check "generar un código no desconecta la máquina instalada" 'wait_for "grep -q \"login to server success\" $WORK/enr/frpc.toml.log"'
 check "revocar un código vigente" '[ "$(api DELETE /enrollments/$(jq -r .enrollment.id "$WORK/enr2.json") | jq -r .status)" = revocado ]'
 check "un código revocado no se canjea" '[ "$(enroll "$(jq -r .code "$WORK/enr2.json")")" = 410 ]'
-C3=$(api POST /enrollments -d "{\"machine\":\"$EM\"}" | jq -r .code)
+C3=$(api POST /enrollments -d "{\"machine\":\"$EM\",\"autoServices\":false}" | jq -r .code)
 curl -s -H "Content-Type: application/json" "$API/enroll" -d "{\"code\":\"${C3,,}\",\"platform\":\"windows\",\"hostname\":\"OTRO-PC\"}" > "$WORK/inst-code.ps1"
 check "reinstalar con código entrega el instalador de esa máquina (acepta minúsculas)" 'grep -q "^\$MachineId  = \"$EM\"" "$WORK/inst-code.ps1" && grep -q "Register-ScheduledTask" "$WORK/inst-code.ps1"'
 kill $EPID 2>/dev/null; sleep 0.5; EPID=$(start_frpc "$WORK/enr/frpc.toml"); PIDS+=($EPID)
 check "y el token anterior deja de servir" 'wait_for "grep -q \"token inválido\" $WORK/enr/frpc.toml.log"'
 kill $EPID 2>/dev/null
 check "canjes auditados con el nombre del equipo" '[ "$(api GET "/events?machine=$EM" | jq "[.[] | select(.kind==\"codigo_canjeado\")] | length")" = 2 ] && api GET "/events?machine=$EM" | jq -r ".[] | select(.kind==\"codigo_canjeado\") | .actor" | grep -q "instalador (OTRO-PC)"'
+# Por defecto: servicios según el sistema y reutilizar la máquina del mismo nombre en el cliente
+EMNAME=$(api GET /machines/$EM | jq -r .name)
+NMACH=$(api GET /machines | jq length)
+C4=$(api POST /enrollments -d '{"client":"clinica-norte"}' | jq -r .code)
+check "código nuevo: por defecto servicios del sistema y reutilizar" '[ "$(api GET /enrollments | jq -r ".[0] | [.autoServices, .reuse] | join(\",\")")" = "true,true" ]'
+check "mismo equipo con \"máquina nueva\": reinstala la existente, no crea otra" '[ "$(enroll "$C4" linux "$EMNAME")" = 200 ] && [ "$(api GET /machines | jq length)" = "$NMACH" ] && [ "$(api GET /enrollments | jq -r ".[] | select(.hint==\"${C4: -4}\") | .usedMachine")" = "$EM" ]'
+check "Linux: agrega VNC (SSH ya estaba) sin duplicar" '[ "$(api GET /machines/$EM | jq -r "[.services[].name] | sort | join(\",\")")" = "ssh,vnc,web" ] && api GET "/events?machine=$EM" | jq -r ".[] | select(.kind==\"servicios_agregados\") | .detail" | grep -q "^vnc "'
+C5=$(api POST /enrollments -d '{"client":"clinica-norte"}' | jq -r .code)
+check "Windows nuevo: nace con SSH y Escritorio remoto privados" '[ "$(enroll "$C5" windows "PC-NUEVO")" = 200 ] && [ "$(api GET /machines/clinica-norte-pc-nuevo | jq -r "[.services[] | .name + \":\" + (.localPort|tostring) + \":\" + .type] | sort | join(\",\")")" = "rdp:3389:stcp,ssh:22:stcp" ]'
+C6=$(api POST /enrollments -d '{"client":"clinica-norte","reuse":false,"autoServices":false}' | jq -r .code)
+check "sin reutilizar: crea otra máquina con sufijo" '[ "$(enroll "$C6" windows "PC-NUEVO")" = 200 ] && [ "$(api GET /machines/clinica-norte-pc-nuevo-2 | jq -r ".services | length")" = 0 ]'
+api DELETE /machines/clinica-norte-pc-nuevo >/dev/null; api DELETE /machines/clinica-norte-pc-nuevo-2 >/dev/null
 for i in $(seq 1 10); do enroll AAAA-BBBB-CCCC >/dev/null; done
 check "10 códigos inexistentes desde una IP → 429" '[ "$(enroll "$C3")" = 429 ]'
 api DELETE /machines/$EM >/dev/null

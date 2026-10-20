@@ -81,7 +81,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (225 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (230 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -133,6 +133,8 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - `POST /api/enroll` es público: canje atómico (`useEnrollment` con `used_at IS NULL AND revoked_at IS NULL AND expires_at > now`) dentro de la transacción que rota el token o crea la máquina. Devuelve el instalador normal (`PLATFORMS[..].build`).
 - Generar un código **no** toca el token; el token se rota al canjear (modo máquina). Modo nuevo: `normalizeMachine({name: hostname limpio, client})`, luego crea `enrollments.services` (validados al generar con `normalizeService`) y, si hay `visitor_id`, los accesos a los stcp, todo en la misma transacción del canje (si algo falla, el código no se gasta).
 - El instalador lleva los servicios que la máquina tiene **al canjear**: agregar servicios después exige reinstalar (código desde su detalle).
+- `auto_services` (por defecto en códigos nuevos; los anteriores a la columna quedan en 0): al canjear se agregan `E.AUTO_SERVICES[platform]` (Linux: ssh 22 + vnc 5900; Windows: ssh 22 + rdp 3389, stcp) con `missingServices` (omite si ya hay ese nombre o un stcp en ese puerto). Vale también en modo máquina. Evento `servicios_agregados`.
+- `reuse` (por defecto en máquina nueva): si hay una máquina habilitada del mismo `client_id` con `name` = hostname (sin distinguir mayúsculas), se rota su token en vez de crear `nombre-2`; si solo hay deshabilitadas ⇒ 409.
 - Límite: 10 códigos inexistentes por IP en 15 min ⇒ 429 (también en el arranque). Usados, vencidos o revocados no cuentan.
 - Arranque Windows: todo dentro de `& { … }` y `return` (un `exit` en `irm | iex` cierra la ventana); solo ASCII (PS 5.1 puede decodificar mal acentos); escribe el instalador con BOM en `GetTempPath()`, lo ejecuta con `powershell -ExecutionPolicy Bypass -File` y lo borra.
 - Arranque Linux: exige root, canjea con curl o wget, valida que la respuesta empiece con `#!/usr/bin/env bash`, ejecuta y borra el temporal (`umask 077`).

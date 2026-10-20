@@ -223,6 +223,10 @@ ${SERVICES_TABLE('services')}
   const enCols = new Set(db.prepare('PRAGMA table_info(enrollments)').all().map((c) => c.name));
   if (!enCols.has('services')) db.exec("ALTER TABLE enrollments ADD COLUMN services TEXT NOT NULL DEFAULT '[]'");
   if (!enCols.has('visitor_id')) db.exec('ALTER TABLE enrollments ADD COLUMN visitor_id TEXT');
+  // auto_services: agregar SSH+VNC (Linux) o SSH+RDP (Windows) al canjear · reuse: máquina nueva que reutiliza
+  // la del mismo cliente con el mismo nombre de equipo en vez de crear otra (códigos anteriores: 0, como antes)
+  if (!enCols.has('auto_services')) db.exec('ALTER TABLE enrollments ADD COLUMN auto_services INTEGER NOT NULL DEFAULT 0');
+  if (!enCols.has('reuse')) db.exec('ALTER TABLE enrollments ADD COLUMN reuse INTEGER NOT NULL DEFAULT 0');
   return new Store(db);
 }
 
@@ -563,10 +567,10 @@ class Store {
 
   // ---------- códigos de instalación ----------
   createEnrollment(e) {
-    const r = this.db.prepare(`INSERT INTO enrollments (code_hash, hint, machine_id, client_id, server_addr, created_by, created_at, expires_at, services, visitor_id)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    const r = this.db.prepare(`INSERT INTO enrollments (code_hash, hint, machine_id, client_id, server_addr, created_by, created_at, expires_at, services, visitor_id, auto_services, reuse)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(e.codeHash, e.hint, e.machineId ?? null, e.clientId ?? null, e.serverAddr, e.createdBy ?? null, now(), e.expiresAt,
-        JSON.stringify(e.services || []), e.visitorId ?? null);
+        JSON.stringify(e.services || []), e.visitorId ?? null, e.autoServices ? 1 : 0, e.reuse ? 1 : 0);
     return this.getEnrollment(Number(r.lastInsertRowid));
   }
   getEnrollment(id) { return this.db.prepare('SELECT * FROM enrollments WHERE id = ?').get(Number(id)) || null; }

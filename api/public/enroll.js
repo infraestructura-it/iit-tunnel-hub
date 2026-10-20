@@ -15,12 +15,15 @@ function openEnroll(machine = null) {
   $('#enroll-client-row').classList.toggle('hidden', !!machine);
   $('#enroll-services-row').classList.toggle('hidden', !!machine);
   $('#enroll-visitor-row').classList.toggle('hidden', !!machine);
+  $('#enroll-reuse-row').classList.toggle('hidden', !!machine);
+  $('#enroll-auto').checked = true;
+  $('#enroll-reuse').checked = true;
   $('#enroll-current-row').classList.toggle('hidden', !machine);
   if (machine) {
     const svcs = machine.services || [];
     $('#enroll-current').innerHTML = svcs.length
       ? svcs.map((x) => `<span class="enroll-chip">${typeTag(x.type)} ${esc(x.name)} <span class="hint" style="margin:0">:${x.localPort}</span></span>`).join('')
-      : '<span class="hint" style="margin:0">Sin servicios: solo la conexión. Agréguelos en el detalle de la máquina antes de generar el código.</span>';
+      : '<span class="hint" style="margin:0">Sin servicios propios todavía.</span>';
   }
   $('#enroll-visitor').innerHTML = '<option value="">Nadie por ahora</option>' + state.machines
     .map((m) => `<option value="${esc(m.id)}">${esc(m.name)} (${esc(m.id)})${m.online ? '' : ' · fuera de línea'}</option>`).join('');
@@ -45,11 +48,12 @@ async function loadEnrollments() {
       ${list.slice(0, 20).map((e) => {
         const [cls, label] = ENROLL_STATUS[e.status] || ['', e.status];
         const target = e.mode === 'maquina' ? esc(e.machine)
-          : `nueva · ${esc(e.client || 'sin cliente')}${e.services?.length ? `<div class="hint" style="margin:2px 0 0">${e.services.map((x) => esc(x.name)).join(', ')}${e.visitor ? ' · acceso: ' + esc(e.visitor) : ''}</div>` : ''}`;
+          : `nueva · ${esc(e.client || 'sin cliente')}${e.services?.length || e.visitor ? `<div class="hint" style="margin:2px 0 0">${(e.services || []).map((x) => esc(x.name)).join(', ')}${e.visitor ? ' · acceso: ' + esc(e.visitor) : ''}</div>` : ''}`;
+        const extra = [e.autoServices ? 'servicios del sistema' : '', e.reuse ? 'reutiliza' : ''].filter(Boolean).join(' · ');
         const detail = e.status === 'usado'
           ? `${esc(e.usedMachine || '')} · ${esc(e.usedHost || '')} · ${ago(e.usedAt)}`
           : e.status === 'vigente' ? `vence ${remaining(e.expiresAt)}` : '';
-        return `<tr><td style="font-family:var(--code)">…${esc(e.hint)}</td><td>${target}</td>
+        return `<tr><td style="font-family:var(--code)">…${esc(e.hint)}</td><td>${target}${extra ? `<div class="hint" style="margin:2px 0 0">${extra}</div>` : ''}</td>
           <td><span class="tag ${cls}">${label}</span><div class="hint" style="margin:2px 0 0">${detail}</div></td>
           <td class="hide-sm">${ago(e.createdAt)}<div class="hint" style="margin:2px 0 0">${esc(e.createdBy || '')}</div></td>
           <td class="row-btns">${e.status === 'vigente' ? `<button class="btn small danger" data-revoke="${e.id}">Revocar</button>` : ''}</td></tr>`;
@@ -75,13 +79,14 @@ function tickExpiry() {
 $('#enroll-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = Object.fromEntries(new FormData(e.target));
-  const body = { minutes: Number(f.minutes), serverAddr: f.serverAddr.trim() };
+  const body = { minutes: Number(f.minutes), serverAddr: f.serverAddr.trim(), autoServices: $('#enroll-auto').checked };
   if (enroll.machine) body.machine = enroll.machine.id;
   else {
     if (f.client) body.client = f.client;
     body.services = chosenServices();
+    body.reuse = $('#enroll-reuse').checked;
     const visitor = $('#enroll-visitor').value;
-    if (visitor && body.services.some((x) => x.type === 'stcp')) body.visitor = visitor;
+    if (visitor && (body.autoServices || body.services.some((x) => x.type === 'stcp'))) body.visitor = visitor;
   }
   $('#enroll-error').textContent = '';
   $('#enroll-submit').disabled = true;
@@ -102,7 +107,9 @@ $('#enroll-form').addEventListener('submit', async (e) => {
     $('#enroll-server').value = r.enrollment.serverAddr;
     $('#enroll-note-mode').textContent = enroll.machine
       ? `Al usarlo se crea un token nuevo para ${enroll.machine.id}: si la máquina estaba instalada en otro equipo, ese queda desconectado.`
-      : `La máquina aparece en el panel con el nombre del equipo${r.enrollment.client ? `, en el cliente ${r.enrollment.client}` : ''}.`;
+      : r.enrollment.reuse
+        ? `Si ${r.enrollment.client ? `el cliente ${r.enrollment.client}` : 'el panel (sin cliente)'} ya tiene una máquina con el nombre del equipo, se reinstala esa; si no, se crea con ese nombre.`
+        : `La máquina aparece en el panel con el nombre del equipo${r.enrollment.client ? `, en el cliente ${r.enrollment.client}` : ''}.`;
     enroll.expiresAt = r.enrollment.expiresAt;
     clearInterval(enroll.timer);
     enroll.timer = setInterval(tickExpiry, 1000);
@@ -133,9 +140,10 @@ function chosenServices() {
   });
 }
 function syncVisitorRow() {
-  const anyPrivate = chosenServices().some((x) => x.type === 'stcp');
+  const anyPrivate = $('#enroll-auto').checked || chosenServices().some((x) => x.type === 'stcp');
   $('#enroll-visitor').disabled = !anyPrivate;
 }
 $('#enroll-svcs').addEventListener('change', syncVisitorRow);
+$('#enroll-auto').addEventListener('change', syncVisitorRow);
 
 $('#enroll-new').addEventListener('click', () => openEnroll(null));

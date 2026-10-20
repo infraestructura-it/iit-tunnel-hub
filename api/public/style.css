@@ -470,6 +470,10 @@ b.ko { color: var(--red); font-weight: 500; }
 .enroll-svc input[type=number] { width: 84px; flex: none; padding: 6px 8px; }
 .enroll-svc:has(input[type=checkbox]:checked) { border-color: rgba(34,211,238,.5); }
 .enroll-current { display: flex; flex-wrap: wrap; gap: 8px; }
+.enroll-opt { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; margin: 0 0 8px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel-2); cursor: pointer; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
+.enroll-opt input { width: auto; margin: 3px 0 0; flex: none; }
+.enroll-opt small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+.enroll-opt:has(input:checked) { border-color: rgba(34,211,238,.5); }
 .enroll-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line-2); border-radius: 999px; font-size: 13px; }
 @media (max-width: 760px) { .enroll-svcs { grid-template-columns: 1fr; } }
 
