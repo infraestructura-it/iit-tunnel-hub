@@ -562,6 +562,9 @@ mkdir -p "$WORK/rem" && jq -r .frpcToml "$WORK/rem.json" > "$WORK/rem/frpc.toml"
 ( cd "$WORK/rem" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & PIDS+=($!)
 check "la máquina con VNC y SSH privados se conecta" 'wait_for_long "[ \"\$(api GET /machines/remota | jq -r \"[.services[] | select(.private) | .status] | unique | join(\\\",\\\")\")\" = online ]"'
 check "los servicios privados SSH/VNC/RDP se marcan para abrir en el navegador" '[ "$(api GET /machines/remota | jq -r "[.services[] | select(.remote) | .name] | sort | join(\",\")")" = "$([ "$SSHD" = 1 ] && echo escritorio,ssh,vnc || echo escritorio,vnc)" ]'
+api POST /machines/remota/services -d '{"name":"vnc2","type":"stcp","localPort":5901}' >/dev/null
+check "servicio agregado después de instalar → 409 que pide reinstalar" '[ "$(api POST /machines/remota/remote -o "$WORK/r409.json" -w "%{http_code}" -d "{\"service\":\"vnc2\"}")" = 409 ] && grep -q "Reinstálela con código" "$WORK/r409.json"'
+api DELETE /machines/remota/services/vnc2 >/dev/null
 check "un servicio http no abre sesión en el navegador → 400" '[ "$(api POST /machines/remota/remote -o /dev/null -w "%{http_code}" -d "{\"service\":\"web\"}")" = 400 ]'
 check "el usuario cliente no abre sesiones remotas → 403" '[ "$(scode h3 POST /machines/remota/remote -d "{\"service\":\"vnc\"}")" = 403 ]'
 rticket() { api POST /machines/remota/remote -d "{\"service\":\"$1\"}" | jq -r .ticket; }

@@ -81,7 +81,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/install.sh` | Instalación en Linux con systemd |
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (230 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (231 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -145,6 +145,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 
 - Solo servicios **stcp** con `browserKind` (`vnc`/`ssh`/`rdp` por nombre `vnc*`/`ssh*`/`rdp*`/`escritorio*` o por puerto 5900–5999/22/3389).
 - `NewProxy` de esos stcp agrega `_hub` a `allow_users`; el frpc del hub tiene un visitante `remoto-<id>` en `127.0.0.1:REMOTE_PORT_BASE+id`. Crear/borrar servicio, rotar clave, (des)habilitar o borrar máquina ⇒ `hub.sync()`. Al arrancar por primera vez con esta versión (`settings.remoto_hub_visitante`) se pide reconexión a sus dueños.
+- Antes del ticket, si frps responde: máquina sin conectar o servicio sin publicar (agregado después de instalar) ⇒ 409 con el motivo (pide reinstalar con código).
 - `POST /api/machines/:id/remote` (staff + `mustMachine` write) entrega un ticket de 60 s y un solo uso, en memoria. El WebSocket (`/api/remote/ws?t=`) no usa cookie: exige ticket válido y, si llega `Origin`, que su host sea el del hub.
 - wayvnc: sin TLS/RSA y con `enable_auth=true` no ofrece ningún método salvo que tenga `allow_broken_crypto=true` (Apple DH, tipo 30). `remoto.js` intercepta `console.error` (y re-llama `initLogging` de noVNC) para mostrar el motivo del fallo.
 - VNC: el hub manda `{type:ready}` (texto) recién con el primer byte del servidor VNC; desde ahí solo binario RFB (noVNC toma el WebSocket abierto). Errores: texto `{type:error}` y cierre 1011.

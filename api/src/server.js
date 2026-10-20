@@ -495,6 +495,17 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const kind = browserKind(s);
     if (!kind) throw M.bad(`"${s.name}" no admite sesión desde el navegador (solo servicios privados SSH, VNC o RDP)`);
     if (!m.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada');
+    // Antes de abrir: ¿el equipo está conectado y publica este servicio? (si no, el error del visor sería genérico)
+    const live = await frps.status();
+    if (live.reachable) {
+      const online = live.clients.has(m.id);
+      const proxy = live.proxies.get(`${m.id}.${s.name}`);
+      if (!online) throw new M.HttpError(409, `${m.name} está fuera de línea: su frpc no está conectado al servidor`);
+      if (!proxy || proxy.status !== 'online') {
+        throw new M.HttpError(409, `${m.name} está conectada pero no publica "${s.name}": se agregó después de instalar. `
+          + 'Reinstálela con código desde su detalle (Instalar con código) para que su frpc lo incluya');
+      }
+    }
     let rdp = null;
     if (kind === 'rdp') {
       if (!(await remote.guacdReachable())) {

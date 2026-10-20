@@ -122,7 +122,7 @@ class RemoteService {
 
   // VNC: puente binario WebSocket ⇄ TCP (el protocolo RFB lo hablan noVNC y el servidor VNC)
   #vnc(sess, port, fail) {
-    const { ws } = sess;
+    const { ws, svc } = sess;
     const tcp = net.connect({ host: '127.0.0.1', port });
     let gotData = false;
     tcp.setNoDelay(true);
@@ -136,7 +136,7 @@ class RemoteService {
     });
     tcp.on('error', (e) => fail(e.code === 'ECONNREFUSED' ? 'el hub aún no abre este servicio: espere unos segundos y reintente' : `conexión: ${e.message}`));
     tcp.on('close', () => {
-      if (!gotData) fail('la máquina no respondió: revise que esté en línea y que el servidor VNC corra en ese puerto');
+      if (!gotData) fail(`el túnel llegó al equipo, pero nada respondió en su puerto ${svc.local_port}: el servidor VNC no está corriendo o escucha en otro puerto (en Windows instale uno, p. ej. TightVNC; o use Escritorio remoto)`);
       else ws.close(1000, 'el equipo cerró la sesión');
     });
     ws.on('message', (data, binary) => {
