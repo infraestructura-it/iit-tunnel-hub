@@ -153,6 +153,22 @@ ${SERVICES_TABLE('services')}
     );
     CREATE INDEX IF NOT EXISTS incidents_status ON incidents (status, created_at DESC);
     CREATE INDEX IF NOT EXISTS incidents_machine ON incidents (machine_id, status);
+
+    -- Citas de videoatención (WebRTC cámara a cámara + chat). El cliente entra con un código
+    -- dentro de la ventana de la cita; la sala es punto a punto, el hub solo hace la señalización.
+    CREATE TABLE IF NOT EXISTS appointments (
+      id            TEXT PRIMARY KEY,
+      code          TEXT NOT NULL UNIQUE,          -- código de aprobación que ingresa el cliente
+      title         TEXT NOT NULL,
+      client_id     TEXT,
+      customer_name TEXT NOT NULL DEFAULT '',
+      starts_at     INTEGER NOT NULL,              -- hora de la cita
+      ends_at       INTEGER NOT NULL,              -- fin de la ventana
+      cancelled_at  INTEGER,
+      created_by    TEXT,
+      created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS appointments_starts ON appointments (starts_at DESC);
   `);
   migrate(db);
   db.exec(`
@@ -521,6 +537,32 @@ class Store {
     const rows = this.db.prepare("SELECT machine_id FROM incidents WHERE status IN ('abierta','en_proceso')").all();
     return visible ? rows.filter((r) => r.machine_id && visible(r.machine_id)).length : rows.length;
   }
+
+  // ---------- Citas de videoatención ----------
+  createAppointment(a) {
+    this.db.prepare(`INSERT INTO appointments (id, code, title, client_id, customer_name, starts_at, ends_at, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(a.id, a.code, a.title, a.clientId ?? null, a.customerName || '', a.startsAt, a.endsAt, a.createdBy ?? null, now());
+    return this.getAppointment(a.id);
+  }
+  getAppointment(id) { return this.db.prepare('SELECT * FROM appointments WHERE id = ?').get(id) || null; }
+  getAppointmentByCode(code) { return this.db.prepare('SELECT * FROM appointments WHERE code = ?').get(code) || null; }
+  appointmentCodeExists(code) { return !!this.db.prepare('SELECT 1 FROM appointments WHERE code = ?').get(code); }
+  listAppointments({ visible = null, limit = 200 } = {}) {
+    const rows = this.db.prepare('SELECT * FROM appointments ORDER BY starts_at DESC LIMIT ?').all(Math.min(Math.max(limit, 1), 1000));
+    if (!visible) return rows;
+    return rows.filter((r) => visible(r));
+  }
+  updateAppointment(id, fields) {
+    const allowed = ['title', 'customer_name', 'starts_at', 'ends_at', 'cancelled_at', 'client_id'];
+    const sets = [], vals = [];
+    for (const k of allowed) if (k in fields) { sets.push(`${k} = ?`); vals.push(fields[k]); }
+    if (!sets.length) return this.getAppointment(id);
+    vals.push(id);
+    this.db.prepare(`UPDATE appointments SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    return this.getAppointment(id);
+  }
+  deleteAppointment(id) { this.db.prepare('DELETE FROM appointments WHERE id = ?').run(id); }
 
   // ---------- SNMP ----------
   listSnmp() { return this.db.prepare('SELECT * FROM snmp_devices ORDER BY machine_id, name').all(); }

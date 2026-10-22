@@ -659,6 +659,26 @@ check "el resumen cuenta las fallas abiertas (para el badge)" '[ "$(api GET /sum
 check "el filtro por estado funciona" '[ "$(api GET "/incidents?status=exportada" | jq "[.[]|select(.id==\"$FID\")]|length")" = 1 ] && [ "$(api GET "/incidents?status=abierta" | jq "[.[]|select(.id==\"$FID\")]|length")" = 0 ]'
 api DELETE /machines/sin-conectar >/dev/null
 
+echo "13d. Videoatención (citas, WebRTC)"
+NOW=$(date +%s)
+CODE=$(api POST /citas -d "{\"title\":\"Soporte de prueba\",\"startsAt\":$NOW,\"durationMin\":60}" | jq -r .code)
+check "crea una cita y entrega un código" '[ -n "$CODE" ] && [ ${#CODE} -ge 4 ]'
+check "entrar con el código dentro de la ventana → ticket" '[ "$(api POST /citas/join -d "{\"code\":\"$CODE\"}" | jq -r ".ticket | length>0")" = true ]'
+check "código inexistente → 404" '[ "$(api POST /citas/join -o /dev/null -w "%{http_code}" -d "{\"code\":\"NOEXISTE9\"}")" = 404 ]'
+FUT=$((NOW + 7200))
+api POST /citas -d "{\"title\":\"Futura\",\"startsAt\":$FUT,\"durationMin\":30,\"code\":\"FUTURA-1\"}" >/dev/null
+check "antes de la ventana → 409 con la hora de inicio" '[ "$(api POST /citas/join -o "$WORK/fut.json" -w "%{http_code}" -d "{\"code\":\"FUTURA-1\"}")" = 409 ] && [ "$(jq -r .startsAt "$WORK/fut.json")" = "$FUT" ]'
+check "código duplicado al crear → 409" '[ "$(api POST /citas -o /dev/null -w "%{http_code}" -d "{\"title\":\"x\",\"startsAt\":$NOW,\"code\":\"FUTURA-1\"}")" = 409 ]'
+CID=$(api GET /citas | jq -r '[.[]|select(.title=="Soporte de prueba")][0].id')
+check "ticket del agente desde el panel (abrir sala)" '[ "$(api POST /citas/$CID/sala | jq -r ".ticket | length>0")" = true ]'
+CWSU="ws://127.0.0.1:$PORT/api/citas/ws?t="
+T1=$(api POST /citas/join -d "{\"code\":\"$CODE\"}" | jq -r .ticket)
+T2=$(api POST /citas/join -d "{\"code\":\"$CODE\"}" | jq -r .ticket)
+check "la sala relaya señalización y chat entre dos participantes" 'node "$ROOT/test/cita-relay.js" "$CWSU$T1" "$CWSU$T2" | grep -q "^OK"'
+check "ticket inválido en la sala → rechazado" '! node "$ROOT/test/cita-relay.js" "${CWSU}inventado" "${CWSU}tampoco" 2>/dev/null | grep -q "^OK"'
+check "cancelar la cita invalida el código" 'api PATCH /citas/$CID -d "{\"cancel\":true}" >/dev/null; [ "$(api POST /citas/join -o /dev/null -w "%{http_code}" -d "{\"code\":\"$CODE\"}")" = 409 ]'
+check "eliminar la cita" '[ "$(api DELETE /citas/$CID | jq -r .deleted)" = true ]'
+
 echo "14. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
 SNMPOK=0
 if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/snmpd ] && command -v snmpsim-command-responder >/dev/null; then SNMPOK=1; fi

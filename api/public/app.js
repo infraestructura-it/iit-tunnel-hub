@@ -1095,6 +1095,78 @@ $('#incidents-list').addEventListener('click', async (e) => {
   if (ord) { const v = prompt('Referencia de la orden de servicio (iit-ordenes-servicio):', ord.dataset.incOrder || ''); if (v !== null) incPatch(id, { orderRef: v.trim() }); }
 });
 
+// ---------- videoatención / citas ----------
+
+const citaWhen = (ts) => (ts ? new Date(ts * 1000).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' }) : '');
+const CITA_PHASE = { programada: 'Programada', en_curso: 'En curso', finalizada: 'Finalizada', cancelada: 'Cancelada' };
+const CITA_CLS = { programada: 'warn', en_curso: 'good', finalizada: '', cancelada: 'bad' };
+
+async function openCitas() { $('#citas-error').textContent = ''; $('#citas-error').style.color = ''; await loadCitas(); $('#citas-modal').classList.remove('hidden'); }
+
+async function loadCitas() {
+  try { renderCitas(await api('GET', '/citas')); }
+  catch (e) { $('#citas-error').textContent = e.message; }
+}
+
+function renderCitas(list) {
+  if (!list.length) { $('#citas-list').innerHTML = '<div class="chat-empty">No hay citas.</div>'; return; }
+  $('#citas-list').innerHTML = list.map((c) => `
+    <div class="incident" data-id="${esc(c.id)}">
+      <div class="inc-main">
+        <div><span class="inc-badge ${CITA_CLS[c.phase] || ''}">${CITA_PHASE[c.phase] || esc(c.phase)}</span> <b>${esc(c.title)}</b></div>
+        <div class="inc-meta">${c.customerName ? esc(c.customerName) + ' · ' : ''}${citaWhen(c.startsAt)} → ${citaWhen(c.endsAt)}</div>
+      </div>
+      <div class="inc-actions">
+        <button class="btn small primary" data-cita-open>Abrir sala</button>
+        <button class="btn small" data-cita-link>Copiar link</button>
+        ${c.phase !== 'cancelada' ? '<button class="btn small" data-cita-cancel>Cancelar</button>' : ''}
+        <button class="btn small danger" data-cita-del>Eliminar</button>
+      </div>
+    </div>`).join('');
+}
+
+$('#citas-btn').addEventListener('click', openCitas);
+
+$('#cita-new-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  $('#citas-error').style.color = ''; $('#citas-error').textContent = '';
+  const startsAt = Math.floor(new Date(f.when.value).getTime() / 1000);
+  if (!startsAt) { $('#citas-error').textContent = 'Fecha y hora inválidas.'; return; }
+  try {
+    const r = await api('POST', '/citas', {
+      title: f.title.value.trim(), customerName: f.customerName.value.trim(),
+      startsAt, durationMin: Number(f.durationMin.value) || 60, code: f.code.value.trim() || undefined,
+    });
+    f.reset(); f.durationMin.value = 60; await loadCitas();
+    const link = `${location.origin}/cita.html?code=${encodeURIComponent(r.code)}`;
+    copy(link);
+    $('#citas-error').style.color = 'var(--green)';
+    $('#citas-error').textContent = `Cita creada · código ${r.code} · link copiado: ${link}`;
+  } catch (err) { $('#citas-error').textContent = err.message; }
+});
+
+$('#citas-list').addEventListener('click', async (e) => {
+  const row = e.target.closest('.incident'); if (!row) return;
+  const id = row.dataset.id;
+  try {
+    if (e.target.closest('[data-cita-open]')) {
+      const r = await api('POST', `/citas/${id}/sala`);
+      window.open(`cita.html?ticket=${encodeURIComponent(r.ticket)}&titulo=${encodeURIComponent(r.cita.title)}`, '_blank');
+    } else if (e.target.closest('[data-cita-link]')) {
+      const c = await api('GET', `/citas/${id}`);
+      const link = `${location.origin}/cita.html?code=${encodeURIComponent(c.code)}`;
+      copy(link); toast('Link del cliente copiado · código ' + c.code);
+    } else if (e.target.closest('[data-cita-cancel]')) {
+      if (!confirm('¿Cancelar esta cita? El código dejará de servir.')) return;
+      await api('PATCH', `/citas/${id}`, { cancel: true }); await loadCitas();
+    } else if (e.target.closest('[data-cita-del]')) {
+      if (!confirm('¿Eliminar esta cita?')) return;
+      await api('DELETE', `/citas/${id}`); await loadCitas();
+    }
+  } catch (err) { $('#citas-error').style.color = ''; $('#citas-error').textContent = err.message; }
+});
+
 // ---------- modales genéricos ----------
 
 document.addEventListener('click', (e) => {

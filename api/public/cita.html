@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Videoatención · IIT</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="cita.css">
+</head>
+<body class="cita-page">
+  <header class="cbar">
+    <div class="brand">IIT <span>//</span></div>
+    <div class="ctitle" id="room-title">Videoatención</div>
+    <span class="cstatus" id="cita-status"></span>
+  </header>
+
+  <!-- 1) Ingreso de código -->
+  <section id="join" class="join-wrap">
+    <div class="join-card">
+      <h1>Atención en línea</h1>
+      <p class="sub">Ingrese el código de su cita para entrar a la sala.</p>
+      <label>Código de la cita</label>
+      <input id="code" autocomplete="off" spellcheck="false" placeholder="Ej. ABCD-2345" maxlength="20">
+      <label>Su nombre (opcional)</label>
+      <input id="name" autocomplete="off" placeholder="Cómo lo verá el agente" maxlength="60">
+      <button class="btn primary big" id="join-btn">Entrar a la sala</button>
+      <div class="join-msg" id="join-msg"></div>
+    </div>
+  </section>
+
+  <!-- 2) Sala de video + chat -->
+  <section id="room" class="room hidden">
+    <div class="video-area">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <video id="localVideo" autoplay playsinline muted></video>
+      <div class="media-note hidden" id="media-note"></div>
+      <div class="controls">
+        <button class="btn" id="btn-mic" title="Micrófono">🎤 Mic</button>
+        <button class="btn" id="btn-cam" title="Cámara">🎥 Cámara</button>
+        <button class="btn" id="btn-img" title="Enviar imagen">🖼 Imagen</button>
+        <input type="file" id="img-input" accept="image/*" class="hidden">
+        <button class="btn danger" id="btn-hang" title="Salir">⨯ Salir</button>
+      </div>
+    </div>
+    <aside class="chat">
+      <div class="chat-log" id="chat-log"></div>
+      <form class="chat-form" id="chat-form">
+        <input id="chat-input" autocomplete="off" placeholder="Escriba un mensaje…" maxlength="2000">
+        <button class="btn primary" type="submit">Enviar</button>
+      </form>
+    </aside>
+  </section>
+
+  <script src="cita.js"></script>
+</body>
+</html>

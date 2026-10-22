@@ -69,6 +69,7 @@
     <button class="btn small bell admin-only" id="alerts-btn" title="Alertas">🔔<span class="lbl"> Alertas</span></button>
     <button class="btn small admin-only" id="mail-btn" title="Correo saliente">📧<span class="lbl"> Correo</span></button>
     <button class="btn small staff-only" id="incidents-btn" title="Fallas de equipos">🛠<span class="lbl"> Fallas</span> <span class="badge hidden" id="incidents-badge"></span></button>
+    <button class="btn small staff-only" id="citas-btn" title="Videoatención (citas)">📹<span class="lbl"> Citas</span></button>
     <button class="btn small admin-only status-btn" id="status-btn" title="Estado del hub"><span class="dot" id="status-dot"></span><span class="lbl"> Estado</span></button>
     <button class="btn small admin-only" id="users-btn" title="Usuarios y clientes">👥<span class="lbl"> Usuarios</span></button>
     <button class="btn small user-btn" id="user-btn" title="Mi cuenta">👤<span class="lbl" id="user-label"></span></button>
@@ -582,6 +583,29 @@
     </form>
     <div class="error" id="incidents-error"></div>
     <div id="incidents-list" class="incidents-list"></div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cerrar</button></div>
+  </div>
+</div>
+
+<!-- Videoatención · Citas -->
+<div id="citas-modal" class="overlay hidden">
+  <div class="modal" style="max-width:820px">
+    <h2>Videoatención · Citas</h2>
+    <div class="sub">Salas de atención por video (cámara a cámara) + chat. El cliente entra con un código dentro de la hora de la cita. La cámara/micrófono requieren HTTPS (o abrir en 127.0.0.1 en el propio equipo); el chat funciona siempre.</div>
+    <form id="cita-new-form" autocomplete="off">
+      <div class="row">
+        <div class="field" style="flex:2"><label>Motivo / título</label><input name="title" required maxlength="160" placeholder="Soporte / consulta"></div>
+        <div class="field"><label>Cliente (nombre, opcional)</label><input name="customerName" maxlength="120"></div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Fecha y hora</label><input name="when" type="datetime-local" required></div>
+        <div class="field"><label>Duración (min)</label><input name="durationMin" type="number" min="5" max="480" value="60"></div>
+        <div class="field"><label>Código (opcional)</label><input name="code" maxlength="20" placeholder="automático" spellcheck="false" style="text-transform:uppercase"></div>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start"><button type="submit" class="btn primary">Crear cita</button></div>
+    </form>
+    <div class="error" id="citas-error"></div>
+    <div id="citas-list" class="incidents-list"></div>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cerrar</button></div>
   </div>
 </div>

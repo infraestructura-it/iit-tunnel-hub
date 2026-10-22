@@ -84,8 +84,11 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
 | `api/src/mailer.js` | Correo saliente (SMTP) sin dependencias: config en `settings['mail']`, cliente SMTP (net/tls, AUTH LOGIN, STARTTLS/TLS/none), `sendMail`, `connectionLinkEmail`; la clave nunca sale en la API |
 | `api/src/incidents.js` | Fallas/incidencias: tipos y estados, `autoOpenOffline`/`autoResolveOffline` (los llama el monitor de alertas), vista para la API. Tabla `incidents` en `db.js`; el monitor abre una falla cuando un equipo habilitado lleva fuera > gracia y la cierra al reconectar |
+| `api/src/citas.js` | Videoatención: `CitaService` (código, ventana de la cita, salas en memoria, tickets, relay de señalización WebRTC + chat). Tabla `appointments` en `db.js`. El hub solo señaliza; audio/video van punto a punto |
+| `api/public/cita.html`, `cita.js`, `cita.css` | Página pública de la sala: ingreso por código → WebRTC cámara a cámara + chat + envío de imagen. Cámara/micrófono requieren HTTPS o 127.0.0.1; el chat funciona en http |
+| `test/cita-relay.js` | Cliente de prueba de la sala (dos participantes): verifica el relay de señalización y chat |
 | `test/mock-smtp.js` | Servidor SMTP simulado para las pruebas (EHLO/AUTH/MAIL/RCPT/DATA; guarda cada correo como línea JSON) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (260 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (270 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -119,6 +122,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Correo saliente (SMTP)**: la clave del SMTP es un secreto — nunca se devuelve en la API (`GET /api/mail/settings` solo da `passSet`), `pass` vacío conserva la actual y `null` la borra. Configurar el correo y enviar el link de un equipo es solo `staff`/`admin` según la ruta. El link que se envía es la URL del panel (`remoto.html?m=…&s=…`): **no** lleva ticket ni credenciales; el destinatario debe iniciar sesión.
 - **Fallas (incidencias)**: `incidents` guarda el listado para gestionar y luego exportar a iit-ordenes-servicio (`order_ref`). El monitor de alertas abre una falla `equipo_fuera` cuando un equipo **habilitado** lleva fuera más de la gracia (idempotente: una abierta por equipo) y la marca `resuelta` al reconectar; las deshabilitadas o nunca vistas no abren falla. `/api/incidents` respeta la visibilidad por cliente (técnico solo ve las de sus clientes); crear/cambiar es `staff` y exige poder operar la máquina. Estados: `abierta → en_proceso → resuelta → exportada` (reabrir vuelve a `abierta`).
+- **Citas (videoatención)**: `appointments` guarda la cita con un `code` (passcode re-mostrable, como un PIN de reunión), ventana `[starts_at - 10min, ends_at]` y estado calculado (`programada/en_curso/finalizada/cancelada`). El cliente entra por `POST /api/citas/join` (público, límite 10 intentos/IP/15min) solo dentro de la ventana; el agente abre la sala con `POST /api/citas/:id/sala` (staff). El WS `/api/citas/ws?t=<ticket>` (ticket de un uso, 120 s) empareja máx. 2 y **relaya** señalización/chat/imagen — el audio/video van P2P (necesitan HTTPS o 127.0.0.1; sin TURN, tras NAT puede fallar el video). Crear/ver/editar citas respeta visibilidad (admin todas; técnico las que creó).
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
 
 ## SNMP: reglas (no romper)

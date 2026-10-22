@@ -32,6 +32,7 @@ const WS = require('./ws');
 const { RemoteService, browserKind, KINDS: REMOTE_KINDS } = require('./remote');
 const MAIL = require('./mailer');
 const INC = require('./incidents');
+const { CitaService, view: citaView, phase: citaPhase } = require('./citas');
 
 const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -226,7 +227,7 @@ function accessFor(store, u, via) {
 // ---------- rutas de la API ----------
 
 function createApi(store, frps, monitor, ai, plugin, extra = {}) {
-  const { backups, bot = {}, pluginListening = () => true, snmp = null, hub = null, remote = null } = extra;
+  const { backups, bot = {}, pluginListening = () => true, snmp = null, hub = null, remote = null, citas = null } = extra;
   const routes = [];
   /**
    * perm: 'public' (sin sesión) · 'session' (cualquier usuario, incluso con cambio de contraseña pendiente)
@@ -958,6 +959,93 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     return [200, INC.view(out, inc.machine_id ? store.getMachine(inc.machine_id) : null)];
   });
 
+  // ---------- Citas de videoatención (WebRTC) ----------
+  const citaVisible = (ctx, a) => ctx.clientIds === null || a.created_by === ctx.actor;
+
+  route('GET', '/api/citas', async (_req, _p, ctx) =>
+    [200, store.listAppointments({ visible: (a) => citaVisible(ctx, a) }).map((a) => citaView(a))], 'staff');
+
+  route('POST', '/api/citas', async (req, _p, ctx) => {
+    const body = await readJson(req);
+    const title = String(body.title || '').trim();
+    if (!title) throw M.bad('indique el motivo o título de la cita');
+    const startsAt = Math.floor(Number(body.startsAt));
+    if (!Number.isFinite(startsAt) || startsAt < 1000000000) throw M.bad('hora de la cita inválida (epoch en segundos)');
+    const durationMin = Math.min(Math.max(Number(body.durationMin) || 60, 5), 8 * 60);
+    let code;
+    if (body.code) {
+      code = citas.normalizeCode(body.code);
+      if (!code) throw M.bad('código inválido (4–20 caracteres: letras, números o guion)');
+      if (store.appointmentCodeExists(code)) throw new M.HttpError(409, 'ese código ya está en uso');
+    } else code = citas.genCode();
+    const a = store.createAppointment({
+      id: 'c_' + crypto.randomBytes(9).toString('base64url'),
+      code, title: title.slice(0, 160),
+      customerName: String(body.customerName || '').slice(0, 120),
+      startsAt, endsAt: startsAt + durationMin * 60, createdBy: ctx.actor,
+    });
+    store.event(null, 'cita_creada', `${title.slice(0, 80)} (${a.id})`, 0);
+    return [201, { ...citaView(a, { withCode: true }), url: `${E.baseUrl(req, config)}/cita.html` }];
+  }, 'staff');
+
+  route('GET', '/api/citas/:id', async (req, p, ctx) => {
+    const a = store.getAppointment(p.id);
+    if (!a || !citaVisible(ctx, a)) throw new M.HttpError(404, 'no existe la cita');
+    return [200, { ...citaView(a, { withCode: true }), url: `${E.baseUrl(req, config)}/cita.html` }];
+  }, 'staff');
+
+  route('PATCH', '/api/citas/:id', async (req, p, ctx) => {
+    const a = store.getAppointment(p.id);
+    if (!a || !citaVisible(ctx, a)) throw new M.HttpError(404, 'no existe la cita');
+    const body = await readJson(req);
+    const fields = {};
+    if (body.title !== undefined) { const t = String(body.title).trim(); if (t) fields.title = t.slice(0, 160); }
+    if (body.customerName !== undefined) fields.customer_name = String(body.customerName).slice(0, 120);
+    if (body.startsAt !== undefined) {
+      const s = Math.floor(Number(body.startsAt));
+      if (!Number.isFinite(s) || s < 1000000000) throw M.bad('hora inválida');
+      fields.starts_at = s; fields.ends_at = s + (a.ends_at - a.starts_at);
+    }
+    if (body.durationMin !== undefined) {
+      const d = Math.min(Math.max(Number(body.durationMin) || 60, 5), 8 * 60);
+      fields.ends_at = (fields.starts_at ?? a.starts_at) + d * 60;
+    }
+    if (body.cancel === true) fields.cancelled_at = Math.floor(Date.now() / 1000);
+    if (body.cancel === false) fields.cancelled_at = null;
+    const out = store.updateAppointment(a.id, fields);
+    store.event(null, 'cita_actualizada', `${out.id}${body.cancel === true ? ' · cancelada' : ''}`, 0);
+    return [200, citaView(out, { withCode: true })];
+  }, 'staff');
+
+  route('DELETE', '/api/citas/:id', async (_req, p, ctx) => {
+    const a = store.getAppointment(p.id);
+    if (!a || !citaVisible(ctx, a)) throw new M.HttpError(404, 'no existe la cita');
+    store.deleteAppointment(a.id);
+    store.event(null, 'cita_eliminada', a.id, 0);
+    return [200, { deleted: true }];
+  }, 'staff');
+
+  // Ticket del agente (staff ya autenticado) para abrir la sala sin código
+  route('POST', '/api/citas/:id/sala', async (_req, p, ctx) => {
+    const a = store.getAppointment(p.id);
+    if (!a || !citaVisible(ctx, a)) throw new M.HttpError(404, 'no existe la cita');
+    if (citaPhase(a) === 'cancelada') throw new M.HttpError(409, 'la cita fue cancelada');
+    return [200, { ticket: citas.staffTicket(a, ctx.actor), ws: '/api/citas/ws', cita: citaView(a), phase: citaPhase(a) }];
+  }, 'staff');
+
+  // El cliente entra con el código (público, con límite por IP y ventana de la cita)
+  route('POST', '/api/citas/join', async (req) => {
+    const body = await readJson(req);
+    try {
+      const { ticket, cita } = citas.joinByCode(body.code, clientIp(req), body.name);
+      return [200, { ticket, ws: '/api/citas/ws', cita }];
+    } catch (e) {
+      const out = { error: e.message };
+      if (e.startsAt) out.startsAt = e.startsAt;
+      return [e.status || 400, out];
+    }
+  }, 'public');
+
   // ---------- sesión y cuenta propia ----------
 
   const secureCookie = (req) => config.cookieSecure || req.headers['x-forwarded-proto'] === 'https';
@@ -1457,6 +1545,7 @@ function main() {
   const bot = new TelegramBot({ store, ai, frps, apiBase: config.telegramApiBase });
   // frpc interno del hub: visita los servicios privados que el hub consulta (SNMP por sudp)
   const remote = new RemoteService({ store, config, frps });
+  const citas = new CitaService({ store, config });
   agentInfo = (id) => remote.agentInfo(id);
   const hubFrpc = new HubFrpc({
     config, root: path.join(__dirname, '..', '..'),
@@ -1487,7 +1576,7 @@ function main() {
     notify: (alert) => monitor.notify(alert),
   });
   let pluginUp = false;
-  const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp, snmp: snmpMon, hub: hubFrpc, remote });
+  const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp, snmp: snmpMon, hub: hubFrpc, remote, citas });
 
   const app = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
@@ -1518,6 +1607,19 @@ function main() {
       const ws = WS.accept(req, socket, { protocols: [] });
       if (!ws) return;
       remote.attachAgent(ws, m.id, { version: req.headers['x-iit-version'] || '', ip });
+      return;
+    }
+    // Sala de videoatención (cita): señalización WebRTC + chat; entra con un ticket (del código o del agente)
+    if (u.pathname === '/api/citas/ws') {
+      const origin = req.headers.origin;
+      const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+      if (origin) { let oh = ''; try { oh = new URL(origin).host; } catch {} if (oh !== host) return WS.reject(socket, 403, 'Forbidden'); }
+      const t = citas.takeTicket(u.searchParams.get('t'));
+      if (!t) return WS.reject(socket, 403, 'Forbidden');
+      if (head?.length) socket.unshift(head);
+      const ws = WS.accept(req, socket, { protocols: [] });
+      if (!ws) return;
+      citas.attach(ws, t);
       return;
     }
     if (u.pathname !== '/api/remote/ws') return WS.reject(socket, 404, 'Not Found');
