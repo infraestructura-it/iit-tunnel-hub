@@ -134,11 +134,13 @@ Ok "Archivos principales presentes"
 if (-not (Test-Path "$root\frp\frps.exe")) { Aviso "No está frp\frps.exe: ejecute .\frp.ps1 (o Defender lo borró)" }
 
 # ---------- 5. arrancar ----------
+# Prefiere iniciar-local.mio.ps1 (publicacion por ZeroTier/dominio) si existe; si no, el local 127.0.0.1
+$iniciador = if (Test-Path "$root\iniciar-local.mio.ps1") { "iniciar-local.mio.ps1" } else { "iniciar-local.ps1" }
 if ($SinIniciar) {
-  Aviso "Sin arrancar (-SinIniciar). Cuando quiera: .\iniciar-local.ps1"
+  Aviso "Sin arrancar (-SinIniciar). Cuando quiera: .\$iniciador"
 } else {
-  Paso "Arrancando (iniciar-local.ps1)"
-  & "$root\iniciar-local.ps1"
+  Paso "Arrancando ($iniciador)"
+  & "$root\$iniciador"
 
   if ($frpcPrevios -and (Test-Path "$root\frp\frpc.exe")) {
     Start-Sleep -Seconds 3   # da tiempo a que frps y el plugin del hub estén escuchando

@@ -368,6 +368,23 @@ try {
   $AgentExe  = Join-Path $Dir "iit-agente.exe"
   $AgentConf = Join-Path $Dir "agente.json"
   Stop-Agente
+  # Permisos de antivirus: el agente captura pantalla e inyecta teclado/ratón, así que
+  # Windows Defender suele marcarlo como "HackTool" y borrar el .exe. Lo excluimos ANTES de
+  # descargarlo (ruta de instalación + proceso) para que no lo ponga en cuarentena. Best-effort:
+  # necesita administrador y Defender presente; si no, no detiene la instalación.
+  if ($admin) {
+    try {
+      # $Dir ya se excluyó arriba; aquí reforzamos la exclusión POR PROCESO, que cubre la
+      # detección por comportamiento (inyección de teclado/ratón) que la exclusión por ruta no evita.
+      Add-MpPreference -ExclusionProcess "iit-agente.exe" -ErrorAction SilentlyContinue
+      # Si una instalación previa dejó el .exe en cuarentena, recuperar el equipo a estado limpio
+      Remove-MpThreat -ErrorAction SilentlyContinue
+      Ok "Antivirus: agente excluido de Windows Defender"
+    } catch {
+      Write-Host "  ! No se pudieron agregar exclusiones de Defender: $($_.Exception.Message)" -ForegroundColor Yellow
+      Write-Host "    Si el antivirus borra iit-agente.exe, agrega la exclusión a mano (ver README)." -ForegroundColor Yellow
+    }
+  }
   Invoke-WebRequest "$HubUrl/descargas/iit-agente-windows-$arch.exe" -OutFile $AgentExe
   # Si una instalación previa dejó agente.json con permisos restringidos, recuperarlo para poder reescribir
   if (Test-Path $AgentConf) { takeown /F $AgentConf 2>$null | Out-Null; icacls $AgentConf /reset 2>$null | Out-Null; Remove-Item $AgentConf -Force -ErrorAction SilentlyContinue }

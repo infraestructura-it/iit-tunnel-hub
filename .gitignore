@@ -15,6 +15,10 @@ agente/dist/
 frpc-*.toml
 instalar-*
 
+# Arranque propio (publicacion por ZeroTier/dominio): lleva el ADMIN_TOKEN
+iniciar-local.mio.ps1
+*.mio.ps1
+
 # Accesos privados (stcp): llevan claves de servicios
 accesos-*.toml
 accesos-*.sh

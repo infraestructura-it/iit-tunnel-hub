@@ -103,6 +103,8 @@ type winCap struct {
 	req          chan func()
 	quit         chan struct{}
 	deskName     string
+	deskHandle   uintptr // escritorio al que está enganchado el hilo (se cierra al cambiar)
+	blockedFlag  bool    // no se pudo enganchar al escritorio de entrada (p. ej. UAC sin privilegio SYSTEM)
 }
 
 func metric(i int) int {
@@ -140,27 +142,52 @@ func (c *winCap) worker(ready chan error) {
 	} else {
 		pSetProcessDPIAware.Call()
 	}
-	// Engancharse al escritorio que recibe la entrada (si no, BitBlt sale negro y SendInput no llega)
-	if hd, _, _ := pOpenInputDesktop.Call(0, 0, desktopAllAccess); hd != 0 {
-		pSetThreadDesktop.Call(hd)
-		c.deskName = desktopName(hd)
-		pCloseDesktop.Call(hd)
-	}
-
 	c.vx, c.vy = metric(smXVirtual), metric(smYVirtual)
 	c.w, c.h = metric(smCXVirtual), metric(smCYVirtual)
 	if c.w <= 0 || c.h <= 0 {
 		ready <- fmt.Errorf("no se pudo leer el tamaño de la pantalla")
 		return
 	}
+	c.stride = c.w * 4
+	c.ensureDesktop() // engancha el escritorio de entrada y crea el DC/DIB
+	ready <- nil
+
+	for {
+		select {
+		case f := <-c.req:
+			f()
+		case <-c.quit:
+			c.releaseGDI()
+			if c.deskHandle != 0 {
+				pCloseDesktop.Call(c.deskHandle)
+			}
+			return
+		}
+	}
+}
+
+func (c *winCap) releaseGDI() {
+	if c.bitmap != 0 {
+		pDeleteObject.Call(c.bitmap)
+		c.bitmap = 0
+	}
+	if c.memDC != 0 {
+		pDeleteDC.Call(c.memDC)
+		c.memDC = 0
+	}
+	if c.screenDC != 0 {
+		pReleaseDC.Call(0, c.screenDC)
+		c.screenDC = 0
+	}
+}
+
+func (c *winCap) createGDI() bool {
 	sdc, _, _ := pGetDC.Call(0)
 	if sdc == 0 {
-		ready <- fmt.Errorf("GetDC falló")
-		return
+		return false
 	}
 	c.screenDC = sdc
 	c.memDC, _, _ = pCreateCompatibleDC.Call(sdc)
-
 	var bi struct {
 		Size                   uint32
 		Width, Height          int32
@@ -178,32 +205,42 @@ func (c *winCap) worker(ready chan error) {
 	var bits unsafe.Pointer
 	hbm, _, _ := pCreateDIBSection.Call(c.memDC, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
 	if hbm == 0 || bits == nil {
-		ready <- fmt.Errorf("CreateDIBSection falló")
-		return
+		return false
 	}
 	c.bitmap = hbm
 	c.bits = bits
-	c.stride = c.w * 4
 	pSelectObject.Call(c.memDC, hbm)
-	ready <- nil
+	return true
+}
 
-	for {
-		select {
-		case f := <-c.req:
-			f()
-		case <-c.quit:
-			if c.bitmap != 0 {
-				pDeleteObject.Call(c.bitmap)
-			}
-			if c.memDC != 0 {
-				pDeleteDC.Call(c.memDC)
-			}
-			if c.screenDC != 0 {
-				pReleaseDC.Call(0, c.screenDC)
-			}
-			return
-		}
+// ensureDesktop engancha el hilo al escritorio de entrada ACTUAL y rehace el DC/DIB si cambió (login→sesión,
+// Default↔escritorio seguro de UAC/bloqueo). Como SYSTEM alcanza todos; sin privilegio, el escritorio seguro
+// no se puede abrir y se marca como protegido. Corre en el hilo de captura.
+func (c *winCap) ensureDesktop() {
+	hNew, _, _ := pOpenInputDesktop.Call(0, 0, desktopAllAccess)
+	if hNew == 0 {
+		c.blockedFlag = true // no se puede acceder al escritorio de entrada (p. ej. UAC sin SYSTEM)
+		return
 	}
+	name := desktopName(hNew)
+	if c.deskHandle != 0 && name == c.deskName && c.screenDC != 0 {
+		pCloseDesktop.Call(hNew)
+		c.blockedFlag = false
+		return
+	}
+	// Cambió el escritorio: soltar GDI, cambiar de escritorio, rehacer GDI
+	c.releaseGDI()
+	if r, _, _ := pSetThreadDesktop.Call(hNew); r == 0 {
+		pCloseDesktop.Call(hNew)
+		c.blockedFlag = true
+		return
+	}
+	if c.deskHandle != 0 {
+		pCloseDesktop.Call(c.deskHandle)
+	}
+	c.deskHandle = hNew
+	c.deskName = name
+	c.blockedFlag = !c.createGDI()
 }
 
 // drawCursor pinta el puntero del sistema sobre el DIB (corre en el hilo de captura).
@@ -248,6 +285,10 @@ func (c *winCap) size() (int, int) { return c.w, c.h }
 func (c *winCap) grab(dst *image.RGBA) error {
 	var ok uintptr
 	c.do(func() {
+		c.ensureDesktop() // seguir el escritorio activo (login→sesión, UAC)
+		if c.blockedFlag || c.memDC == 0 {
+			return
+		}
 		r, _, _ := pBitBlt.Call(c.memDC, 0, 0, uintptr(c.w), uintptr(c.h), c.screenDC, uintptr(int32(c.vx)), uintptr(int32(c.vy)), srccopy|captureblt)
 		ok = r
 		if r == 0 {
@@ -420,18 +461,13 @@ func (c *winCap) clipboardSet(s string) {
 	})
 }
 
-// blocked: solo se reporta protegido cuando el escritorio de entrada es uno SEGURO conocido (UAC/bloqueo).
-// Si no se puede leer, se intenta capturar igual (mejor negro que un falso "protegido").
+// blocked: se reporta protegido solo si el agente NO pudo engancharse al escritorio de entrada actual
+// (típico de UAC/bloqueo cuando no corre como SYSTEM). Como SYSTEM se engancha a todos y nunca bloquea.
 func (c *winCap) blocked() (bool, string) {
-	h, _, _ := pOpenInputDesktop.Call(0, 0, 0x0001 /*DESKTOP_READOBJECTS*/)
-	if h == 0 {
-		return false, ""
-	}
-	defer pCloseDesktop.Call(h)
-	name := desktopName(h)
-	switch name {
-	case "Winlogon", "Secure Desktop":
-		return true, "El equipo está en una pantalla protegida de Windows (" + name + "): control de cuentas de usuario o bloqueo. La verás cuando el usuario la cierre."
+	var b bool
+	c.do(func() { c.ensureDesktop(); b = c.blockedFlag })
+	if b {
+		return true, "El equipo está en una pantalla protegida de Windows (control de cuentas de usuario o bloqueo) y el agente no tiene permiso para mostrarla. Se verá cuando el usuario la cierre, o instale el agente como administrador para que la muestre."
 	}
 	return false, ""
 }

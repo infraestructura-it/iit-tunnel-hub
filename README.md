@@ -134,7 +134,13 @@ En la ventana de credenciales (al registrar, o con **Generar instalador** en el 
 | PC o servidor Windows | `instalar-<maquina>.ps1` | `powershell -ExecutionPolicy Bypass -File .\instalar-<maquina>.ps1` | Tarea programada `IIT frpc`: al encender (como administrador) o al iniciar sesión |
 
 - Para desvincular el equipo: `--desinstalar` (Linux) o `-Desinstalar` (Windows).
-- En Windows, ejecutado como administrador agrega la exclusión de Defender para su carpeta (`C:\ProgramData\iit-frpc`).
+- En Windows, ejecutado como administrador agrega la exclusión de Defender para su carpeta (`C:\ProgramData\iit-frpc`). Cuando también instala el agente de pantalla, añade una exclusión **por proceso** (`iit-agente.exe`) y recupera el `.exe` si estaba en cuarentena, porque el agente captura pantalla e inyecta teclado/ratón y Defender lo marca como "HackTool". Si no se instaló como administrador y el antivirus borra el agente, agregue las exclusiones a mano:
+  ```powershell
+  # PowerShell como administrador, en el equipo (ej. BIOMETRICO)
+  Add-MpPreference -ExclusionPath "C:\ProgramData\iit-frpc"
+  Add-MpPreference -ExclusionProcess "iit-agente.exe"
+  Remove-MpThreat        # recupera el .exe si ya estaba en cuarentena
+  ```
 - Si el servidor rechaza el token, el instalador detiene frpc y lo indica.
 - **El instalador contiene el token de la máquina**: trátelo como una contraseña.
 - Como el hub solo guarda el hash del token, **Generar instalador** crea un token nuevo; un equipo ya instalado queda desconectado hasta ejecutar el instalador nuevo.
