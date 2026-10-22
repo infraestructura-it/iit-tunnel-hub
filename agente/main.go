@@ -80,8 +80,13 @@ func main() {
 		}
 		os.Exit(probar(os.Args[2]))
 	}
-	cfgPath := flag.String("config", "/etc/iit-frpc/agente.json", "archivo de configuración")
+	cfgPath := flag.String("config", defaultConfigPath(), "archivo de configuración")
+	supervisor := flag.Bool("supervisor", false, "modo servicio: lanza un trabajador en la sesión activa (Windows)")
 	flag.Parse()
+	if *supervisor {
+		runSupervisor(*cfgPath)
+		return
+	}
 	raw, err := os.ReadFile(*cfgPath)
 	if err != nil {
 		log.Fatalf("no se pudo leer %s: %v", *cfgPath, err)

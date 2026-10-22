@@ -340,6 +340,7 @@ function startPantalla(t) {
   sock.onclose = () => done('Sesión terminada', 'Se cerró la conexión con el equipo.');
 
   const dec = new TextDecoder();
+  let blocked = false;
   async function onScreenData(data) {
     const b = new Uint8Array(data); if (!b.length) return;
     const op = b[0];
@@ -350,11 +351,13 @@ function startPantalla(t) {
       screen.w = canvas.width; screen.h = canvas.height;
       document.title = `${t.machine.name} · Pantalla · IIT Tunnel Hub`;
     } else if (op === 0x54) { // tile
+      if (blocked) { blocked = false; status('Conectado · directo (WebRTC)', 'on'); }
       const dv = new DataView(data, 1, 8);
       const x = dv.getUint16(0), y = dv.getUint16(2);
       const blob = new Blob([b.subarray(9)], { type: 'image/jpeg' });
       try { const bmp = await createImageBitmap(blob); g2d.drawImage(bmp, x, y); bmp.close?.(); } catch {}
     } else if (op === 0x42) { // bloqueado
+      blocked = true;
       status('Pantalla protegida de Windows', 'wait');
     } else if (op === 0x4b) { // portapapeles del equipo
       $('#r-clip-text').value = dec.decode(b.subarray(1));

@@ -369,16 +369,26 @@ try {
   $AgentConf = Join-Path $Dir "agente.json"
   Stop-Agente
   Invoke-WebRequest "$HubUrl/descargas/iit-agente-windows-$arch.exe" -OutFile $AgentExe
+  # Si una instalación previa dejó agente.json con permisos restringidos, recuperarlo para poder reescribir
+  if (Test-Path $AgentConf) { takeown /F $AgentConf 2>$null | Out-Null; icacls $AgentConf /reset 2>$null | Out-Null; Remove-Item $AgentConf -Force -ErrorAction SilentlyContinue }
   '{"hub":"${hubUrl}","machine":"${machine.id}","token":"${token}"}' | Set-Content -Path $AgentConf -Encoding ASCII
-  # Solo el usuario y administradores leen el token
-  icacls $AgentConf /inheritance:r /grant:r "$($env:USERNAME):(R)" "*S-1-5-32-544:(R)" /grant:r "*S-1-5-18:(R)" | Out-Null
-  $aAct = New-ScheduledTaskAction -Execute $AgentExe -Argument "-config \`"$AgentConf\`"" -WorkingDirectory $Dir
-  $aTrg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME"
-  # Interactivo: en la sesión del usuario (requisito para capturar la pantalla). Highest para alcanzar ventanas con UAC.
-  $aPrc = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+  # El token: control total para SYSTEM y Administradores (para poder reinstalar); el usuario, solo lectura
+  icacls $AgentConf /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" "$($env:USERNAME):(R)" | Out-Null
+  if ($admin) {
+    # Como SYSTEM: un supervisor lanza el trabajador en la sesión activa, con privilegio para
+    # capturar esa sesión y controlar cualquier ventana (incluidas elevadas y UAC).
+    $aAct = New-ScheduledTaskAction -Execute $AgentExe -Argument "-supervisor -config \`"$AgentConf\`"" -WorkingDirectory $Dir
+    $aTrg = New-ScheduledTaskTrigger -AtStartup
+    $aPrc = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  } else {
+    # Sin administrador: en la sesión del usuario (no alcanza ventanas elevadas ni otras sesiones).
+    $aAct = New-ScheduledTaskAction -Execute $AgentExe -Argument "-config \`"$AgentConf\`"" -WorkingDirectory $Dir
+    $aTrg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME"
+    $aPrc = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+  }
   Register-ScheduledTask -TaskName $AgentTask -Action $aAct -Trigger $aTrg -Settings $settings -Principal $aPrc -Force | Out-Null
   Start-ScheduledTask -TaskName $AgentTask
-  Ok "Agente de pantalla activo (compartir pantalla por WebRTC)"
+  Ok $(if ($admin) { "Agente de pantalla activo (servicio SYSTEM, controla la sesión activa)" } else { "Agente de pantalla activo (solo esta sesión, sin ventanas elevadas)" })
 } catch {
   Write-Host "  ! No se pudo instalar el agente de pantalla: $($_.Exception.Message)" -ForegroundColor Yellow
   Write-Host "    La pantalla por el navegador no estará disponible; el resto funciona igual." -ForegroundColor Yellow
