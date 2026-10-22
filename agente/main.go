@@ -33,7 +33,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 type config struct {
 	Hub     string `json:"hub"`     // http(s)://host:puerto del hub

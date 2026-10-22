@@ -25,7 +25,7 @@ import (
 
 const (
 	tileSize   = 128             // lado del mosaico en píxeles
-	jpegQ      = 60              // calidad JPEG de cada mosaico
+	jpegQ      = 82              // calidad JPEG de cada mosaico (texto nítido; WebRTC directo tiene ancho de banda de sobra)
 	maxFPS     = 15              // cuadros por segundo máximos
 	minFrameMs = 1000 / maxFPS   // ms mínimos entre cuadros
 	bpHigh     = 2 * 1024 * 1024 // si el buffer del canal supera esto, se espera (contrapresión)
