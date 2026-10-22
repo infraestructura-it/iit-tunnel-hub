@@ -2,13 +2,17 @@
 
 package main
 
-// Captura de pantalla e inyección de entrada en Windows, con las APIs del sistema (GDI y SendInput).
-// Corre en la sesión del usuario conectado. En el escritorio seguro (UAC, pantalla de bloqueo) la captura
-// sale en negro; se detecta y se avisa al navegador en vez de mostrar una pantalla falsa.
+// Captura de pantalla e inyección de entrada en Windows (GDI + SendInput).
+//
+// Clave: GDI (BitBlt) y SendInput van al escritorio del HILO que los llama. Una tarea programada puede
+// arrancar el agente atado a otro escritorio (el de inicio de sesión), y entonces la captura sale negra y
+// el teclado/ratón no llegan. Por eso todo el trabajo de pantalla corre en UN hilo dedicado que se engancha
+// al escritorio de entrada (OpenInputDesktop + SetThreadDesktop) y se queda ahí.
 
 import (
 	"fmt"
 	"image"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -18,27 +22,31 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 
-	pGetSystemMetrics            = user32.NewProc("GetSystemMetrics")
-	pGetDC                       = user32.NewProc("GetDC")
-	pReleaseDC                   = user32.NewProc("ReleaseDC")
-	pSendInput                   = user32.NewProc("SendInput")
-	pSetProcessDPIAware          = user32.NewProc("SetProcessDPIAware")
-	pSetProcessDpiAwarenessCtx   = user32.NewProc("SetProcessDpiAwarenessContext")
-	pOpenInputDesktop            = user32.NewProc("OpenInputDesktop")
-	pGetUserObjectInformationW   = user32.NewProc("GetUserObjectInformationW")
-	pCloseDesktop                = user32.NewProc("CloseDesktop")
-	pOpenClipboard               = user32.NewProc("OpenClipboard")
-	pCloseClipboard              = user32.NewProc("CloseClipboard")
-	pGetClipboardData            = user32.NewProc("GetClipboardData")
-	pSetClipboardData            = user32.NewProc("SetClipboardData")
-	pEmptyClipboard              = user32.NewProc("EmptyClipboard")
+	pGetSystemMetrics          = user32.NewProc("GetSystemMetrics")
+	pGetDC                     = user32.NewProc("GetDC")
+	pReleaseDC                 = user32.NewProc("ReleaseDC")
+	pSendInput                 = user32.NewProc("SendInput")
+	pSetProcessDPIAware        = user32.NewProc("SetProcessDPIAware")
+	pSetProcessDpiAwarenessCtx = user32.NewProc("SetProcessDpiAwarenessContext")
+	pOpenInputDesktop          = user32.NewProc("OpenInputDesktop")
+	pSetThreadDesktop          = user32.NewProc("SetThreadDesktop")
+	pGetUserObjectInformationW = user32.NewProc("GetUserObjectInformationW")
+	pCloseDesktop              = user32.NewProc("CloseDesktop")
+	pGetCursorInfo             = user32.NewProc("GetCursorInfo")
+	pGetIconInfo               = user32.NewProc("GetIconInfo")
+	pDrawIconEx                = user32.NewProc("DrawIconEx")
+	pOpenClipboard             = user32.NewProc("OpenClipboard")
+	pCloseClipboard            = user32.NewProc("CloseClipboard")
+	pGetClipboardData          = user32.NewProc("GetClipboardData")
+	pSetClipboardData          = user32.NewProc("SetClipboardData")
+	pEmptyClipboard            = user32.NewProc("EmptyClipboard")
 
-	pCreateCompatibleDC     = gdi32.NewProc("CreateCompatibleDC")
-	pCreateDIBSection       = gdi32.NewProc("CreateDIBSection")
-	pSelectObject           = gdi32.NewProc("SelectObject")
-	pBitBlt                 = gdi32.NewProc("BitBlt")
-	pDeleteObject           = gdi32.NewProc("DeleteObject")
-	pDeleteDC               = gdi32.NewProc("DeleteDC")
+	pCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
+	pCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
+	pSelectObject       = gdi32.NewProc("SelectObject")
+	pBitBlt             = gdi32.NewProc("BitBlt")
+	pDeleteObject       = gdi32.NewProc("DeleteObject")
+	pDeleteDC           = gdi32.NewProc("DeleteDC")
 
 	pGlobalAlloc  = kernel32.NewProc("GlobalAlloc")
 	pGlobalLock   = kernel32.NewProc("GlobalLock")
@@ -69,14 +77,18 @@ const (
 	meAbsolute   = 0x8000
 	meVirtualDsk = 0x4000
 
-	keUp        = 0x0002
-	keScancode  = 0x0008
-	keExtended  = 0x0001
-	wheelDelta  = 120
+	keUp       = 0x0002
+	keScancode = 0x0008
+	keExtended = 0x0001
+	wheelDelta = 120
 
 	cfUnicodeText = 13
 	gmemMoveable  = 0x0002
 	uoiName       = 2
+
+	desktopAllAccess = 0x000F01FF // enganchar el hilo al escritorio de entrada
+	cursorShowing    = 0x0001
+	diNormal         = 0x0003
 )
 
 func tieneCapturaPantalla() bool { return true }
@@ -88,6 +100,9 @@ type winCap struct {
 	bitmap       uintptr
 	bits         unsafe.Pointer
 	stride       int
+	req          chan func()
+	quit         chan struct{}
+	deskName     string
 }
 
 func metric(i int) int {
@@ -95,29 +110,57 @@ func metric(i int) int {
 	return int(int32(r))
 }
 
+// do ejecuta f en el hilo de captura (donde está enganchado el escritorio) y espera.
+func (c *winCap) do(f func()) {
+	done := make(chan struct{})
+	select {
+	case c.req <- func() { f(); close(done) }:
+		<-done
+	case <-c.quit:
+	}
+}
+
 func newCapture() (capture, error) {
-	// DPI: coordenadas en píxeles físicos (si no, en pantallas escaladas se captura recortado)
+	c := &winCap{req: make(chan func()), quit: make(chan struct{})}
+	ready := make(chan error, 1)
+	go c.worker(ready)
+	if err := <-ready; err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// worker corre en un hilo fijo, enganchado al escritorio de entrada; ahí viven el DC, el DIB y el SendInput.
+func (c *winCap) worker(ready chan error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	if pSetProcessDpiAwarenessCtx.Find() == nil {
 		pSetProcessDpiAwarenessCtx.Call(^uintptr(3)) // PER_MONITOR_AWARE_V2 (-4)
 	} else {
 		pSetProcessDPIAware.Call()
 	}
-	c := &winCap{
-		vx: metric(smXVirtual), vy: metric(smYVirtual),
-		w: metric(smCXVirtual), h: metric(smCYVirtual),
+	// Engancharse al escritorio que recibe la entrada (si no, BitBlt sale negro y SendInput no llega)
+	if hd, _, _ := pOpenInputDesktop.Call(0, 0, desktopAllAccess); hd != 0 {
+		pSetThreadDesktop.Call(hd)
+		c.deskName = desktopName(hd)
+		pCloseDesktop.Call(hd)
 	}
+
+	c.vx, c.vy = metric(smXVirtual), metric(smYVirtual)
+	c.w, c.h = metric(smCXVirtual), metric(smCYVirtual)
 	if c.w <= 0 || c.h <= 0 {
-		return nil, fmt.Errorf("no se pudo leer el tamaño de la pantalla")
+		ready <- fmt.Errorf("no se pudo leer el tamaño de la pantalla")
+		return
 	}
 	sdc, _, _ := pGetDC.Call(0)
 	if sdc == 0 {
-		return nil, fmt.Errorf("GetDC falló")
+		ready <- fmt.Errorf("GetDC falló")
+		return
 	}
 	c.screenDC = sdc
-	mdc, _, _ := pCreateCompatibleDC.Call(sdc)
-	c.memDC = mdc
+	c.memDC, _, _ = pCreateCompatibleDC.Call(sdc)
 
-	// BITMAPINFOHEADER 32bpp, alto negativo = top-down
 	var bi struct {
 		Size                   uint32
 		Width, Height          int32
@@ -133,43 +176,105 @@ func newCapture() (capture, error) {
 	bi.BitCount = 32
 	bi.Compression = biRGB
 	var bits unsafe.Pointer
-	hbm, _, _ := pCreateDIBSection.Call(mdc, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
+	hbm, _, _ := pCreateDIBSection.Call(c.memDC, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
 	if hbm == 0 || bits == nil {
-		c.close()
-		return nil, fmt.Errorf("CreateDIBSection falló")
+		ready <- fmt.Errorf("CreateDIBSection falló")
+		return
 	}
 	c.bitmap = hbm
 	c.bits = bits
 	c.stride = c.w * 4
-	pSelectObject.Call(mdc, hbm)
-	return c, nil
+	pSelectObject.Call(c.memDC, hbm)
+	ready <- nil
+
+	for {
+		select {
+		case f := <-c.req:
+			f()
+		case <-c.quit:
+			if c.bitmap != 0 {
+				pDeleteObject.Call(c.bitmap)
+			}
+			if c.memDC != 0 {
+				pDeleteDC.Call(c.memDC)
+			}
+			if c.screenDC != 0 {
+				pReleaseDC.Call(0, c.screenDC)
+			}
+			return
+		}
+	}
+}
+
+// drawCursor pinta el puntero del sistema sobre el DIB (corre en el hilo de captura).
+func (c *winCap) drawCursor() {
+	var ci struct {
+		cbSize  uint32
+		flags   uint32
+		hCursor uintptr
+		x, y    int32
+	}
+	ci.cbSize = uint32(unsafe.Sizeof(ci))
+	if r, _, _ := pGetCursorInfo.Call(uintptr(unsafe.Pointer(&ci))); r == 0 || ci.flags&cursorShowing == 0 || ci.hCursor == 0 {
+		return
+	}
+	var ii struct {
+		fIcon            int32
+		xHot, yHot       uint32
+		hbmMask, hbmCol  uintptr
+	}
+	if r, _, _ := pGetIconInfo.Call(ci.hCursor, uintptr(unsafe.Pointer(&ii))); r != 0 {
+		if ii.hbmMask != 0 {
+			defer pDeleteObject.Call(ii.hbmMask)
+		}
+		if ii.hbmCol != 0 {
+			defer pDeleteObject.Call(ii.hbmCol)
+		}
+	}
+	x := ci.x - int32(c.vx) - int32(ii.xHot)
+	y := ci.y - int32(c.vy) - int32(ii.yHot)
+	pDrawIconEx.Call(c.memDC, uintptr(x), uintptr(y), ci.hCursor, 0, 0, 0, 0, diNormal)
+}
+
+func desktopName(hd uintptr) string {
+	var buf [64]uint16
+	var need uint32
+	pGetUserObjectInformationW.Call(hd, uoiName, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)*2), uintptr(unsafe.Pointer(&need)))
+	return syscall.UTF16ToString(buf[:])
 }
 
 func (c *winCap) size() (int, int) { return c.w, c.h }
 
 func (c *winCap) grab(dst *image.RGBA) error {
-	r, _, _ := pBitBlt.Call(c.memDC, 0, 0, uintptr(c.w), uintptr(c.h), c.screenDC, uintptr(int32(c.vx)), uintptr(int32(c.vy)), srccopy|captureblt)
-	if r == 0 {
-		return fmt.Errorf("BitBlt falló")
-	}
-	// DIB es BGRA top-down; image.RGBA quiere RGBA. Se copia fila por fila intercambiando B y R.
-	src := unsafe.Slice((*byte)(c.bits), c.h*c.stride)
-	for y := 0; y < c.h; y++ {
-		so := y * c.stride
-		do := dst.PixOffset(0, y)
-		for x := 0; x < c.w; x++ {
-			s := so + x*4
-			d := do + x*4
-			dst.Pix[d+0] = src[s+2] // R
-			dst.Pix[d+1] = src[s+1] // G
-			dst.Pix[d+2] = src[s+0] // B
-			dst.Pix[d+3] = 255
+	var ok uintptr
+	c.do(func() {
+		r, _, _ := pBitBlt.Call(c.memDC, 0, 0, uintptr(c.w), uintptr(c.h), c.screenDC, uintptr(int32(c.vx)), uintptr(int32(c.vy)), srccopy|captureblt)
+		ok = r
+		if r == 0 {
+			return
 		}
+		c.drawCursor() // GDI no captura el puntero: se dibuja encima para que se vea moverse
+		src := unsafe.Slice((*byte)(c.bits), c.h*c.stride)
+		for y := 0; y < c.h; y++ {
+			so := y * c.stride
+			do := dst.PixOffset(0, y)
+			for x := 0; x < c.w; x++ {
+				s := so + x*4
+				d := do + x*4
+				dst.Pix[d+0] = src[s+2] // R
+				dst.Pix[d+1] = src[s+1] // G
+				dst.Pix[d+2] = src[s+0] // B
+				dst.Pix[d+3] = 255
+			}
+		}
+	})
+	if ok == 0 {
+		return fmt.Errorf("BitBlt falló")
 	}
 	return nil
 }
 
-// --- inyección de entrada (SendInput) ---
+// --- inyección de entrada (SendInput), también en el hilo del escritorio ---
 
 type mouseInput struct {
 	dx, dy      int32
@@ -190,25 +295,27 @@ type inputT struct {
 	u   [32]byte // unión MOUSEINPUT/KEYBDINPUT (amd64)
 }
 
-func sendInput(in *inputT) {
-	pSendInput.Call(1, uintptr(unsafe.Pointer(in)), unsafe.Sizeof(*in))
-}
-
-// norma convierte un píxel (ya relativo al origen del escritorio virtual) a 0..65535.
 func (c *winCap) norma(x, y int) (int32, int32) {
-	den := func(n int) int { if n > 1 { return n - 1 }; return 1 }
+	den := func(n int) int {
+		if n > 1 {
+			return n - 1
+		}
+		return 1
+	}
 	return int32(x * 65535 / den(c.w)), int32(y * 65535 / den(c.h))
 }
 
 func (c *winCap) mouseEvent(flags uint32, data uint32, x, y int) {
-	var in inputT
-	in.typ = inputMouse
-	nx, ny := c.norma(x, y)
-	mi := (*mouseInput)(unsafe.Pointer(&in.u[0]))
-	mi.dx, mi.dy = nx, ny
-	mi.mouseData = data
-	mi.dwFlags = flags | meAbsolute | meVirtualDsk
-	sendInput(&in)
+	c.do(func() {
+		var in inputT
+		in.typ = inputMouse
+		nx, ny := c.norma(x, y)
+		mi := (*mouseInput)(unsafe.Pointer(&in.u[0]))
+		mi.dx, mi.dy = nx, ny
+		mi.mouseData = data
+		mi.dwFlags = flags | meAbsolute | meVirtualDsk
+		pSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
+	})
 }
 
 func (c *winCap) moveMouse(x, y int) { c.mouseEvent(meMove, 0, x, y) }
@@ -228,23 +335,23 @@ func (c *winCap) button(btn int, down bool, x, y int) {
 	c.mouseEvent(meMove|f, 0, x, y)
 }
 
-func (c *winCap) wheel(dy, x, y int) {
-	c.mouseEvent(meWheel, uint32(int32(dy*wheelDelta)), x, y)
-}
+func (c *winCap) wheel(dy, x, y int) { c.mouseEvent(meWheel, uint32(int32(dy*wheelDelta)), x, y) }
 
 func (c *winCap) key(scancode int, down, extended bool) {
-	var in inputT
-	in.typ = inputKeyboard
-	ki := (*keybdInput)(unsafe.Pointer(&in.u[0]))
-	ki.wScan = uint16(scancode)
-	ki.dwFlags = keScancode
-	if extended {
-		ki.dwFlags |= keExtended
-	}
-	if !down {
-		ki.dwFlags |= keUp
-	}
-	sendInput(&in)
+	c.do(func() {
+		var in inputT
+		in.typ = inputKeyboard
+		ki := (*keybdInput)(unsafe.Pointer(&in.u[0]))
+		ki.wScan = uint16(scancode)
+		ki.dwFlags = keScancode
+		if extended {
+			ki.dwFlags |= keExtended
+		}
+		if !down {
+			ki.dwFlags |= keUp
+		}
+		pSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
+	})
 }
 
 func pick(b bool, t, f uint32) uint32 {
@@ -257,32 +364,33 @@ func pick(b bool, t, f uint32) uint32 {
 // --- portapapeles de texto ---
 
 func (c *winCap) clipboardGet() (string, bool) {
-	if r, _, _ := pOpenClipboard.Call(0); r == 0 {
-		return "", false
-	}
-	defer pCloseClipboard.Call()
-	h, _, _ := pGetClipboardData.Call(cfUnicodeText)
-	if h == 0 {
-		return "", false
-	}
-	p, _, _ := pGlobalLock.Call(h)
-	if p == 0 {
-		return "", false
-	}
-	defer pGlobalUnlock.Call(h)
-	// UTF-16 terminado en 0
-	var u16 []uint16
-	for i := 0; ; i++ {
-		ch := *(*uint16)(unsafe.Pointer(p + uintptr(i*2)))
-		if ch == 0 {
-			break
+	var out string
+	var ok bool
+	c.do(func() {
+		if r, _, _ := pOpenClipboard.Call(0); r == 0 {
+			return
 		}
-		u16 = append(u16, ch)
-		if len(u16) > 512*1024 {
-			break
+		defer pCloseClipboard.Call()
+		h, _, _ := pGetClipboardData.Call(cfUnicodeText)
+		if h == 0 {
+			return
 		}
-	}
-	return syscall.UTF16ToString(u16), true
+		p, _, _ := pGlobalLock.Call(h)
+		if p == 0 {
+			return
+		}
+		defer pGlobalUnlock.Call(h)
+		var u16 []uint16
+		for i := 0; ; i++ {
+			ch := *(*uint16)(unsafe.Pointer(p + uintptr(i*2)))
+			if ch == 0 || len(u16) > 512*1024 {
+				break
+			}
+			u16 = append(u16, ch)
+		}
+		out, ok = syscall.UTF16ToString(u16), true
+	})
+	return out, ok
 }
 
 func (c *winCap) clipboardSet(s string) {
@@ -290,52 +398,73 @@ func (c *winCap) clipboardSet(s string) {
 	if err != nil {
 		return
 	}
-	if r, _, _ := pOpenClipboard.Call(0); r == 0 {
-		return
-	}
-	defer pCloseClipboard.Call()
-	pEmptyClipboard.Call()
-	n := uintptr(len(u16) * 2)
-	hMem, _, _ := pGlobalAlloc.Call(gmemMoveable, n)
-	if hMem == 0 {
-		return
-	}
-	p, _, _ := pGlobalLock.Call(hMem)
-	if p == 0 {
-		return
-	}
-	for i, ch := range u16 {
-		*(*uint16)(unsafe.Pointer(p + uintptr(i*2))) = ch
-	}
-	pGlobalUnlock.Call(hMem)
-	pSetClipboardData.Call(cfUnicodeText, hMem)
+	c.do(func() {
+		if r, _, _ := pOpenClipboard.Call(0); r == 0 {
+			return
+		}
+		defer pCloseClipboard.Call()
+		pEmptyClipboard.Call()
+		hMem, _, _ := pGlobalAlloc.Call(gmemMoveable, uintptr(len(u16)*2))
+		if hMem == 0 {
+			return
+		}
+		p, _, _ := pGlobalLock.Call(hMem)
+		if p == 0 {
+			return
+		}
+		for i, ch := range u16 {
+			*(*uint16)(unsafe.Pointer(p + uintptr(i*2))) = ch
+		}
+		pGlobalUnlock.Call(hMem)
+		pSetClipboardData.Call(cfUnicodeText, hMem)
+	})
 }
 
-// blocked: en el escritorio seguro (UAC, bloqueo) el escritorio de entrada no es "Default".
+// blocked: solo se reporta protegido cuando el escritorio de entrada es uno SEGURO conocido (UAC/bloqueo).
+// Si no se puede leer, se intenta capturar igual (mejor negro que un falso "protegido").
 func (c *winCap) blocked() (bool, string) {
 	h, _, _ := pOpenInputDesktop.Call(0, 0, 0x0001 /*DESKTOP_READOBJECTS*/)
 	if h == 0 {
-		return true, "El equipo está en una pantalla protegida de Windows (control de cuentas de usuario o bloqueo). La verás cuando el usuario la cierre."
+		return false, ""
 	}
 	defer pCloseDesktop.Call(h)
-	var buf [64]uint16
-	var need uint32
-	pGetUserObjectInformationW.Call(h, uoiName, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)*2), uintptr(unsafe.Pointer(&need)))
-	name := syscall.UTF16ToString(buf[:])
-	if name != "" && name != "Default" {
-		return true, "El equipo está en una pantalla protegida de Windows (" + name + "). La verás cuando el usuario la cierre."
+	name := desktopName(h)
+	switch name {
+	case "Winlogon", "Secure Desktop":
+		return true, "El equipo está en una pantalla protegida de Windows (" + name + "): control de cuentas de usuario o bloqueo. La verás cuando el usuario la cierre."
 	}
 	return false, ""
 }
 
 func (c *winCap) close() {
-	if c.bitmap != 0 {
-		pDeleteObject.Call(c.bitmap)
+	select {
+	case <-c.quit:
+	default:
+		close(c.quit)
 	}
-	if c.memDC != 0 {
-		pDeleteDC.Call(c.memDC)
+}
+
+// diagPantalla imprime en qué sesión corre el agente, cuál es la sesión de consola activa y el escritorio de
+// entrada. Sirve para ver si el agente quedó en otra sesión que la del usuario (causa típica de pantalla negra).
+var (
+	kernel32b                       = syscall.NewLazyDLL("kernel32.dll")
+	pWTSGetActiveConsoleSessionId   = kernel32b.NewProc("WTSGetActiveConsoleSessionId")
+	pProcessIdToSessionId           = kernel32b.NewProc("ProcessIdToSessionId")
+	pGetCurrentProcessId            = kernel32b.NewProc("GetCurrentProcessId")
+)
+
+func diagPantalla() {
+	pid, _, _ := pGetCurrentProcessId.Call()
+	var mySess uint32
+	pProcessIdToSessionId.Call(pid, uintptr(unsafe.Pointer(&mySess)))
+	consoleSess, _, _ := pWTSGetActiveConsoleSessionId.Call()
+	desk := "(no accesible)"
+	if h, _, _ := pOpenInputDesktop.Call(0, 0, 0x0001); h != 0 {
+		desk = desktopName(h)
+		pCloseDesktop.Call(h)
 	}
-	if c.screenDC != 0 {
-		pReleaseDC.Call(0, c.screenDC)
+	fmt.Printf("agente: sesion=%d  consola_activa=%d  escritorio_entrada=%q\n", mySess, int32(consoleSess), desk)
+	if mySess != uint32(int32(consoleSess)) {
+		fmt.Println("AVISO: el agente NO está en la sesión del usuario que ve la pantalla; por eso sale negra.")
 	}
 }

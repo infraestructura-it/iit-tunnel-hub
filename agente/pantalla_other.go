@@ -16,6 +16,8 @@ import (
 
 func tieneCapturaPantalla() bool { return os.Getenv("IIT_AGENTE_PANTALLA_TEST") == "1" }
 
+func diagPantalla() { println("diagnóstico de pantalla: solo en Windows") }
+
 func newCapture() (capture, error) {
 	return &fakeCap{w: 800, h: 480, mx: 400, my: 240, start: time.Now(), clip: "equipo-de-prueba"}, nil
 }

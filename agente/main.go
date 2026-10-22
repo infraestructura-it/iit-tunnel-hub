@@ -66,6 +66,10 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "diag" {
+		diagPantalla()
+		return
+	}
 	if len(os.Args) > 2 && os.Args[1] == "probar" {
 		modo := "rfb"
 		if len(os.Args) > 3 {
