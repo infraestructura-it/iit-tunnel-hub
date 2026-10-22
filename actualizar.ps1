@@ -57,7 +57,7 @@ Expand-Archive -Path $Zip -DestinationPath $tmp -Force
 
 # El zip puede traer los archivos en la raíz o dentro de una sola carpeta envoltorio (iit-tunnel-hub\...).
 # Puede ser completo o parcial (solo los archivos que cambiaron).
-$conocidas = 'api', 'deploy', 'frps', 'test'
+$conocidas = 'api', 'deploy', 'frps', 'test', 'agente'
 $origen = $tmp
 $hijos = @(Get-ChildItem $tmp -Force)
 if ($hijos.Count -eq 1 -and $hijos[0].PSIsContainer -and $hijos[0].Name -notin $conocidas) { $origen = $hijos[0].FullName }
