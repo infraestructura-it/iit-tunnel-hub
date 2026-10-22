@@ -8,6 +8,8 @@
 //  - Máquinas nunca conectadas, deshabilitadas o con alertas apagadas no generan avisos.
 //  - Si frps no responde, se avisa una sola vez del servidor caído y NO se marcan las máquinas como caídas.
 
+const INC = require('./incidents');
+
 const SETTINGS_KEY = 'alerts';
 const DEFAULTS = { graceSeconds: 60, telegram: { botToken: '', chatId: '' }, webhooks: [] };
 
@@ -233,6 +235,7 @@ class AlertMonitor {
             await this.notify({ type: 'machine_online', at: t, since: downSince, downtimeSeconds: downSince ? t - downSince : 0, machine: info });
           }
         }
+        INC.autoResolveOffline(this.store, m.id, t); // cierra la falla "equipo fuera" si estaba abierta
         continue;
       }
 
@@ -250,6 +253,11 @@ class AlertMonitor {
           await this.notify({ type: 'machine_offline', at: t, since: m.state_since, machine: info });
           this.#diagnose(info, m.state_since);
         }
+      }
+
+      // Falla automática "equipo fuera de línea": equipo habilitado, fuera más de la gracia (idempotente).
+      if (m.enabled && m.state !== 'online' && m.state !== 'unknown' && t - (m.state_since || t) >= grace) {
+        INC.autoOpenOffline(this.store, info, m.state_since || t);
       }
     }
   }

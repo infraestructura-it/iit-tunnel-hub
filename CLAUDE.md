@@ -83,8 +83,9 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `deploy/frpc-install.sh` | Instala frpc como servicio en una máquina Linux |
 | `deploy/node-red-alertas-whatsapp.json` | Flujo Node-RED: webhook de alertas → WhatsApp (CallMeBot) |
 | `api/src/mailer.js` | Correo saliente (SMTP) sin dependencias: config en `settings['mail']`, cliente SMTP (net/tls, AUTH LOGIN, STARTTLS/TLS/none), `sendMail`, `connectionLinkEmail`; la clave nunca sale en la API |
+| `api/src/incidents.js` | Fallas/incidencias: tipos y estados, `autoOpenOffline`/`autoResolveOffline` (los llama el monitor de alertas), vista para la API. Tabla `incidents` en `db.js`; el monitor abre una falla cuando un equipo habilitado lleva fuera > gracia y la cierra al reconectar |
 | `test/mock-smtp.js` | Servidor SMTP simulado para las pruebas (EHLO/AUTH/MAIL/RCPT/DATA; guarda cada correo como línea JSON) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (251 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (260 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -117,6 +118,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Ante error interno el plugin **rechaza** (falla cerrado). Mantenerlo así.
 - El plugin y el dashboard de frps escuchan solo en `127.0.0.1`.
 - **Correo saliente (SMTP)**: la clave del SMTP es un secreto — nunca se devuelve en la API (`GET /api/mail/settings` solo da `passSet`), `pass` vacío conserva la actual y `null` la borra. Configurar el correo y enviar el link de un equipo es solo `staff`/`admin` según la ruta. El link que se envía es la URL del panel (`remoto.html?m=…&s=…`): **no** lleva ticket ni credenciales; el destinatario debe iniciar sesión.
+- **Fallas (incidencias)**: `incidents` guarda el listado para gestionar y luego exportar a iit-ordenes-servicio (`order_ref`). El monitor de alertas abre una falla `equipo_fuera` cuando un equipo **habilitado** lleva fuera más de la gracia (idempotente: una abierta por equipo) y la marca `resuelta` al reconectar; las deshabilitadas o nunca vistas no abren falla. `/api/incidents` respeta la visibilidad por cliente (técnico solo ve las de sus clientes); crear/cambiar es `staff` y exige poder operar la máquina. Estados: `abierta → en_proceso → resuelta → exportada` (reabrir vuelve a `abierta`).
 - **Nunca commitear**: `.env`, `frp/`, `*.exe`, `frpc-*.toml` (llevan tokens), `data/`, `*.db`. Ya están en `.gitignore`.
 
 ## SNMP: reglas (no romper)

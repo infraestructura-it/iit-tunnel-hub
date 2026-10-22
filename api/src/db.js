@@ -134,6 +134,25 @@ ${SERVICES_TABLE('services')}
       decided_by       TEXT
     );
     CREATE INDEX IF NOT EXISTS ai_actions_status ON ai_actions (status, requested_at DESC);
+
+    -- Fallas / incidencias: listado de problemas de equipos (hoy: equipo fuera de línea), para
+    -- gestionar y luego exportar a iit-ordenes-servicio (order_ref guarda la referencia externa).
+    CREATE TABLE IF NOT EXISTS incidents (
+      id          TEXT PRIMARY KEY,
+      machine_id  TEXT,                                   -- puede quedar nula si se elimina la máquina
+      type        TEXT NOT NULL,                          -- equipo_fuera | manual | soporte
+      title       TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      status      TEXT NOT NULL DEFAULT 'abierta',        -- abierta | en_proceso | resuelta | exportada
+      source      TEXT NOT NULL DEFAULT 'auto',           -- auto | manual | soporte
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      resolved_at INTEGER,
+      created_by  TEXT,
+      order_ref   TEXT                                    -- referencia en iit-ordenes-servicio (futuro)
+    );
+    CREATE INDEX IF NOT EXISTS incidents_status ON incidents (status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS incidents_machine ON incidents (machine_id, status);
   `);
   migrate(db);
   db.exec(`
@@ -466,6 +485,41 @@ class Store {
       for (const e of page) if (e.machine_id && visible(e.machine_id) && out.length < n) out.push(e);
     }
     return out;
+  }
+
+  // ---------- Fallas / incidencias ----------
+  createIncident(i) {
+    const t = now();
+    this.db.prepare(`INSERT INTO incidents (id, machine_id, type, title, description, status, source, created_at, updated_at, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(i.id, i.machineId ?? null, i.type, i.title, i.description || '', i.status || 'abierta', i.source || 'auto', t, t, i.createdBy ?? null);
+    return this.getIncident(i.id);
+  }
+  getIncident(id) { return this.db.prepare('SELECT * FROM incidents WHERE id = ?').get(id) || null; }
+  findOpenIncident(machineId, type) {
+    return this.db.prepare("SELECT * FROM incidents WHERE machine_id = ? AND type = ? AND status IN ('abierta','en_proceso') ORDER BY created_at DESC LIMIT 1").get(machineId, type) || null;
+  }
+  listIncidents({ status = null, visible = null, limit = 200 } = {}) {
+    const n = Math.min(Math.max(limit, 1), 1000);
+    const rows = status
+      ? this.db.prepare('SELECT * FROM incidents WHERE status = ? ORDER BY created_at DESC LIMIT ?').all(status, n)
+      : this.db.prepare('SELECT * FROM incidents ORDER BY created_at DESC LIMIT ?').all(n);
+    if (!visible) return rows;
+    return rows.filter((r) => (r.machine_id ? visible(r.machine_id) : false));
+  }
+  updateIncident(id, fields) {
+    const allowed = ['status', 'description', 'order_ref', 'resolved_at', 'title'];
+    const sets = [], vals = [];
+    for (const k of allowed) if (k in fields) { sets.push(`${k} = ?`); vals.push(fields[k]); }
+    if (!sets.length) return this.getIncident(id);
+    sets.push('updated_at = ?'); vals.push(now());
+    vals.push(id);
+    this.db.prepare(`UPDATE incidents SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    return this.getIncident(id);
+  }
+  countOpenIncidents(visible = null) {
+    const rows = this.db.prepare("SELECT machine_id FROM incidents WHERE status IN ('abierta','en_proceso')").all();
+    return visible ? rows.filter((r) => r.machine_id && visible(r.machine_id)).length : rows.length;
   }
 
   // ---------- SNMP ----------

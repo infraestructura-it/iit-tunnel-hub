@@ -267,6 +267,14 @@ function renderSummary() {
   const bell = $('#alerts-btn');
   bell.classList.toggle('on', channels > 0);
   bell.title = channels ? `Alertas: ${[s.alerts.telegram && 'Telegram', s.alerts.webhooks && `${s.alerts.webhooks} webhook(s)`].filter(Boolean).join(' y ')} · gracia ${s.alerts.graceSeconds} s` : 'Alertas sin configurar';
+  const incOpen = s.incidents?.open || 0;
+  const incBtn = $('#incidents-btn');
+  if (incBtn) {
+    $('#incidents-badge').textContent = incOpen || '';
+    $('#incidents-badge').classList.toggle('hidden', !incOpen);
+    incBtn.classList.toggle('on', incOpen > 0);
+    incBtn.title = incOpen ? `${incOpen} falla(s) abierta(s)` : 'Fallas de equipos';
+  }
 }
 
 function filtered() {
@@ -1016,6 +1024,75 @@ $('#maillink-form').addEventListener('submit', async (e) => {
     $('#maillink-error').textContent = /no está configurado/i.test(err.message)
       ? 'El correo saliente no está configurado. Ábralo en 📧 Correo (arriba).' : err.message;
   }
+});
+
+// ---------- fallas / incidencias ----------
+
+const INC_STATUS = { abierta: 'Abierta', en_proceso: 'En proceso', resuelta: 'Resuelta', exportada: 'Exportada' };
+const INC_CLS = { abierta: 'bad', en_proceso: 'warn', resuelta: 'good', exportada: 'good' };
+const incWhen = (ts) => (ts ? new Date(ts * 1000).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' }) : '');
+
+async function openIncidents() {
+  $('#incidents-error').textContent = '';
+  $('#inc-new-form').classList.add('hidden');
+  await loadIncidents();
+  $('#incidents-modal').classList.remove('hidden');
+}
+
+async function loadIncidents() {
+  const status = $('#inc-filter').value;
+  try {
+    const list = await api('GET', '/incidents' + (status ? `?status=${status}` : ''));
+    renderIncidents(list);
+  } catch (e) { $('#incidents-error').textContent = e.message; }
+}
+
+function renderIncidents(list) {
+  if (!list.length) { $('#incidents-list').innerHTML = '<div class="chat-empty">No hay fallas con ese filtro.</div>'; return; }
+  $('#incidents-list').innerHTML = list.map((i) => `
+    <div class="incident" data-id="${esc(i.id)}">
+      <div class="inc-main">
+        <div><span class="inc-badge ${INC_CLS[i.status] || ''}">${INC_STATUS[i.status] || esc(i.status)}</span> <b>${esc(i.title)}</b></div>
+        <div class="inc-meta">${i.machine ? esc(i.machine.name) + (i.machine.client ? ' · ' + esc(i.machine.client) : '') : 'sin equipo'} · ${i.type === 'equipo_fuera' ? 'auto' : esc(i.source)} · ${incWhen(i.createdAt)}${i.resolvedAt ? ' → ' + incWhen(i.resolvedAt) : ''}</div>
+        ${i.description ? `<div class="inc-desc">${esc(i.description)}</div>` : ''}
+        ${i.orderRef ? `<div class="inc-meta">Orden de servicio: <b>${esc(i.orderRef)}</b></div>` : ''}
+      </div>
+      <div class="inc-actions">
+        ${i.status === 'abierta' ? '<button class="btn small" data-inc="en_proceso">En proceso</button>' : ''}
+        ${i.status !== 'resuelta' && i.status !== 'exportada' ? '<button class="btn small primary" data-inc="resuelta">Resolver</button>' : ''}
+        ${i.status === 'resuelta' ? '<button class="btn small" data-inc="exportada">Marcar exportada</button>' : ''}
+        ${i.status !== 'abierta' ? '<button class="btn small" data-inc="abierta">Reabrir</button>' : ''}
+        <button class="btn small" data-inc-order="${esc(i.orderRef)}" title="Referencia en órdenes de servicio">Orden…</button>
+      </div>
+    </div>`).join('');
+}
+
+async function incPatch(id, body) {
+  try { await api('PATCH', `/incidents/${encodeURIComponent(id)}`, body); await loadIncidents(); refresh(); }
+  catch (e) { $('#incidents-error').textContent = e.message; }
+}
+
+$('#incidents-btn').addEventListener('click', openIncidents);
+$('#inc-filter').addEventListener('change', loadIncidents);
+$('#inc-new-btn').addEventListener('click', () => $('#inc-new-form').classList.toggle('hidden'));
+$('#inc-new-cancel').addEventListener('click', () => $('#inc-new-form').classList.add('hidden'));
+
+$('#inc-new-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api('POST', '/incidents', { title: f.title.value.trim(), machineId: f.machineId.value.trim() || undefined, description: f.description.value.trim() });
+    f.reset(); f.classList.add('hidden'); await loadIncidents(); refresh(); toast('Falla registrada');
+  } catch (err) { $('#incidents-error').textContent = err.message; }
+});
+
+$('#incidents-list').addEventListener('click', async (e) => {
+  const row = e.target.closest('.incident'); if (!row) return;
+  const id = row.dataset.id;
+  const st = e.target.closest('[data-inc]');
+  if (st) return incPatch(id, { status: st.dataset.inc });
+  const ord = e.target.closest('[data-inc-order]');
+  if (ord) { const v = prompt('Referencia de la orden de servicio (iit-ordenes-servicio):', ord.dataset.incOrder || ''); if (v !== null) incPatch(id, { orderRef: v.trim() }); }
 });
 
 // ---------- modales genéricos ----------

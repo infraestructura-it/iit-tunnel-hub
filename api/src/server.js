@@ -31,6 +31,7 @@ const E = require('./enroll');
 const WS = require('./ws');
 const { RemoteService, browserKind, KINDS: REMOTE_KINDS } = require('./remote');
 const MAIL = require('./mailer');
+const INC = require('./incidents');
 
 const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -332,6 +333,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       ...base,
       ai: (() => { const a = ai.settings(); return { enabled: a.enabled, ready: ai.ready(), pending: ai.pending().filter((x) => ids.has(x.machine_id)).length }; })(),
       alerts: (() => { const a = A.loadSettings(store); return { telegram: !!(a.telegram.botToken && a.telegram.chatId), webhooks: a.webhooks.length, graceSeconds: a.graceSeconds }; })(),
+      incidents: { open: store.countOpenIncidents((id) => ids.has(id)) },
       frps: {
         reachable: status.reachable,
         error: status.error,
@@ -908,6 +910,53 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const ids = visibleIds(ctx);
     return [200, store.events({ machineId, limit, visible: (id) => ids.has(id) })];
   }, 'any');
+
+  // ---------- Fallas / incidencias ----------
+  const incVisible = (ctx) => { if (ctx.clientIds === null) return null; const ids = visibleIds(ctx); return (id) => ids.has(id); };
+
+  route('GET', '/api/incidents', async (req, _p, ctx) => {
+    const status = new URL(req.url, 'http://x').searchParams.get('status');
+    if (status && !INC.STATUSES.includes(status)) throw M.bad('estado inválido');
+    const rows = store.listIncidents({ status, visible: incVisible(ctx) });
+    return [200, rows.map((i) => INC.view(i, i.machine_id ? store.getMachine(i.machine_id) : null))];
+  }, 'any');
+
+  route('GET', '/api/incidents/count', async (_req, _p, ctx) => [200, { open: store.countOpenIncidents(incVisible(ctx)) }], 'any');
+
+  route('POST', '/api/incidents', async (req, _p, ctx) => {
+    const body = await readJson(req);
+    const title = String(body.title || '').trim();
+    if (!title) throw M.bad('indique un título para la falla');
+    let machineId = null;
+    if (body.machineId) machineId = mustMachine(String(body.machineId), ctx).id;
+    const inc = store.createIncident({
+      id: INC.newId(), machineId, type: 'manual', source: 'manual',
+      title: title.slice(0, 160), description: String(body.description || '').slice(0, 2000),
+      status: 'abierta', createdBy: ctx.actor,
+    });
+    store.event(machineId, 'falla_abierta', `manual: ${title.slice(0, 80)} (${inc.id})`, 0);
+    return [201, INC.view(inc, machineId ? store.getMachine(machineId) : null)];
+  });
+
+  route('PATCH', '/api/incidents/:id', async (req, p, ctx) => {
+    const inc = store.getIncident(p.id);
+    if (!inc) throw new M.HttpError(404, 'no existe la falla');
+    if (inc.machine_id) mustMachine(inc.machine_id, ctx); // 404/403 según visibilidad y permiso
+    else if (!ctx.isAdmin) throw new M.HttpError(404, 'no existe la falla');
+    const body = await readJson(req);
+    const fields = {};
+    if (body.status !== undefined) {
+      if (!INC.STATUSES.includes(body.status)) throw M.bad('estado inválido');
+      fields.status = body.status;
+      fields.resolved_at = INC.OPEN.has(body.status) ? null : (inc.resolved_at || Math.floor(Date.now() / 1000));
+    }
+    if (body.description !== undefined) fields.description = String(body.description).slice(0, 2000);
+    if (body.title !== undefined) { const t = String(body.title).trim(); if (t) fields.title = t.slice(0, 160); }
+    if (body.orderRef !== undefined) fields.order_ref = String(body.orderRef).slice(0, 80);
+    const out = store.updateIncident(inc.id, fields);
+    store.event(inc.machine_id, 'falla_actualizada', `${out.status}${out.order_ref ? ` · orden ${out.order_ref}` : ''} (${inc.id})`, 0);
+    return [200, INC.view(out, inc.machine_id ? store.getMachine(inc.machine_id) : null)];
+  });
 
   // ---------- sesión y cuenta propia ----------
 

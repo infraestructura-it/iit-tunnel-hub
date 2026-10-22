@@ -484,3 +484,16 @@ b.ko { color: var(--red); font-weight: 500; }
 .connect-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; background: transparent; border: 0; color: var(--text); padding: 8px 10px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 13px; }
 .connect-menu button:hover { background: rgba(34,211,238,.1); }
 .connect-menu small { color: var(--dim); font-size: 11px; }
+
+/* Fallas / incidencias */
+.incidents-list { max-height: 55vh; overflow-y: auto; margin: 8px 0; display: flex; flex-direction: column; gap: 8px; }
+.incident { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.incident .inc-main { min-width: 0; flex: 1; }
+.inc-meta { color: var(--dim); font-size: 12px; margin-top: 3px; }
+.inc-desc { font-size: 13px; margin-top: 4px; color: var(--fg, #c7d2e0); white-space: pre-wrap; word-break: break-word; }
+.inc-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; flex: none; }
+.inc-badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-2); margin-right: 4px; }
+.inc-badge.bad { color: var(--red); border-color: rgba(251,113,133,.4); }
+.inc-badge.warn { color: var(--amber); border-color: rgba(251,191,36,.4); }
+.inc-badge.good { color: var(--green); border-color: rgba(52,245,164,.35); }

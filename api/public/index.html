@@ -68,6 +68,7 @@
     <button class="btn small ai-btn staff-only" id="ai-btn" title="Asistente IA">🤖<span class="lbl"> IA</span> <span class="badge hidden" id="ai-badge"></span></button>
     <button class="btn small bell admin-only" id="alerts-btn" title="Alertas">🔔<span class="lbl"> Alertas</span></button>
     <button class="btn small admin-only" id="mail-btn" title="Correo saliente">📧<span class="lbl"> Correo</span></button>
+    <button class="btn small staff-only" id="incidents-btn" title="Fallas de equipos">🛠<span class="lbl"> Fallas</span> <span class="badge hidden" id="incidents-badge"></span></button>
     <button class="btn small admin-only status-btn" id="status-btn" title="Estado del hub"><span class="dot" id="status-dot"></span><span class="lbl"> Estado</span></button>
     <button class="btn small admin-only" id="users-btn" title="Usuarios y clientes">👥<span class="lbl"> Usuarios</span></button>
     <button class="btn small user-btn" id="user-btn" title="Mi cuenta">👤<span class="lbl" id="user-label"></span></button>
@@ -551,6 +552,38 @@
       <button type="submit" class="btn primary">Guardar</button>
     </div>
   </form>
+</div>
+
+<!-- Fallas / incidencias -->
+<div id="incidents-modal" class="overlay hidden">
+  <div class="modal" style="max-width:860px">
+    <h2>Fallas de equipos</h2>
+    <div class="sub">Listado de incidencias. Las de tipo "equipo fuera de línea" se abren y cierran solas; también puede registrar fallas a mano. Luego se exportan a órdenes de servicio.</div>
+    <div class="row" style="align-items:flex-end;gap:10px">
+      <div class="field"><label>Estado</label>
+        <select id="inc-filter">
+          <option value="">Todas</option>
+          <option value="abierta">Abiertas</option>
+          <option value="en_proceso">En proceso</option>
+          <option value="resuelta">Resueltas</option>
+          <option value="exportada">Exportadas</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1"></div>
+      <div class="field"><button type="button" class="btn" id="inc-new-btn">+ Falla manual</button></div>
+    </div>
+    <form id="inc-new-form" class="hidden" style="background:var(--panel,#0c1016);padding:12px;border-radius:8px;margin-bottom:10px">
+      <div class="row">
+        <div class="field" style="flex:2"><label>Título</label><input name="title" required maxlength="160" placeholder="Descripción corta de la falla"></div>
+        <div class="field"><label>Equipo (id, opcional)</label><input name="machineId" placeholder="id de máquina" spellcheck="false"></div>
+      </div>
+      <div class="field"><label>Detalle</label><textarea name="description" rows="2" maxlength="2000"></textarea></div>
+      <div class="modal-actions"><button type="button" class="btn" id="inc-new-cancel">Cancelar</button><button type="submit" class="btn primary">Crear</button></div>
+    </form>
+    <div class="error" id="incidents-error"></div>
+    <div id="incidents-list" class="incidents-list"></div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cerrar</button></div>
+  </div>
 </div>
 
 <!-- Enviar link de conexión por correo -->

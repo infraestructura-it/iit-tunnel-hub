@@ -643,6 +643,22 @@ check "destinatario inválido en el link → 400" '[ "$(api POST /machines/remot
 
 api DELETE /machines/remota >/dev/null
 
+echo "13c. Fallas / incidencias"
+api PUT /alerts/settings -d '{"graceSeconds":2}' >/dev/null
+FID=$(api POST /incidents -d "{\"machineId\":\"$ID\",\"title\":\"Pantalla azul en arranque\",\"description\":\"reinicia solo\"}" | jq -r .id)
+check "crea una falla manual (abierta)" '[ -n "$FID" ] && [ "$(api GET /incidents | jq -r "[.[]|select(.id==\"$FID\")][0].status")" = abierta ]'
+check "falla sin título → 400" '[ "$(api POST /incidents -o /dev/null -w "%{http_code}" -d "{\"title\":\"\"}")" = 400 ]'
+check "pasar a en proceso y resolver (guarda resolved_at)" 'api PATCH /incidents/$FID -d "{\"status\":\"en_proceso\"}" | jq -e ".status==\"en_proceso\"" >/dev/null && api PATCH /incidents/$FID -d "{\"status\":\"resuelta\"}" | jq -e ".status==\"resuelta\" and .resolvedAt!=null" >/dev/null'
+check "estado inválido → 400" '[ "$(api PATCH /incidents/$FID -o /dev/null -w "%{http_code}" -d "{\"status\":\"xxx\"}")" = 400 ]'
+check "guarda la referencia de orden de servicio" 'api PATCH /incidents/$FID -d "{\"orderRef\":\"OS-1042\",\"status\":\"exportada\"}" | jq -e ".orderRef==\"OS-1042\" and .status==\"exportada\"" >/dev/null'
+check "falla inexistente → 404" '[ "$(api PATCH /incidents/f_noexiste -o /dev/null -w "%{http_code}" -d "{\"status\":\"abierta\"}")" = 404 ]'
+# Automática: equipo habilitado que nunca se conecta → falla "equipo_fuera" tras la gracia
+api POST /machines -d '{"name":"Sin conectar","id":"sin-conectar","services":[{"name":"vnc","type":"stcp","localPort":5900}]}' >/dev/null
+check "equipo fuera de línea abre falla automática" 'wait_for_long "[ \"\$(api GET \"/incidents?status=abierta\" | jq \"[.[]|select(.machineId==\\\"sin-conectar\\\" and .type==\\\"equipo_fuera\\\")]|length\")\" -ge 1 ]"'
+check "el resumen cuenta las fallas abiertas (para el badge)" '[ "$(api GET /summary | jq -r ".incidents.open")" -ge 1 ]'
+check "el filtro por estado funciona" '[ "$(api GET "/incidents?status=exportada" | jq "[.[]|select(.id==\"$FID\")]|length")" = 1 ] && [ "$(api GET "/incidents?status=abierta" | jq "[.[]|select(.id==\"$FID\")]|length")" = 0 ]'
+api DELETE /machines/sin-conectar >/dev/null
+
 echo "14. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
 SNMPOK=0
 if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/snmpd ] && command -v snmpsim-command-responder >/dev/null; then SNMPOK=1; fi
