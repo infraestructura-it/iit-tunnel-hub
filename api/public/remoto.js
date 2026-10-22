@@ -240,8 +240,136 @@ function startVncRtc(t) {
   sock.onclose = () => { if (!settled) fallback('el hub cerró la señalización'); };
 }
 
-$('#r-cad').onclick = () => { if (rfb) rfb.sendCtrlAltDel(); else if (gclient) pressCombo([0xffe3, 0xffe9, 0xffff]); };
-$('#r-win').onclick = () => { pressCombo([0xffeb]); };
+// ---------- Pantalla por el agente del equipo (captura propia, WebRTC directo) ----------
+
+// KeyboardEvent.code → scancode de Windows (set 1) + bandera "extendida" (teclas grises: flechas, ctrl/alt der…)
+const SCAN = {
+  Escape: [0x01], Digit1: [0x02], Digit2: [0x03], Digit3: [0x04], Digit4: [0x05], Digit5: [0x06],
+  Digit6: [0x07], Digit7: [0x08], Digit8: [0x09], Digit9: [0x0a], Digit0: [0x0b], Minus: [0x0c], Equal: [0x0d],
+  Backspace: [0x0e], Tab: [0x0f], KeyQ: [0x10], KeyW: [0x11], KeyE: [0x12], KeyR: [0x13], KeyT: [0x14],
+  KeyY: [0x15], KeyU: [0x16], KeyI: [0x17], KeyO: [0x18], KeyP: [0x19], BracketLeft: [0x1a], BracketRight: [0x1b],
+  Enter: [0x1c], ControlLeft: [0x1d], KeyA: [0x1e], KeyS: [0x1f], KeyD: [0x20], KeyF: [0x21], KeyG: [0x22],
+  KeyH: [0x23], KeyJ: [0x24], KeyK: [0x25], KeyL: [0x26], Semicolon: [0x27], Quote: [0x28], Backquote: [0x29],
+  ShiftLeft: [0x2a], Backslash: [0x2b], KeyZ: [0x2c], KeyX: [0x2d], KeyC: [0x2e], KeyV: [0x2f], KeyB: [0x30],
+  KeyN: [0x31], KeyM: [0x32], Comma: [0x33], Period: [0x34], Slash: [0x35], ShiftRight: [0x36],
+  NumpadMultiply: [0x37], AltLeft: [0x38], Space: [0x39], CapsLock: [0x3a],
+  F1: [0x3b], F2: [0x3c], F3: [0x3d], F4: [0x3e], F5: [0x3f], F6: [0x40], F7: [0x41], F8: [0x42], F9: [0x43],
+  F10: [0x44], F11: [0x57], F12: [0x58], NumLock: [0x45], ScrollLock: [0x46],
+  Numpad7: [0x47], Numpad8: [0x48], Numpad9: [0x49], NumpadSubtract: [0x4a], Numpad4: [0x4b], Numpad5: [0x4c],
+  Numpad6: [0x4d], NumpadAdd: [0x4e], Numpad1: [0x4f], Numpad2: [0x50], Numpad3: [0x51], Numpad0: [0x52], NumpadDecimal: [0x53],
+  IntlBackslash: [0x56],
+  // Extendidas (0xE0)
+  NumpadEnter: [0x1c, 1], ControlRight: [0x1d, 1], NumpadDivide: [0x35, 1], AltRight: [0x38, 1],
+  Home: [0x47, 1], ArrowUp: [0x48, 1], PageUp: [0x49, 1], ArrowLeft: [0x4b, 1], ArrowRight: [0x4d, 1],
+  End: [0x4f, 1], ArrowDown: [0x50, 1], PageDown: [0x51, 1], Insert: [0x52, 1], Delete: [0x53, 1],
+  MetaLeft: [0x5b, 1], MetaRight: [0x5c, 1], ContextMenu: [0x5d, 1],
+};
+
+let screen = null; // { dc, send, w, h }
+
+function startPantalla(t) {
+  document.body.classList.add('kind-vnc', 'kind-pantalla');
+  status('Conectando directo (WebRTC)…');
+  const canvas = document.createElement('canvas');
+  canvas.className = 'r-canvas';
+  canvas.tabIndex = 0;
+  $('#r-screen').appendChild(canvas);
+  const g2d = canvas.getContext('2d', { alpha: false });
+  const sock = openSocket(t);
+  ws = sock;
+  let settled = false;
+  const done = (title, text) => { if (!settled) { settled = true; showMessage(title, text); } };
+  const timer = setTimeout(() => done('No se pudo conectar', 'El agente del equipo no abrió la pantalla a tiempo.'), 15000);
+
+  const send = (buf) => { try { if (screen?.dc?.readyState === 'open') screen.dc.send(buf); } catch {} };
+  // Coordenadas del ratón en píxeles de la pantalla del equipo
+  const toXY = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(canvas.width - 1, Math.round((e.clientX - r.left) * canvas.width / r.width)));
+    const y = Math.max(0, Math.min(canvas.height - 1, Math.round((e.clientY - r.top) * canvas.height / r.height)));
+    return [x, y];
+  };
+  const put2 = (dv, o, v) => dv.setUint16(o, v);
+  const mouseMsg = (op, btn, x, y) => {
+    const b = new ArrayBuffer(op === 0x6d ? 5 : 6); const dv = new DataView(b); let o = 0;
+    dv.setUint8(o++, op);
+    if (op !== 0x6d) dv.setUint8(o++, btn);
+    put2(dv, o, x); put2(dv, o + 2, y); return b;
+  };
+  canvas.addEventListener('mousemove', (e) => { const [x, y] = toXY(e); send(mouseMsg(0x6d, 0, x, y)); });
+  canvas.addEventListener('mousedown', (e) => { e.preventDefault(); canvas.focus(); const [x, y] = toXY(e); send(mouseMsg(0x64, e.button === 1 ? 1 : e.button === 2 ? 2 : 0, x, y)); });
+  canvas.addEventListener('mouseup', (e) => { const [x, y] = toXY(e); send(mouseMsg(0x75, e.button === 1 ? 1 : e.button === 2 ? 2 : 0, x, y)); });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault(); const [x, y] = toXY(e);
+    const b = new ArrayBuffer(7); const dv = new DataView(b);
+    dv.setUint8(0, 0x77); dv.setInt16(1, e.deltaY > 0 ? -1 : 1); put2(dv, 3, x); put2(dv, 5, y); send(b);
+  }, { passive: false });
+  const keyMsg = (code, down) => {
+    const sc = SCAN[code]; if (!sc) return null;
+    const b = new ArrayBuffer(5); const dv = new DataView(b);
+    dv.setUint8(0, 0x6b); dv.setUint8(1, down ? 1 : 0); put2(dv, 2, sc[0]); dv.setUint8(4, sc[1] ? 1 : 0); return b;
+  };
+  const typing = () => !$('#r-clip-panel').classList.contains('hidden') || !$('#r-msg').classList.contains('hidden');
+  const onKey = (e, down) => { if (typing() || !screen) return; const m = keyMsg(e.code, down); if (m) { e.preventDefault(); send(m); } };
+  document.addEventListener('keydown', (e) => onKey(e, true));
+  document.addEventListener('keyup', (e) => onKey(e, false));
+
+  sock.onmessage = async (ev) => {
+    if (typeof ev.data !== 'string') return;
+    let msg = {}; try { msg = JSON.parse(ev.data); } catch {}
+    try {
+      if (msg.type === 'rtc') {
+        pc = new RTCPeerConnection({ iceServers: msg.iceServers || [] });
+        const dc = pc.createDataChannel('pantalla', { ordered: true });
+        dc.binaryType = 'arraybuffer';
+        screen = { dc };
+        dc.onopen = () => { clearTimeout(timer); settled = true; status('Conectado · directo (WebRTC)', 'on'); for (const id of ['#r-cad', '#r-win', '#r-clip']) $(id).disabled = false; canvas.focus(); };
+        dc.onmessage = (m) => onScreenData(m.data);
+        pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') done('Conexión perdida', 'Se cortó la conexión directa con el equipo.'); };
+        await pc.setLocalDescription(await pc.createOffer());
+        await iceGathered(pc, 2500);
+        sock.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
+      } else if (msg.type === 'answer') {
+        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      } else if (msg.type === 'error') {
+        done('No se pudo conectar', msg.message);
+      }
+    } catch (err) { done('No se pudo conectar', err.message); }
+  };
+  sock.onclose = () => done('Sesión terminada', 'Se cerró la conexión con el equipo.');
+
+  const dec = new TextDecoder();
+  async function onScreenData(data) {
+    const b = new Uint8Array(data); if (!b.length) return;
+    const op = b[0];
+    if (op === 0x49) { // init
+      let info = {}; try { info = JSON.parse(dec.decode(b.subarray(1))); } catch {}
+      canvas.width = info.w || 800; canvas.height = info.h || 600;
+      g2d.fillStyle = '#05070b'; g2d.fillRect(0, 0, canvas.width, canvas.height);
+      screen.w = canvas.width; screen.h = canvas.height;
+      document.title = `${t.machine.name} · Pantalla · IIT Tunnel Hub`;
+    } else if (op === 0x54) { // tile
+      const dv = new DataView(data, 1, 8);
+      const x = dv.getUint16(0), y = dv.getUint16(2);
+      const blob = new Blob([b.subarray(9)], { type: 'image/jpeg' });
+      try { const bmp = await createImageBitmap(blob); g2d.drawImage(bmp, x, y); bmp.close?.(); } catch {}
+    } else if (op === 0x42) { // bloqueado
+      status('Pantalla protegida de Windows', 'wait');
+    } else if (op === 0x4b) { // portapapeles del equipo
+      $('#r-clip-text').value = dec.decode(b.subarray(1));
+    }
+  }
+
+  // Portapapeles y teclas especiales para esta pantalla
+  screenSendText = (text) => { const e = new TextEncoder().encode(text); const b = new Uint8Array(1 + e.length); b[0] = 0x70; b.set(e, 1); send(b.buffer); };
+  screenCombo = (codes) => { for (const c of codes) { const m = keyMsg(c, true); if (m) send(m); } for (const c of [...codes].reverse()) { const m = keyMsg(c, false); if (m) send(m); } };
+  window.addEventListener('beforeunload', () => { try { pc?.close(); } catch {} });
+}
+let screenSendText = null; let screenCombo = null;
+
+$('#r-cad').onclick = () => { if (rfb) rfb.sendCtrlAltDel(); else if (gclient) pressCombo([0xffe3, 0xffe9, 0xffff]); else if (screenCombo) screenCombo(['ControlLeft', 'AltLeft', 'Delete']); };
+$('#r-win').onclick = () => { if (screenCombo) screenCombo(['MetaLeft']); else pressCombo([0xffeb]); };
 $('#r-scale').onclick = () => {
   if (!rfb) return;
   rfb.scaleViewport = !rfb.scaleViewport;
@@ -256,6 +384,7 @@ $('#r-clip-send').onclick = () => {
     const w = new Guacamole.StringWriter(gclient.createClipboardStream('text/plain'));
     w.sendText(text); w.sendEnd();
   }
+  if (screenSendText) screenSendText(text);
   $('#r-clip-panel').classList.add('hidden');
 };
 document.addEventListener('click', (e) => { const id = e.target.dataset?.hide; if (id) $('#' + id).classList.add('hidden'); });
@@ -425,7 +554,8 @@ window.addEventListener('beforeunload', () => { try { rfb?.disconnect(); ws?.clo
     $('#r-kind').textContent = ` · ${t.label} · ${t.service}`;
     document.title = `${t.machine.name} · ${t.label} · IIT Tunnel Hub`;
     status('Conectando por el túnel…');
-    if (t.kind === 'rdp') startRdp(t);
+    if (t.kind === 'pantalla') startPantalla(t);
+    else if (t.kind === 'rdp') startRdp(t);
     else if (t.kind === 'vnc' && t.webrtc && window.RTCPeerConnection) startVncRtc(t);
     else if (t.kind === 'vnc') startVnc(t);
     else if (t.kind === 'ssh') startSsh(t);

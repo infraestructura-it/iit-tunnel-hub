@@ -19,7 +19,7 @@ const { Client: SshClient } = require('../deps/ssh2');
 const { URLSearchParams } = require('node:url');
 const G = require('./guac');
 
-const KINDS = { vnc: 'Pantalla (VNC)', ssh: 'Terminal (SSH)', rdp: 'Escritorio remoto (RDP)' };
+const KINDS = { vnc: 'Pantalla (VNC)', ssh: 'Terminal (SSH)', rdp: 'Escritorio remoto (RDP)', pantalla: 'Pantalla (agente)' };
 const BROWSER_KINDS = new Set(['vnc', 'ssh', 'rdp']); // RDP necesita guacd junto al hub
 const TICKET_TTL_MS = 60 * 1000;
 const MAX_SESSIONS = 20;
@@ -56,11 +56,17 @@ class RemoteService {
   attachAgent(ws, machineId, { version = '', ip = '' } = {}) {
     const old = this.agents.get(machineId);
     if (old) { try { old.ws.close(1000, 'reemplazado por otra conexión del agente'); } catch {} }
-    const a = { ws, version: String(version).slice(0, 20), ip, since: Math.floor(Date.now() / 1000), pending: new Map() };
+    const a = { ws, version: String(version).slice(0, 20), ip, since: Math.floor(Date.now() / 1000), os: '', caps: [], pending: new Map() };
     this.agents.set(machineId, a);
     ws.on('message', (data, binary) => {
       if (binary) return;
       let m; try { m = JSON.parse(data); } catch { return; }
+      if (m && m.type === 'hola') {
+        a.os = String(m.os || '').slice(0, 20);
+        a.caps = Array.isArray(m.cap) ? m.cap.map((x) => String(x).slice(0, 20)).slice(0, 8) : [];
+        if (m.version) a.version = String(m.version).slice(0, 20);
+        return;
+      }
       const h = m && a.pending.get(String(m.id || ''));
       if (h) h(m);
     });
@@ -73,10 +79,16 @@ class RemoteService {
 
   agentInfo(machineId) {
     const a = this.agents.get(machineId);
-    return a ? { online: true, version: a.version, since: a.since } : null;
+    return a ? { online: true, version: a.version, since: a.since, os: a.os, caps: a.caps } : null;
   }
 
   agentOnline(machineId) { return this.agents.has(machineId); }
+
+  /** ¿El agente del equipo puede compartir su pantalla (captura propia, hoy solo Windows)? */
+  agentCanScreen(machineId) {
+    const a = this.agents.get(machineId);
+    return !!(a && a.caps.includes('pantalla'));
+  }
 
   /** Visitantes stcp del frpc del hub para todos los servicios con acceso desde el navegador. */
   visitors() {
@@ -97,6 +109,15 @@ class RemoteService {
     for (const [k, t] of this.tickets) if (t.exp < now) this.tickets.delete(k);
     const ticket = crypto.randomBytes(24).toString('base64url');
     this.tickets.set(ticket, { machineId, serviceId: service.id, kind: browserKind(service), actor, rdp, rtc, exp: now + TICKET_TTL_MS });
+    return ticket;
+  }
+
+  /** Ticket para compartir la pantalla con el agente (sin servicio stcp): captura propia del equipo por WebRTC. */
+  createScreenTicket({ machineId, actor }) {
+    const now = Date.now();
+    for (const [k, t] of this.tickets) if (t.exp < now) this.tickets.delete(k);
+    const ticket = crypto.randomBytes(24).toString('base64url');
+    this.tickets.set(ticket, { machineId, kind: 'pantalla', actor, rtc: true, screen: true, exp: now + TICKET_TTL_MS });
     return ticket;
   }
 
@@ -121,16 +142,16 @@ class RemoteService {
 
   /** Atiende un WebSocket ya aceptado con su ticket validado. */
   attach(ws, t, { ip, run, query = '' }) {
-    const svc = this.store.listServices().find((s) => s.id === t.serviceId);
-    const m = svc && this.store.getMachine(svc.machine_id);
-    // RDP habla Guacamole también para los errores: instrucción "error" y el código de estado como motivo del cierre
     const fail = t.kind === 'rdp'
       ? (msg, status = G.STATUS.SERVER_ERROR) => { try { ws.send(G.encode('error', msg, status)); } catch {} ws.close(1000, String(status)); }
       : (msg) => { try { ws.send(JSON.stringify({ type: 'error', message: msg })); } catch {} ws.close(1011, msg.slice(0, 100)); };
-    if (!svc || !m || m.id !== t.machineId) return fail('el servicio ya no existe');
+    // Sesión de pantalla con el agente: no hay servicio stcp, el destino es el propio equipo
+    const svc = t.screen ? { name: 'pantalla', id: 0 } : this.store.listServices().find((s) => s.id === t.serviceId);
+    const m = t.screen ? this.store.getMachine(t.machineId) : (svc && this.store.getMachine(svc.machine_id));
+    if (!m || (!t.screen && (!svc || m.id !== t.machineId))) return fail('el servicio ya no existe');
     if (!m.enabled) return fail('la máquina está deshabilitada');
     if (this.sessions.size >= MAX_SESSIONS) return fail('demasiadas sesiones abiertas en el hub');
-    const port = visitorPort(this.config.remotePortBase, svc);
+    const port = t.screen ? 0 : visitorPort(this.config.remotePortBase, svc);
     if (!port && !t.rtc) return fail('el servicio no tiene puerto local en el hub');
 
     const sess = { ws, svc, m, kind: t.kind, actor: t.actor, ip, start: Date.now(), bytesIn: 0, bytesOut: 0, rtc: !!t.rtc };
@@ -147,6 +168,7 @@ class RemoteService {
     };
     // WebRTC: el fin se registra cuando el agente informa el tráfico (o a los 3 s)
     ws.on('close', () => { if (!sess.rtc) sess.end(); });
+    if (t.kind === 'pantalla') return this.#agenteRtc(sess, fail, 'pantalla', '');
     if (t.kind === 'vnc' && t.rtc) return this.#vncRtc(sess, fail);
     if (t.kind === 'vnc') return this.#vnc(sess, port, fail);
     if (t.kind === 'ssh') return this.#ssh(sess, port, fail);
@@ -183,7 +205,12 @@ class RemoteService {
 
   // VNC por WebRTC: el hub lleva la oferta del navegador al agente y la respuesta de vuelta; el resto es directo
   #vncRtc(sess, fail) {
-    const { ws, svc, m } = sess;
+    return this.#agenteRtc(sess, fail, 'rfb', `${sess.svc.local_ip || '127.0.0.1'}:${sess.svc.local_port}`);
+  }
+
+  // Señalización WebRTC con el agente del equipo. agentKind: 'rfb' (puente a VNC) o 'pantalla' (captura propia).
+  #agenteRtc(sess, fail, agentKind, target) {
+    const { ws, m } = sess;
     const id = crypto.randomBytes(9).toString('base64url');
     const agent = this.agents.get(m.id);
     if (!agent) return fail('el agente del equipo no está conectado');
@@ -207,7 +234,7 @@ class RemoteService {
         const a = this.agents.get(m.id);
         if (!a) return toPage({ type: 'error', message: 'el agente del equipo se desconectó' });
         if (a !== agent) a.pending.set(id, agent.pending.get(id));
-        a.ws.send(JSON.stringify({ type: 'offer', id, sdp: msg.sdp, target: `${svc.local_ip || '127.0.0.1'}:${svc.local_port}`, ice: this.config.webrtc.iceServers }));
+        a.ws.send(JSON.stringify({ type: 'offer', id, kind: agentKind, sdp: msg.sdp, target, ice: this.config.webrtc.iceServers }));
       }
     });
     let closing = null;

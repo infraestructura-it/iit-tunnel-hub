@@ -460,7 +460,8 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     store.event(m.id, 'instalador_generado', `${platform} · servidor ${serverAddr}`, 0);
     const grants = store.accessOfVisitor(m.id);
     const snmp = store.snmpOf(m.id);
-    const agentOpts = { hubUrl: E.baseUrl(req, config), agent: services.some((x) => browserKind(x) === 'vnc') };
+    // El agente va en Windows (pantalla propia) y en Linux con VNC (puente directo)
+    const agentOpts = { hubUrl: E.baseUrl(req, config), agent: platform === 'windows' || services.some((x) => browserKind(x) === 'vnc') };
     return [200, P.build(m, services, config.frps, body.token, serverAddr, grants.length || snmp.length ? M.accessToml(m, grants, snmp) : '', agentOpts), {
       'content-type': P.type,
       'content-disposition': `attachment; filename="instalar-${m.id}.${P.ext}"`,
@@ -494,6 +495,15 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const m = mustMachine(p.id, ctx);
     if (!remote) throw new M.HttpError(503, 'las sesiones remotas no están disponibles');
     const body = await readJson(req);
+    // Pantalla compartida por el agente del equipo (captura propia, sin servicio stcp; hoy solo Windows)
+    if (String(body.service || '') === '@pantalla') {
+      if (!m.enabled) throw new M.HttpError(409, 'la máquina está deshabilitada');
+      if (!remote.agentCanScreen(m.id)) {
+        throw new M.HttpError(409, `${m.name} no tiene el agente de pantalla conectado (se instala con código en equipos Windows)`);
+      }
+      const ticket = remote.createScreenTicket({ machineId: m.id, actor: ctx.actor });
+      return [201, { ticket, kind: 'pantalla', label: REMOTE_KINDS.pantalla, machine: { id: m.id, name: m.name }, service: 'pantalla', ws: '/api/remote/ws', webrtc: true }];
+    }
     const s = store.getService(m.id, String(body.service || ''));
     if (!s) throw new M.HttpError(404, `no existe el servicio "${body.service}"`);
     const kind = browserKind(s);
@@ -535,7 +545,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
 
   // Binarios del agente WebRTC para los instaladores (públicos: no llevan secretos)
   route('GET', '/descargas/:file', async (_req, p, _ctx, res) => {
-    if (!/^iit-agente-linux-(arm|arm64|amd64)$|^SHA256SUMS$/.test(p.file)) throw new M.HttpError(404, 'no existe');
+    if (!/^iit-agente-(linux-(arm|arm64|amd64)|windows-(amd64|arm64)\.exe)$|^SHA256SUMS$/.test(p.file)) throw new M.HttpError(404, 'no existe');
     const file = path.join(config.agentDistDir, p.file);
     let st; try { st = fs.statSync(file); } catch { throw new M.HttpError(404, 'el hub no tiene ese binario del agente (agente/compilar.sh)'); }
     res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': st.size, 'x-content-type-options': 'nosniff' });
@@ -1272,7 +1282,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const grants = store.accessOfVisitor(m.id);
     const snmpDevs = store.snmpOf(m.id);
     const svcsNow = store.servicesOf(m.id);
-    const agentOpts = { hubUrl: E.baseUrl(req, config), agent: svcsNow.some((x) => browserKind(x) === 'vnc') };
+    const agentOpts = { hubUrl: E.baseUrl(req, config), agent: platform === 'windows' || svcsNow.some((x) => browserKind(x) === 'vnc') };
     const text = P.build(m, svcsNow, config.frps, token, e.server_addr, grants.length || snmpDevs.length ? M.accessToml(m, grants, snmpDevs) : '', agentOpts);
     return [200, text, { 'content-type': 'text/plain; charset=utf-8' }];
   }, 'public');

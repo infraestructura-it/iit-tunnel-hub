@@ -11,16 +11,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -43,12 +47,15 @@ type msg struct {
 	ID       string             `json:"id,omitempty"`
 	SDP      string             `json:"sdp,omitempty"`
 	Target   string             `json:"target,omitempty"`
+	Kind     string             `json:"kind,omitempty"` // "rfb" (puente a VNC) o "pantalla" (captura del agente)
 	Ice      []webrtc.ICEServer `json:"ice,omitempty"`
 	Message  string             `json:"message,omitempty"`
 	Estado   string             `json:"estado,omitempty"`
 	BytesIn  int64              `json:"bytesIn,omitempty"`
 	BytesOut int64              `json:"bytesOut,omitempty"`
 	Version  string             `json:"version,omitempty"`
+	OS       string             `json:"os,omitempty"`  // sistema del equipo (hola)
+	Cap      []string           `json:"cap,omitempty"` // capacidades del agente, p. ej. ["pantalla"] (hola)
 }
 
 const chunk = 16 * 1024 // tamaño máximo por mensaje del canal de datos (compatible con todos los navegadores)
@@ -60,6 +67,13 @@ func main() {
 		return
 	}
 	if len(os.Args) > 2 && os.Args[1] == "probar" {
+		modo := "rfb"
+		if len(os.Args) > 3 {
+			modo = os.Args[3]
+		}
+		if modo == "pantalla" {
+			os.Exit(probarPantalla(os.Args[2]))
+		}
 		os.Exit(probar(os.Args[2]))
 	}
 	cfgPath := flag.String("config", "/etc/iit-frpc/agente.json", "archivo de configuración")
@@ -134,6 +148,8 @@ func run(cfg config) error {
 		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		_ = conn.WriteJSON(m)
 	}
+	// Se anuncia: sistema y capacidades (pantalla = captura propia, hoy solo Windows)
+	send(msg{Type: "hola", OS: runtime.GOOS, Cap: capacidades(), Version: version})
 	// Mantener viva la conexión (proxies y NAT cortan conexiones inactivas)
 	done := make(chan struct{})
 	defer close(done)
@@ -171,7 +187,7 @@ func run(cfg config) error {
 		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		switch m.Type {
 		case "offer":
-			s := &session{id: m.ID, target: m.Target, send: send, closed: make(chan struct{})}
+			s := &session{id: m.ID, target: m.Target, kind: m.Kind, send: send, closed: make(chan struct{})}
 			smu.Lock()
 			sessions[m.ID] = s
 			smu.Unlock()
@@ -194,10 +210,12 @@ func run(cfg config) error {
 type session struct {
 	id     string
 	target string
-	send   func(msg)
-	pc     *webrtc.PeerConnection
-	once   sync.Once
-	closed chan struct{}
+	kind   string // "rfb" o "pantalla"
+	send    func(msg)
+	pc      *webrtc.PeerConnection
+	once    sync.Once
+	closed  chan struct{}
+	refresh chan struct{} // sesión de pantalla: pedir cuadro completo
 }
 
 func (s *session) close() {
@@ -228,7 +246,12 @@ func (s *session) start(offer msg) {
 		s.send(msg{Type: "error", ID: s.id, Message: err.Error()})
 		s.close()
 	}
-	if err := allowedTarget(s.target); err != nil {
+	if s.kind == "pantalla" {
+		if !tieneCapturaPantalla() {
+			fail(fmt.Errorf("este equipo no puede compartir pantalla con el agente (solo Windows por ahora)"))
+			return
+		}
+	} else if err := allowedTarget(s.target); err != nil {
 		fail(err)
 		return
 	}
@@ -244,11 +267,14 @@ func (s *session) start(offer msg) {
 		}
 	})
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		if dc.Label() != "rfb" {
+		switch dc.Label() {
+		case "rfb":
+			dc.OnOpen(func() { go s.bridge(dc) })
+		case "pantalla":
+			dc.OnOpen(func() { go s.pantalla(dc) })
+		default:
 			_ = dc.Close()
-			return
 		}
-		dc.OnOpen(func() { go s.bridge(dc) })
 	})
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer.SDP}); err != nil {
 		fail(fmt.Errorf("oferta no válida: %w", err))
@@ -427,4 +453,96 @@ func probar(wsu string) int {
 			return fail("no llegó el saludo/eco por el canal (paso %d)", step)
 		}
 	}
+}
+
+// probarPantalla hace de navegador para una sesión de pantalla: canal "pantalla", recibe init y mosaicos,
+// decodifica un mosaico (JPEG) y manda un movimiento de ratón. Usado por test/e2e.sh.
+func probarPantalla(wsu string) int {
+	fail := func(f string, a ...any) int { fmt.Printf("ERROR "+f+"\n", a...); return 1 }
+	conn, _, err := websocket.DefaultDialer.Dial(wsu, nil)
+	if err != nil {
+		return fail("rechazado: %v", err)
+	}
+	defer conn.Close()
+	pc, err := newPeer(nil)
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer pc.Close()
+	ordered := true
+	dc, err := pc.CreateDataChannel("pantalla", &webrtc.DataChannelInit{Ordered: &ordered})
+	if err != nil {
+		return fail("%v", err)
+	}
+	got := make(chan []byte, 256)
+	opened := make(chan struct{})
+	dc.OnOpen(func() { close(opened) })
+	dc.OnMessage(func(m webrtc.DataChannelMessage) {
+		select {
+		case got <- m.Data:
+		default:
+		}
+	})
+	offer, _ := pc.CreateOffer(nil)
+	gathered := webrtc.GatheringCompletePromise(pc)
+	_ = pc.SetLocalDescription(offer)
+	<-gathered
+	if err := conn.WriteJSON(map[string]string{"type": "offer", "sdp": pc.LocalDescription().SDP}); err != nil {
+		return fail("%v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	for {
+		var m msg
+		if err := conn.ReadJSON(&m); err != nil {
+			return fail("sin respuesta del hub: %v", err)
+		}
+		if m.Type == "error" {
+			return fail("%s", m.Message)
+		}
+		if m.Type == "answer" {
+			if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: m.SDP}); err != nil {
+				return fail("%v", err)
+			}
+			break
+		}
+	}
+	select {
+	case <-opened:
+	case <-time.After(10 * time.Second):
+		return fail("el canal de pantalla no se abrió")
+	}
+	gotInit, gotTile := false, false
+	deadline := time.After(10 * time.Second)
+	for !gotTile {
+		select {
+		case b := <-got:
+			if len(b) == 0 {
+				continue
+			}
+			switch b[0] {
+			case opInit:
+				gotInit = true
+				// mover el ratón al centro declarado
+				var in struct{ W, H int }
+				_ = json.Unmarshal(b[1:], &in)
+				var ev [5]byte
+				ev[0] = opMove
+				binary.BigEndian.PutUint16(ev[1:], uint16(in.W/2))
+				binary.BigEndian.PutUint16(ev[3:], uint16(in.H/2))
+				_ = dc.Send(ev[:])
+			case opTile:
+				if !gotInit || len(b) < 9 {
+					continue
+				}
+				if _, err := jpeg.Decode(bytes.NewReader(b[9:])); err != nil {
+					return fail("mosaico no es JPEG válido: %v", err)
+				}
+				gotTile = true
+			}
+		case <-deadline:
+			return fail("no llegaron init+mosaicos (init=%v)", gotInit)
+		}
+	}
+	fmt.Println("OK pantalla por WebRTC: init, mosaicos JPEG y envío de entrada")
+	return 0
 }

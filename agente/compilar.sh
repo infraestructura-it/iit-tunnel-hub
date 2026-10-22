@@ -8,5 +8,7 @@ build() { echo "  $1/$2${3:+ (GOARM=$3)}"; CGO_ENABLED=0 GOOS=$1 GOARCH=$2 GOARM
 build linux arm 6 arm      # Raspberry Pi OS 32 bits (armv6/armv7)
 build linux arm64 "" arm64 # Raspberry Pi OS 64 bits
 build linux amd64 "" amd64 # PC / servidor Linux
+build windows amd64 "" amd64.exe # Windows (pantalla propia por WebRTC)
+build windows arm64 "" arm64.exe # Windows ARM
 ( cd dist && sha256sum iit-agente-* > SHA256SUMS )
 ls -la dist

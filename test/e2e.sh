@@ -599,9 +599,14 @@ if [ -x "$AGENTE" ]; then
   "$AGENTE" -config "$WORK/agente-malo.json" > "$WORK/agente-malo.log" 2>&1 & AMALO=$!; PIDS+=($AMALO)
   check "agente con token falso → rechazado y auditado" 'wait_for "grep -q \"HTTP 401\" $WORK/agente-malo.log" && [ "$(api GET /machines/remota | jq -r .agent)" = null ] && api GET "/events?machine=remota" | jq -e "any(.[]; .kind==\"agente_rechazado\")" >/dev/null'
   kill $AMALO 2>/dev/null
+  check "sin agente, compartir pantalla con @pantalla → 409" '[ "$(api POST /machines/remota/remote -o /dev/null -w "%{http_code}" -d "{\"service\":\"@pantalla\"}")" = 409 ]'
   echo "{\"hub\":\"http://127.0.0.1:$PORT\",\"machine\":\"remota\",\"token\":\"$RTOKEN\"}" > "$WORK/agente.json"
-  "$AGENTE" -config "$WORK/agente.json" > "$WORK/agente.log" 2>&1 & PIDS+=($!)
+  # IIT_AGENTE_PANTALLA_TEST habilita la pantalla sintética del agente (captura propia) para probar esa vía
+  IIT_AGENTE_PANTALLA_TEST=1 "$AGENTE" -config "$WORK/agente.json" > "$WORK/agente.log" 2>&1 & PIDS+=($!)
   check "el agente se conecta con el token de la máquina" 'wait_for "[ \"\$(api GET /machines/remota | jq -r .agent.online)\" = true ]"'
+  check "el agente anuncia sistema y capacidad de pantalla" 'wait_for "[ \"\$(api GET /machines/remota | jq -r \"(.agent.os // \\\"\\\") + \\\":\\\" + ((.agent.caps // []) | join(\\\",\\\"))\")\" = \"linux:pantalla\" ]"'
+  check "compartir pantalla con el agente se ofrece por WebRTC" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"@pantalla\"}" | jq -r "[.kind, (.webrtc|tostring)] | join(\",\")")" = "pantalla,true" ]'
+  check "pantalla del agente: init, mosaicos JPEG y envío de entrada por WebRTC" '"$AGENTE" probar "$WSU$(api POST /machines/remota/remote -d "{\"service\":\"@pantalla\"}" | jq -r .ticket)" pantalla | grep -q "^OK"'
   check "con agente, la pantalla se ofrece por WebRTC; con transport=tunnel, por el túnel" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"vnc\"}" | jq -r .webrtc)" = true ] && [ "$(api POST /machines/remota/remote -d "{\"service\":\"vnc\",\"transport\":\"tunnel\"}" | jq -r .webrtc)" = false ]'
   check "VNC por WebRTC directo: oferta, respuesta del agente, canal rfb, saludo y eco" '"$AGENTE" probar "$WSU$(api POST /machines/remota/remote -d "{\"service\":\"vnc\"}" | jq -r .ticket)" | grep -q "^OK"'
   finrtc() { api GET "/events?machine=remota" | jq -r '.[] | select(.kind=="sesion_remota_fin") | .detail' | grep "WebRTC"; }

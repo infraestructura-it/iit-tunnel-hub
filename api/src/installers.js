@@ -226,7 +226,10 @@ exit 1
 
 // ---------- Windows: PC, servidores, mini PC ----------
 
-function windowsInstaller(machine, services, frps, token, serverAddr, access = '') {
+function windowsInstaller(machine, services, frps, token, serverAddr, access = '', opts = {}) {
+  const hubUrl = /^https?:\/\/[A-Za-z0-9.:\[\]-]+$/.test(opts.hubUrl || '') ? opts.hubUrl : '';
+  const agent = !!(opts.agent && hubUrl);
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) throw new Error('token con caracteres inesperados');
   const toml = frpcToml(machine, services, frps, token, {
     serverAddr,
     certDir: '__IIT_DIR__\\certs',
@@ -254,6 +257,8 @@ $FrpVersion = "${FRP_VERSION}"
 $MachineId  = "${machine.id}"
 $Server     = "${serverAddr}:${frps.bindPort}"
 $TaskName   = "IIT frpc"
+$AgentTask  = "IIT agente"
+$HubUrl     = "${hubUrl}"
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $Dir   = if ($admin) { Join-Path $env:ProgramData "iit-frpc" } else { Join-Path $env:LOCALAPPDATA "iit-frpc" }
@@ -274,9 +279,19 @@ function Stop-Frpc {
   Start-Sleep -Milliseconds 500
 }
 
+function Stop-Agente {
+  if (Get-ScheduledTask -TaskName $AgentTask -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $AgentTask -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $AgentTask -Confirm:$false
+  }
+  Get-Process iit-agente -ErrorAction SilentlyContinue | Stop-Process -Force
+  Start-Sleep -Milliseconds 300
+}
+
 if ($Desinstalar) {
   Info "Desinstalando IIT frpc…"
   Stop-Frpc
+  Stop-Agente
   Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue
   Ok "Desinstalado. La máquina ya no se conecta al servidor."
   exit 0
@@ -345,7 +360,30 @@ if ($admin) {
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 Ok "Tarea programada '$TaskName' creada e iniciada"
-
+${agent ? `
+# Agente de pantalla (WebRTC): corre en la sesión del usuario para poder capturar la pantalla.
+# Si algo falla, no detiene la instalación: la máquina igual queda conectada por frpc.
+try {
+  Info "Instalando el agente de pantalla…"
+  $AgentExe  = Join-Path $Dir "iit-agente.exe"
+  $AgentConf = Join-Path $Dir "agente.json"
+  Stop-Agente
+  Invoke-WebRequest "$HubUrl/descargas/iit-agente-windows-$arch.exe" -OutFile $AgentExe
+  '{"hub":"${hubUrl}","machine":"${machine.id}","token":"${token}"}' | Set-Content -Path $AgentConf -Encoding ASCII
+  # Solo el usuario y administradores leen el token
+  icacls $AgentConf /inheritance:r /grant:r "$($env:USERNAME):(R)" "*S-1-5-32-544:(R)" /grant:r "*S-1-5-18:(R)" | Out-Null
+  $aAct = New-ScheduledTaskAction -Execute $AgentExe -Argument "-config \`"$AgentConf\`"" -WorkingDirectory $Dir
+  $aTrg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME"
+  # Interactivo: en la sesión del usuario (requisito para capturar la pantalla). Highest para alcanzar ventanas con UAC.
+  $aPrc = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+  Register-ScheduledTask -TaskName $AgentTask -Action $aAct -Trigger $aTrg -Settings $settings -Principal $aPrc -Force | Out-Null
+  Start-ScheduledTask -TaskName $AgentTask
+  Ok "Agente de pantalla activo (compartir pantalla por WebRTC)"
+} catch {
+  Write-Host "  ! No se pudo instalar el agente de pantalla: $($_.Exception.Message)" -ForegroundColor Yellow
+  Write-Host "    La pantalla por el navegador no estará disponible; el resto funciona igual." -ForegroundColor Yellow
+}
+` : ''}
 Info "Verificando conexión con el servidor…"
 for ($i = 0; $i -lt 15; $i++) {
   Start-Sleep -Seconds 1

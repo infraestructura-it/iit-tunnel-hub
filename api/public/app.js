@@ -363,21 +363,29 @@ document.addEventListener('click', (e) => {
 
 // ---------- sesiones remotas en el navegador (VNC / SSH) ----------
 
-const REMOTE_LABEL = { vnc: '🖥 Pantalla (VNC)', ssh: '⌨ Terminal (SSH)', rdp: '🪟 Escritorio remoto (RDP)' };
+const REMOTE_LABEL = { vnc: '🖥 Pantalla (VNC)', ssh: '⌨ Terminal (SSH)', rdp: '🪟 Escritorio remoto (RDP)', pantalla: '🖥 Pantalla (agente)' };
 const remoteServices = (m) => (m.services || []).filter((s) => s.remote && REMOTE_LABEL[s.remote]);
+// Entrada virtual "Pantalla (agente)" cuando el equipo tiene el agente de captura (hoy Windows)
+function remoteEntries(m) {
+  const list = remoteServices(m).map((s) => ({ remote: s.remote, name: s.name, localPort: s.localPort, status: s.status }));
+  if (m.agent && (m.agent.caps || []).includes('pantalla')) {
+    list.unshift({ remote: 'pantalla', name: '@pantalla', agent: true, status: 'online' });
+  }
+  return list;
+}
 /** Abre la sesión en otra pestaña (sin noopener: así hereda el token de administración si se usa). */
 function openRemote(machineId, service) {
   window.open(`remoto.html?m=${encodeURIComponent(machineId)}&s=${encodeURIComponent(service)}`, '_blank');
 }
 /** Botón "Conectar por ▾" de la tarjeta, como Raspberry Pi Connect. */
 function connectMenu(m) {
-  const list = remoteServices(m);
+  const list = remoteEntries(m);
   if (!isStaff() || !list.length) return '';
   const open = state.connectOpen === m.id;
   return `<div class="connect">
     <button class="btn small connect-btn" data-connect="${esc(m.id)}" ${m.online ? '' : 'title="La máquina está fuera de línea"'}>Conectar por ▾</button>
     ${open ? `<div class="connect-menu">${list.map((s) => `<button data-remote="${esc(s.name)}" data-machine="${esc(m.id)}">
-      <span>${REMOTE_LABEL[s.remote]}${s.remote === 'vnc' && m.agent ? ' <small style="color:var(--green)">· directo</small>' : ''}</span><small>${esc(s.name)} · :${s.localPort}${s.status === 'online' ? '' : ' · sin conectar'}</small></button>`).join('')}</div>` : ''}
+      <span>${REMOTE_LABEL[s.remote]}${(s.remote === 'vnc' && m.agent) || s.agent ? ' <small style="color:var(--green)">· directo</small>' : ''}</span><small>${s.agent ? 'captura del equipo' : esc(s.name) + ' · :' + s.localPort + (s.status === 'online' ? '' : ' · sin conectar')}</small></button>`).join('')}</div>` : ''}
   </div>`;
 }
 
