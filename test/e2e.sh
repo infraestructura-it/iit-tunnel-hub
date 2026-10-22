@@ -62,6 +62,9 @@ python3 "$WORK/recv.py" 19600 "$WORK/hooks.log" & PIDS+=($!)
 # Simuladores de la API de Claude y de Telegram, y API de una "máquina" que registra lo que recibe
 node "$ROOT/test/mock-claude.js" 19900 "$WORK/claude.log" & PIDS+=($!)
 node "$ROOT/test/mock-telegram.js" 19800 & PIDS+=($!)
+# Simulador de servidor SMTP: guarda cada correo recibido como una línea JSON
+MAIL_OUT="$WORK/smtp.log"; touch "$MAIL_OUT"
+node "$ROOT/test/mock-smtp.js" 19550 "$MAIL_OUT" & PIDS+=($!)
 cat > "$WORK/machine_api.py" <<'PY'
 import http.server, json, sys
 class H(http.server.BaseHTTPRequestHandler):
@@ -617,6 +620,27 @@ else
   echo "  (WebRTC omitido: compile el agente con agente/compilar.sh)"
 fi
 check "cada sesión queda en la actividad con su autor y duración" '[ "$(api GET "/events?machine=remota" | jq "[.[] | select(.kind==\"sesion_remota\")] | length")" -ge 1 ] && api GET "/events?machine=remota" | jq -r ".[] | select(.kind==\"sesion_remota_fin\") | .detail" | grep -q " s · "'
+echo "13b. Correo saliente (SMTP)"
+check "sin SMTP configurado, enviar prueba → 400" '[ "$(api POST /mail/test -o /dev/null -w "%{http_code}" -d "{\"to\":\"x@ej.com\"}")" = 400 ]'
+api PUT /mail/settings -d '{"host":"127.0.0.1","port":19550,"secure":"none","user":"hub@iit","pass":"claveSMTP","fromName":"Soporte IIT","fromAddr":"soporte@infraestructura-it.com"}' >/dev/null
+check "la clave SMTP no se devuelve en la API (solo passSet)" '[ "$(api GET /mail/settings | jq -r ".pass // \"no\"")" = no ] && [ "$(api GET /mail/settings | jq -r .passSet)" = true ] && [ "$(api GET /mail/settings | jq -r .configured)" = true ]'
+check "remitente inválido → 400" '[ "$(api PUT /mail/settings -o /dev/null -w "%{http_code}" -d "{\"fromAddr\":\"no-es-correo\"}")" = 400 ]'
+check "destinatario inválido en la prueba → 400" '[ "$(api POST /mail/test -o /dev/null -w "%{http_code}" -d "{\"to\":\"malo\"}")" = 400 ]'
+: > "$MAIL_OUT"
+check "envía correo de prueba por SMTP (llega al mock, autenticado)" 'api POST /mail/test -d "{\"to\":\"tecnico@ej.com\"}" | jq -e .sent >/dev/null && wait_for "grep -q tecnico@ej.com \"$MAIL_OUT\""'
+: > "$MAIL_OUT"
+check "envía por correo el link de conexión de un equipo" 'api POST /machines/remota/remote/email -d "{\"to\":\"cliente@ej.com\",\"service\":\"vnc\"}" | jq -e .sent >/dev/null && wait_for "grep -q cliente@ej.com \"$MAIL_OUT\""'
+check "el correo lleva el link remoto.html con la máquina" 'python3 -c "
+import json,base64,re
+d=json.loads(open(\"$MAIL_OUT\").read().strip().splitlines()[-1])[\"data\"]
+out=b\"\"
+for ln in d.replace(\"\r\",\"\").split(\"\n\"):
+    if re.fullmatch(r\"[A-Za-z0-9+/]{8,}={0,2}\", ln):
+        out += base64.b64decode(ln)
+import sys; sys.exit(0 if b\"remoto.html?m=remota\" in out else 1)"'
+check "el envío del link queda auditado (link_enviado)" 'api GET "/events?machine=remota" | jq -e "any(.[]; .kind==\"link_enviado\")" >/dev/null'
+check "destinatario inválido en el link → 400" '[ "$(api POST /machines/remota/remote/email -o /dev/null -w "%{http_code}" -d "{\"to\":\"malo\",\"service\":\"vnc\"}")" = 400 ]'
+
 api DELETE /machines/remota >/dev/null
 
 echo "14. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"

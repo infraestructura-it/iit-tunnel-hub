@@ -67,6 +67,7 @@
     <span class="pill" id="frps-pill"><span class="dot"></span> frps</span>
     <button class="btn small ai-btn staff-only" id="ai-btn" title="Asistente IA">🤖<span class="lbl"> IA</span> <span class="badge hidden" id="ai-badge"></span></button>
     <button class="btn small bell admin-only" id="alerts-btn" title="Alertas">🔔<span class="lbl"> Alertas</span></button>
+    <button class="btn small admin-only" id="mail-btn" title="Correo saliente">📧<span class="lbl"> Correo</span></button>
     <button class="btn small admin-only status-btn" id="status-btn" title="Estado del hub"><span class="dot" id="status-dot"></span><span class="lbl"> Estado</span></button>
     <button class="btn small admin-only" id="users-btn" title="Usuarios y clientes">👥<span class="lbl"> Usuarios</span></button>
     <button class="btn small user-btn" id="user-btn" title="Mi cuenta">👤<span class="lbl" id="user-label"></span></button>
@@ -510,6 +511,59 @@
       <button type="button" class="btn" data-close>Cancelar</button>
       <button type="button" class="btn" id="alerts-test">Guardar y enviar prueba</button>
       <button type="submit" class="btn primary">Guardar</button>
+    </div>
+  </form>
+</div>
+
+<!-- Correo saliente (SMTP) -->
+<div id="mail-modal" class="overlay hidden">
+  <form class="modal" id="mail-form" autocomplete="off">
+    <h2>Correo saliente</h2>
+    <div class="sub">Servidor SMTP para enviar por correo el link de conexión de un equipo. La clave se guarda cifrada en el hub y nunca se devuelve.</div>
+    <div class="row">
+      <div class="field" style="flex:2"><label>Servidor SMTP</label><input name="host" placeholder="smtp.gmail.com" spellcheck="false"></div>
+      <div class="field"><label>Puerto</label><input name="port" type="number" min="1" max="65535" value="587"></div>
+      <div class="field"><label>Seguridad</label>
+        <select name="secure">
+          <option value="starttls">STARTTLS (587)</option>
+          <option value="tls">TLS (465)</option>
+          <option value="none">Sin cifrar (25)</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Usuario</label><input name="user" placeholder="correo o usuario SMTP" spellcheck="false"></div>
+      <div class="field"><label>Clave</label><input name="pass" type="password" autocomplete="new-password" spellcheck="false"></div>
+    </div>
+    <label id="mail-clear-row" class="check hidden"><input type="checkbox" name="clearPass"> Quitar la clave guardada</label>
+    <div class="row">
+      <div class="field"><label>Nombre del remitente</label><input name="fromName" placeholder="Soporte IIT"></div>
+      <div class="field" style="flex:2"><label>Correo del remitente</label><input name="fromAddr" placeholder="soporte@infraestructura-it.com" spellcheck="false"></div>
+    </div>
+    <h4 class="section-title">Enviar prueba</h4>
+    <div class="row">
+      <div class="field" style="flex:2"><label>Correo de destino</label><input id="mail-test-to" placeholder="yo@miempresa.com" spellcheck="false"></div>
+      <div class="field" style="align-self:flex-end"><button type="button" class="btn" id="mail-test">Enviar prueba</button></div>
+    </div>
+    <div class="error" id="mail-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Cancelar</button>
+      <button type="submit" class="btn primary">Guardar</button>
+    </div>
+  </form>
+</div>
+
+<!-- Enviar link de conexión por correo -->
+<div id="maillink-modal" class="overlay hidden">
+  <form class="modal" id="maillink-form" autocomplete="off">
+    <h2>Enviar link por correo</h2>
+    <div class="sub" id="maillink-sub">Enviar el enlace de conexión de este equipo. El destinatario debe iniciar sesión en el panel.</div>
+    <div class="field"><label>Correo de destino</label><input name="to" placeholder="tecnico@ejemplo.com" spellcheck="false" required></div>
+    <div class="field"><label>Nota (opcional)</label><textarea name="note" rows="2" maxlength="500" placeholder="Mensaje para el destinatario"></textarea></div>
+    <div class="error" id="maillink-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Cancelar</button>
+      <button type="submit" class="btn primary">Enviar</button>
     </div>
   </form>
 </div>

@@ -30,6 +30,7 @@ const { requestContext } = require('./context');
 const E = require('./enroll');
 const WS = require('./ws');
 const { RemoteService, browserKind, KINDS: REMOTE_KINDS } = require('./remote');
+const MAIL = require('./mailer');
 
 const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -541,6 +542,36 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     return [201, { ticket, kind, label: REMOTE_KINDS[kind], machine: { id: m.id, name: m.name }, service: s.name, ws: '/api/remote/ws', webrtc: rtc }];
   });
 
+  // Envía por correo el link de conexión de un equipo (el destinatario debe iniciar sesión en el panel).
+  route('POST', '/api/machines/:id/remote/email', async (req, p, ctx) => {
+    const m = mustMachine(p.id, ctx);
+    const body = await readJson(req);
+    const to = String(body.to || '').trim();
+    if (!MAIL.EMAIL_RE.test(to)) throw M.bad('correo del destinatario inválido');
+    const svc = String(body.service || '').trim();
+    let serviceLabel = '';
+    if (svc === '@pantalla') {
+      serviceLabel = REMOTE_KINDS.pantalla;
+    } else {
+      const s = store.getService(m.id, svc);
+      if (!s) throw new M.HttpError(404, `no existe el servicio "${svc}"`);
+      const kind = browserKind(s);
+      if (!kind) throw M.bad(`"${s.name}" no admite sesión desde el navegador`);
+      serviceLabel = `${s.name} · ${REMOTE_KINDS[kind] || kind}`;
+    }
+    const url = `${E.baseUrl(req, config)}/remoto.html?m=${encodeURIComponent(m.id)}&s=${encodeURIComponent(svc)}`;
+    const note = typeof body.note === 'string' ? body.note.slice(0, 500) : '';
+    const mail = MAIL.connectionLinkEmail({ machine: m, serviceLabel, url, note });
+    try {
+      const sent = await MAIL.sendMail(store, { to, ...mail });
+      store.event(m.id, 'link_enviado', `link de conexión por correo a ${to} (${serviceLabel})`, 0);
+      return [200, { sent: true, to: sent.to }];
+    } catch (e) {
+      if (e.code === 'MAIL_NOT_CONFIGURED') throw new M.HttpError(409, 'el correo saliente no está configurado (Ajustes → Correo)');
+      throw new M.HttpError(502, `no se pudo enviar el correo: ${e.message}`);
+    }
+  });
+
   route('GET', '/api/remote/sessions', async () => [200, remote ? remote.active() : []], 'admin');
 
   // Binarios del agente WebRTC para los instaladores (públicos: no llevan secretos)
@@ -766,6 +797,27 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     const results = await monitor.notify({ type: 'test', at: Math.floor(Date.now() / 1000) });
     if (results.length === 0) throw M.bad('no hay canales configurados (Telegram o webhooks)');
     return [200, { results }];
+  }, 'admin');
+
+  // ---------- Correo saliente (SMTP) ----------
+  route('GET', '/api/mail/settings', async () => [200, MAIL.publicSettings(MAIL.loadSettings(store))], 'admin');
+
+  route('PUT', '/api/mail/settings', async (req, _p, ctx) => {
+    const s = MAIL.updateSettings(store, await readJson(req), M.bad);
+    store.event(null, 'correo_configurado', `SMTP ${s.host || '(sin host)'}:${s.port} ${s.secure} · remitente ${s.fromAddr || '(sin remitente)'}`, 0);
+    return [200, MAIL.publicSettings(s)];
+  }, 'admin');
+
+  route('POST', '/api/mail/test', async (req, _p, ctx) => {
+    const to = String((await readJson(req)).to || '').trim();
+    if (!MAIL.EMAIL_RE.test(to)) throw M.bad('indique un correo de destino válido');
+    try {
+      await MAIL.sendMail(store, { to, subject: 'Prueba de correo · IIT Tunnel Hub', text: 'Si recibe este mensaje, el correo saliente está bien configurado.\n\n— IIT Tunnel Hub' });
+      return [200, { sent: true, to }];
+    } catch (e) {
+      if (e.code === 'MAIL_NOT_CONFIGURED') throw M.bad('configure primero el servidor SMTP');
+      throw new M.HttpError(502, `no se pudo enviar: ${e.message}`);
+    }
   }, 'admin');
 
   // ---------- IA ----------

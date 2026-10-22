@@ -520,6 +520,8 @@ $('#drawer').addEventListener('click', async (e) => {
   if (acc) return accessAction(m, acc.dataset.acc, acc.dataset);
   const orem = e.target.closest('[data-open-remote]');
   if (orem) return openRemote(m.id, orem.dataset.openRemote);
+  const erem = e.target.closest('[data-email-remote]');
+  if (erem) return openMailLink(m.id, erem.dataset.emailRemote, erem.dataset.emailLabel);
   const del = e.target.closest('[data-del-svc]');
   if (del) {
     if (!confirm(`¿Eliminar el servicio "${del.dataset.delSvc}"? La máquina deberá actualizar su frpc.toml.`)) return;
@@ -587,7 +589,8 @@ function privateCell(m, s) {
       <span class="lock">🔒 Privado · sin puerto público</span>
       <div class="chips">${chips || '<span style="color:var(--dim)">Nadie tiene acceso todavía</span>'}</div>
       <div class="actions">
-        ${s.remote && REMOTE_LABEL[s.remote] && isStaff() ? `<button class="btn small primary" data-open-remote="${esc(s.name)}" title="Abrir en una pestaña del navegador">▶ ${({ vnc: 'Ver pantalla', ssh: 'Abrir terminal', rdp: 'Abrir escritorio' })[s.remote]}</button>` : ''}
+        ${s.remote && REMOTE_LABEL[s.remote] && isStaff() ? `<button class="btn small primary" data-open-remote="${esc(s.name)}" title="Abrir en una pestaña del navegador">▶ ${({ vnc: 'Ver pantalla', ssh: 'Abrir terminal', rdp: 'Abrir escritorio' })[s.remote]}</button>
+        <button class="btn small" data-email-remote="${esc(s.name)}" data-email-label="${esc(REMOTE_LABEL[s.remote])}" title="Enviar el link de conexión por correo">📧 Enviar link</button>` : ''}
         <button class="btn small primary" data-acc="grant" data-svc="${esc(m.id)}/${esc(s.name)}">+ Acceso</button>
         <button class="btn small" data-acc="rotate" data-svc="${esc(s.name)}" title="Genera una clave nueva: los visitantes deben actualizar sus accesos">Rotar clave</button>
       </div>
@@ -929,6 +932,90 @@ $('#alerts-test').addEventListener('click', async () => {
     refresh();
   } catch (err) { $('#alerts-error').textContent = err.message; }
   finally { btn.disabled = false; }
+});
+
+// ---------- configuración de correo (SMTP) ----------
+
+async function openMail() {
+  const f = $('#mail-form');
+  $('#mail-error').textContent = '';
+  try {
+    const m = await api('GET', '/mail/settings');
+    f.elements.host.value = m.host || '';
+    f.elements.port.value = m.port || 587;
+    f.elements.secure.value = m.secure || 'starttls';
+    f.elements.user.value = m.user || '';
+    f.elements.pass.value = '';
+    f.elements.pass.placeholder = m.passSet ? 'Configurada · deje vacío para conservarla' : '';
+    f.elements.clearPass.checked = false;
+    $('#mail-clear-row').classList.toggle('hidden', !m.passSet);
+    f.elements.fromName.value = m.fromName || '';
+    f.elements.fromAddr.value = m.fromAddr || '';
+    $('#mail-modal').classList.remove('hidden');
+  } catch (err) { toast(err.message, true); }
+}
+
+async function saveMail() {
+  const f = $('#mail-form');
+  const body = {
+    host: f.elements.host.value.trim(),
+    port: Number(f.elements.port.value),
+    secure: f.elements.secure.value,
+    user: f.elements.user.value.trim(),
+    fromName: f.elements.fromName.value.trim(),
+    fromAddr: f.elements.fromAddr.value.trim(),
+  };
+  if (f.elements.clearPass.checked) body.pass = null;
+  else if (f.elements.pass.value) body.pass = f.elements.pass.value;
+  return api('PUT', '/mail/settings', body);
+}
+
+$('#mail-btn').addEventListener('click', openMail);
+
+$('#mail-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#mail-error').textContent = '';
+  try { await saveMail(); $('#mail-modal').classList.add('hidden'); toast('Correo guardado'); }
+  catch (err) { $('#mail-error').textContent = err.message; }
+});
+
+$('#mail-test').addEventListener('click', async () => {
+  const btn = $('#mail-test');
+  $('#mail-error').textContent = '';
+  const to = $('#mail-test-to').value.trim();
+  if (!to) { $('#mail-error').textContent = 'Indique un correo de destino para la prueba.'; return; }
+  btn.disabled = true;
+  try { await saveMail(); await api('POST', '/mail/test', { to }); toast('Correo de prueba enviado a ' + to); }
+  catch (err) { $('#mail-error').textContent = err.message; }
+  finally { btn.disabled = false; }
+});
+
+// ---------- enviar link de conexión por correo ----------
+
+let mailLinkTarget = null;
+function openMailLink(machineId, service, label) {
+  mailLinkTarget = { machineId, service };
+  const f = $('#maillink-form');
+  f.elements.to.value = ''; f.elements.note.value = '';
+  $('#maillink-error').textContent = '';
+  $('#maillink-sub').textContent = `Enviar el enlace de conexión (${label}). El destinatario debe iniciar sesión en el panel.`;
+  $('#maillink-modal').classList.remove('hidden');
+}
+
+$('#maillink-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#maillink-error').textContent = '';
+  if (!mailLinkTarget) return;
+  const f = $('#maillink-form');
+  try {
+    const r = await api('POST', `/machines/${encodeURIComponent(mailLinkTarget.machineId)}/remote/email`,
+      { to: f.elements.to.value.trim(), service: mailLinkTarget.service, note: f.elements.note.value.trim() });
+    $('#maillink-modal').classList.add('hidden');
+    toast('Link enviado a ' + r.to);
+  } catch (err) {
+    $('#maillink-error').textContent = /no está configurado/i.test(err.message)
+      ? 'El correo saliente no está configurado. Ábralo en 📧 Correo (arriba).' : err.message;
+  }
 });
 
 // ---------- modales genéricos ----------
