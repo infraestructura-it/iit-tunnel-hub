@@ -32,7 +32,7 @@ const WS = require('./ws');
 const { RemoteService, browserKind, KINDS: REMOTE_KINDS } = require('./remote');
 const MAIL = require('./mailer');
 const INC = require('./incidents');
-const { CitaService, view: citaView, phase: citaPhase } = require('./citas');
+const { CitaService, view: citaView, callView, phase: citaPhase } = require('./citas');
 
 const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -965,6 +965,18 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
   route('GET', '/api/citas', async (_req, _p, ctx) =>
     [200, store.listAppointments({ visible: (a) => citaVisible(ctx, a) }).map((a) => citaView(a))], 'staff');
 
+  // Registro de llamadas (debe ir ANTES de GET /api/citas/:id para no confundir "calls" con un id)
+  route('GET', '/api/citas/calls', async (_req, _p, ctx) => {
+    const rows = store.listCalls();
+    const visible = (c) => {
+      if (ctx.clientIds === null) return true;
+      if (!c.appointment_id) return false;
+      const a = store.getAppointment(c.appointment_id);
+      return a ? citaVisible(ctx, a) : false;
+    };
+    return [200, rows.filter(visible).map(callView)];
+  }, 'staff');
+
   route('POST', '/api/citas', async (req, _p, ctx) => {
     const body = await readJson(req);
     const title = String(body.title || '').trim();
@@ -1031,6 +1043,25 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
     if (!a || !citaVisible(ctx, a)) throw new M.HttpError(404, 'no existe la cita');
     if (citaPhase(a) === 'cancelada') throw new M.HttpError(409, 'la cita fue cancelada');
     return [200, { ticket: citas.staffTicket(a, ctx.actor), ws: '/api/citas/ws', cita: citaView(a), phase: citaPhase(a) }];
+  }, 'staff');
+
+  // Enviar por correo el link + código de la cita al cliente
+  route('POST', '/api/citas/:id/email', async (req, p, ctx) => {
+    const a = store.getAppointment(p.id);
+    if (!a || !citaVisible(ctx, a)) throw new M.HttpError(404, 'no existe la cita');
+    const body = await readJson(req);
+    const to = String(body.to || '').trim();
+    if (!MAIL.EMAIL_RE.test(to)) throw M.bad('correo del destinatario inválido');
+    const link = `${E.baseUrl(req, config)}/cita.html?code=${encodeURIComponent(a.code)}`;
+    const mail = MAIL.citaEmail({ cita: citaView(a), link, code: a.code, note: String(body.note || '').slice(0, 500) });
+    try {
+      const sent = await MAIL.sendMail(store, { to, ...mail });
+      store.event(null, 'cita_link_enviado', `cita ${a.id} por correo a ${to}`, 0);
+      return [200, { sent: true, to: sent.to }];
+    } catch (e) {
+      if (e.code === 'MAIL_NOT_CONFIGURED') throw new M.HttpError(409, 'el correo saliente no está configurado (Ajustes → Correo)');
+      throw new M.HttpError(502, `no se pudo enviar el correo: ${e.message}`);
+    }
   }, 'staff');
 
   // El cliente entra con el código (público, con límite por IP y ventana de la cita)

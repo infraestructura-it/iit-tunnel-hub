@@ -169,6 +169,18 @@ ${SERVICES_TABLE('services')}
       created_at    INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS appointments_starts ON appointments (starts_at DESC);
+
+    -- Registro de llamadas: una fila por sesión de sala (mientras hubo gente), con el código de la cita.
+    CREATE TABLE IF NOT EXISTS call_logs (
+      id             TEXT PRIMARY KEY,
+      appointment_id TEXT,
+      code           TEXT NOT NULL,
+      started_at     INTEGER NOT NULL,
+      ended_at       INTEGER,
+      peers          INTEGER NOT NULL DEFAULT 0,   -- máximo de participantes simultáneos
+      participants   TEXT NOT NULL DEFAULT '[]'    -- [{role,name,at}] de quienes entraron
+    );
+    CREATE INDEX IF NOT EXISTS call_logs_started ON call_logs (started_at DESC);
   `);
   migrate(db);
   db.exec(`
@@ -563,6 +575,24 @@ class Store {
     return this.getAppointment(id);
   }
   deleteAppointment(id) { this.db.prepare('DELETE FROM appointments WHERE id = ?').run(id); }
+
+  // --- registro de llamadas ---
+  createCall(c) {
+    this.db.prepare('INSERT INTO call_logs (id, appointment_id, code, started_at, peers, participants) VALUES (?, ?, ?, ?, 0, ?)')
+      .run(c.id, c.appointmentId ?? null, c.code, now(), '[]');
+    return this.getCall(c.id);
+  }
+  getCall(id) { return this.db.prepare('SELECT * FROM call_logs WHERE id = ?').get(id) || null; }
+  updateCall(id, fields) {
+    const allowed = ['peers', 'participants', 'ended_at'];
+    const sets = [], vals = [];
+    for (const k of allowed) if (k in fields) { sets.push(`${k} = ?`); vals.push(fields[k]); }
+    if (!sets.length) return;
+    vals.push(id);
+    this.db.prepare(`UPDATE call_logs SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  }
+  endCall(id, t) { this.db.prepare('UPDATE call_logs SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(t || now(), id); }
+  listCalls({ limit = 300 } = {}) { return this.db.prepare('SELECT * FROM call_logs ORDER BY started_at DESC LIMIT ?').all(Math.min(Math.max(limit, 1), 1000)); }
 
   // ---------- SNMP ----------
   listSnmp() { return this.db.prepare('SELECT * FROM snmp_devices ORDER BY machine_id, name').all(); }

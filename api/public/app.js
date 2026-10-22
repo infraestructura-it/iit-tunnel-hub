@@ -1101,7 +1101,13 @@ const citaWhen = (ts) => (ts ? new Date(ts * 1000).toLocaleString('es-CO', { dat
 const CITA_PHASE = { programada: 'Programada', en_curso: 'En curso', finalizada: 'Finalizada', cancelada: 'Cancelada' };
 const CITA_CLS = { programada: 'warn', en_curso: 'good', finalizada: '', cancelada: 'bad' };
 
-async function openCitas() { $('#citas-error').textContent = ''; $('#citas-error').style.color = ''; await loadCitas(); $('#citas-modal').classList.remove('hidden'); }
+async function openCitas() {
+  $('#citas-error').textContent = ''; $('#citas-error').style.color = '';
+  document.querySelectorAll('#citas-modal .tab').forEach((t) => t.classList.toggle('active', t.dataset.ctab === 'citas'));
+  $('#ctab-citas').classList.remove('hidden'); $('#ctab-calls').classList.add('hidden');
+  await loadCitas();
+  $('#citas-modal').classList.remove('hidden');
+}
 
 async function loadCitas() {
   try { renderCitas(await api('GET', '/citas')); }
@@ -1119,6 +1125,7 @@ function renderCitas(list) {
       <div class="inc-actions">
         <button class="btn small primary" data-cita-open>Abrir sala</button>
         <button class="btn small" data-cita-link>Copiar link</button>
+        <button class="btn small" data-cita-email>📧 Correo</button>
         ${c.phase !== 'cancelada' ? '<button class="btn small" data-cita-cancel>Cancelar</button>' : ''}
         <button class="btn small danger" data-cita-del>Eliminar</button>
       </div>
@@ -1157,6 +1164,11 @@ $('#citas-list').addEventListener('click', async (e) => {
       const c = await api('GET', `/citas/${id}`);
       const link = `${location.origin}/cita.html?code=${encodeURIComponent(c.code)}`;
       copy(link); toast('Link del cliente copiado · código ' + c.code);
+    } else if (e.target.closest('[data-cita-email]')) {
+      const to = prompt('Enviar el link de la cita por correo a:'); if (to === null) return;
+      if (!to.trim()) return;
+      try { const r = await api('POST', `/citas/${id}/email`, { to: to.trim() }); toast('Cita enviada por correo a ' + r.to); }
+      catch (err) { $('#citas-error').style.color = ''; $('#citas-error').textContent = /no está configurado/i.test(err.message) ? 'El correo saliente no está configurado. Ábralo en 📧 Correo (arriba).' : err.message; }
     } else if (e.target.closest('[data-cita-cancel]')) {
       if (!confirm('¿Cancelar esta cita? El código dejará de servir.')) return;
       await api('PATCH', `/citas/${id}`, { cancel: true }); await loadCitas();
@@ -1166,6 +1178,41 @@ $('#citas-list').addEventListener('click', async (e) => {
     }
   } catch (err) { $('#citas-error').style.color = ''; $('#citas-error').textContent = err.message; }
 });
+
+// pestañas Citas / Registro de llamadas
+document.querySelectorAll('#citas-modal .tab').forEach((tab) => tab.addEventListener('click', () => {
+  document.querySelectorAll('#citas-modal .tab').forEach((t) => t.classList.toggle('active', t === tab));
+  const which = tab.dataset.ctab;
+  $('#ctab-citas').classList.toggle('hidden', which !== 'citas');
+  $('#ctab-calls').classList.toggle('hidden', which !== 'calls');
+  $('#citas-error').textContent = '';
+  if (which === 'calls') loadCalls();
+}));
+
+async function loadCalls() {
+  try { renderCalls(await api('GET', '/citas/calls')); }
+  catch (e) { $('#citas-error').textContent = e.message; }
+}
+
+function callDur(s) {
+  if (s == null) return '—';
+  const m = Math.floor(s / 60), r = s % 60;
+  return m ? `${m}m ${r}s` : `${r}s`;
+}
+
+function renderCalls(list) {
+  if (!list.length) { $('#calls-list').innerHTML = '<div class="chat-empty">Aún no hay llamadas registradas.</div>'; return; }
+  $('#calls-list').innerHTML = list.map((c) => {
+    const quien = (c.participants || []).map((p) => esc(p.name || p.role)).join(', ') || '—';
+    return `<div class="incident">
+      <div class="inc-main">
+        <div><span class="inc-badge ${c.ongoing ? 'good' : ''}">${c.ongoing ? 'En curso' : 'Finalizada'}</span> código <b>${esc(c.code || '—')}</b></div>
+        <div class="inc-meta">Inicio ${citaWhen(c.startedAt)}${c.endedAt ? ' · fin ' + citaWhen(c.endedAt) : ''} · duración ${callDur(c.durationSec)} · ${c.peers} participante(s)</div>
+        <div class="inc-meta">Entraron: ${quien}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
 
 // ---------- modales genéricos ----------
 

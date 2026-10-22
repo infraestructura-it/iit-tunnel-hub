@@ -592,20 +592,29 @@
   <div class="modal" style="max-width:820px">
     <h2>Videoatención · Citas</h2>
     <div class="sub">Salas de atención por video (cámara a cámara) + chat. El cliente entra con un código dentro de la hora de la cita. La cámara/micrófono requieren HTTPS (o abrir en 127.0.0.1 en el propio equipo); el chat funciona siempre.</div>
-    <form id="cita-new-form" autocomplete="off">
-      <div class="row">
-        <div class="field" style="flex:2"><label>Motivo / título</label><input name="title" required maxlength="160" placeholder="Soporte / consulta"></div>
-        <div class="field"><label>Cliente (nombre, opcional)</label><input name="customerName" maxlength="120"></div>
-      </div>
-      <div class="row">
-        <div class="field"><label>Fecha y hora</label><input name="when" type="datetime-local" required></div>
-        <div class="field"><label>Duración (min)</label><input name="durationMin" type="number" min="5" max="480" value="60"></div>
-        <div class="field"><label>Código (opcional)</label><input name="code" maxlength="20" placeholder="automático" spellcheck="false" style="text-transform:uppercase"></div>
-      </div>
-      <div class="modal-actions" style="justify-content:flex-start"><button type="submit" class="btn primary">Crear cita</button></div>
-    </form>
+    <div class="tabs">
+      <button type="button" class="tab active" data-ctab="citas">Citas</button>
+      <button type="button" class="tab" data-ctab="calls">Registro de llamadas</button>
+    </div>
+    <div id="ctab-citas">
+      <form id="cita-new-form" autocomplete="off">
+        <div class="row">
+          <div class="field" style="flex:2"><label>Motivo / título</label><input name="title" required maxlength="160" placeholder="Soporte / consulta"></div>
+          <div class="field"><label>Cliente (nombre, opcional)</label><input name="customerName" maxlength="120"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Fecha y hora</label><input name="when" type="datetime-local" required></div>
+          <div class="field"><label>Duración (min)</label><input name="durationMin" type="number" min="5" max="480" value="60"></div>
+          <div class="field"><label>Código (opcional)</label><input name="code" maxlength="20" placeholder="automático" spellcheck="false" style="text-transform:uppercase"></div>
+        </div>
+        <div class="modal-actions" style="justify-content:flex-start"><button type="submit" class="btn primary">Crear cita</button></div>
+      </form>
+      <div id="citas-list" class="incidents-list"></div>
+    </div>
+    <div id="ctab-calls" class="hidden">
+      <div id="calls-list" class="incidents-list"></div>
+    </div>
     <div class="error" id="citas-error"></div>
-    <div id="citas-list" class="incidents-list"></div>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cerrar</button></div>
   </div>
 </div>

@@ -111,16 +111,26 @@ class CitaService {
 
   // --- sala / señalización ---
   attach(ws, ticket) {
-    const room = this.rooms.get(ticket.citaId) || new Set();
-    if (room.size >= MAX_PEERS) { try { ws.send(JSON.stringify({ type: 'error', message: 'la sala ya tiene dos participantes' })); } catch {} ws.close(1008, 'sala llena'); return; }
-    const peer = { ws, role: ticket.role, name: ticket.name };
-    room.add(peer);
-    this.rooms.set(ticket.citaId, room);
+    let room = this.rooms.get(ticket.citaId);
+    if (!room) {
+      // primera persona: abre el registro de la llamada (con el código de la cita)
+      let code = '';
+      try { code = this.store.getAppointment(ticket.citaId)?.code || ''; } catch {}
+      let callId = null;
+      try { callId = this.store.createCall({ id: 'l_' + crypto.randomBytes(9).toString('base64url'), appointmentId: ticket.citaId, code }).id; } catch {}
+      room = { peers: new Set(), callId, names: [], peak: 0 };
+      this.rooms.set(ticket.citaId, room);
+    }
+    if (room.peers.size >= MAX_PEERS) { try { ws.send(JSON.stringify({ type: 'error', message: 'la sala ya tiene dos participantes' })); } catch {} ws.close(1008, 'sala llena'); return; }
 
-    // saludo: configuración ICE y quién más hay
-    ws.send(JSON.stringify({ type: 'bienvenido', self: { role: peer.role, name: peer.name }, iceServers: this.iceServers, peers: [...room].filter((p) => p !== peer).map((p) => ({ role: p.role, name: p.name })) }));
-    // si ya hay otro, se emparejan: el que acaba de entrar hace la oferta
-    const others = [...room].filter((p) => p !== peer);
+    const peer = { ws, role: ticket.role, name: ticket.name };
+    room.peers.add(peer);
+    room.names.push({ role: peer.role, name: peer.name, at: now() });
+    room.peak = Math.max(room.peak, room.peers.size);
+    if (room.callId) { try { this.store.updateCall(room.callId, { peers: room.peak, participants: JSON.stringify(room.names.slice(0, 20)) }); } catch {} }
+
+    ws.send(JSON.stringify({ type: 'bienvenido', self: { role: peer.role, name: peer.name }, iceServers: this.iceServers, peers: [...room.peers].filter((p) => p !== peer).map((p) => ({ role: p.role, name: p.name })) }));
+    const others = [...room.peers].filter((p) => p !== peer);
     if (others.length) {
       ws.send(JSON.stringify({ type: 'listo', initiator: true, peer: { role: others[0].role, name: others[0].name } }));
       others.forEach((p) => p.ws.send(JSON.stringify({ type: 'listo', initiator: false, peer: { role: peer.role, name: peer.name } })));
@@ -130,15 +140,17 @@ class CitaService {
       if (isBinary || typeof data !== 'string' || data.length > MAX_MSG) return;
       let msg; try { msg = JSON.parse(data); } catch { return; }
       if (!msg || typeof msg.type !== 'string') return;
-      // se relayan tal cual a los demás de la sala: offer/answer/ice/chat/img/cam/mic/bye
       const out = JSON.stringify({ ...msg, from: { role: peer.role, name: peer.name } });
-      for (const p of room) if (p !== peer) { try { p.ws.send(out); } catch {} }
+      for (const p of room.peers) if (p !== peer) { try { p.ws.send(out); } catch {} }
     });
 
     const leave = () => {
-      room.delete(peer);
-      for (const p of room) { try { p.ws.send(JSON.stringify({ type: 'peer-salio', peer: { role: peer.role, name: peer.name } })); } catch {} }
-      if (room.size === 0) this.rooms.delete(ticket.citaId);
+      room.peers.delete(peer);
+      for (const p of room.peers) { try { p.ws.send(JSON.stringify({ type: 'peer-salio', peer: { role: peer.role, name: peer.name } })); } catch {} }
+      if (room.peers.size === 0) {
+        if (room.callId) { try { this.store.endCall(room.callId); } catch {} }
+        this.rooms.delete(ticket.citaId);
+      }
     };
     ws.on('close', leave);
   }
@@ -147,4 +159,22 @@ class CitaService {
   sweep() { const t = now(); for (const [k, v] of this.tickets) if (v.exp < t) this.tickets.delete(k); }
 }
 
-module.exports = { CitaService, view, phase, GRACE_BEFORE, TICKET_TTL, CODE_RE };
+/** Vista de un registro de llamada para la API. */
+function callView(c) {
+  if (!c) return null;
+  let participants = [];
+  try { participants = JSON.parse(c.participants || '[]'); } catch {}
+  return {
+    id: c.id,
+    appointmentId: c.appointment_id,
+    code: c.code,
+    startedAt: c.started_at,
+    endedAt: c.ended_at,
+    durationSec: c.ended_at ? c.ended_at - c.started_at : null,
+    peers: c.peers,
+    participants,
+    ongoing: !c.ended_at,
+  };
+}
+
+module.exports = { CitaService, view, callView, phase, GRACE_BEFORE, TICKET_TTL, CODE_RE };

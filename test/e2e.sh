@@ -671,10 +671,15 @@ check "antes de la ventana → 409 con la hora de inicio" '[ "$(api POST /citas/
 check "código duplicado al crear → 409" '[ "$(api POST /citas -o /dev/null -w "%{http_code}" -d "{\"title\":\"x\",\"startsAt\":$NOW,\"code\":\"FUTURA-1\"}")" = 409 ]'
 CID=$(api GET /citas | jq -r '[.[]|select(.title=="Soporte de prueba")][0].id')
 check "ticket del agente desde el panel (abrir sala)" '[ "$(api POST /citas/$CID/sala | jq -r ".ticket | length>0")" = true ]'
+: > "$MAIL_OUT"
+check "envía la cita por correo (link + código, SMTP ya configurado en 13b)" 'api POST /citas/$CID/email -d "{\"to\":\"citacliente@ej.com\"}" | jq -e .sent >/dev/null && wait_for "grep -q citacliente@ej.com \"$MAIL_OUT\""'
+check "correo de cita a destinatario inválido → 400" '[ "$(api POST /citas/$CID/email -o /dev/null -w "%{http_code}" -d "{\"to\":\"malo\"}")" = 400 ]'
 CWSU="ws://127.0.0.1:$PORT/api/citas/ws?t="
 T1=$(api POST /citas/join -d "{\"code\":\"$CODE\"}" | jq -r .ticket)
 T2=$(api POST /citas/join -d "{\"code\":\"$CODE\"}" | jq -r .ticket)
 check "la sala relaya señalización y chat entre dos participantes" 'node "$ROOT/test/cita-relay.js" "$CWSU$T1" "$CWSU$T2" | grep -q "^OK"'
+check "la llamada queda en el registro con su código" 'wait_for "[ \"\$(api GET /citas/calls | jq \"[.[]|select(.code==\\\"$CODE\\\")]|length\")\" -ge 1 ]"'
+check "el registro de llamadas guarda duración y participantes" 'api GET /citas/calls | jq -e "[.[]|select(.code==\"$CODE\")][0] | (.peers>=1) and (.participants|length>=1)" >/dev/null'
 check "ticket inválido en la sala → rechazado" '! node "$ROOT/test/cita-relay.js" "${CWSU}inventado" "${CWSU}tampoco" 2>/dev/null | grep -q "^OK"'
 check "cancelar la cita invalida el código" 'api PATCH /citas/$CID -d "{\"cancel\":true}" >/dev/null; [ "$(api POST /citas/join -o /dev/null -w "%{http_code}" -d "{\"code\":\"$CODE\"}")" = 409 ]'
 check "eliminar la cita" '[ "$(api DELETE /citas/$CID | jq -r .deleted)" = true ]'

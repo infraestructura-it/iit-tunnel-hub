@@ -210,4 +210,34 @@ ${note ? `<p>${esc(note)}</p>` : ''}
   return { subject, text, html };
 }
 
-module.exports = { SETTINGS_KEY, loadSettings, publicSettings, updateSettings, sendMail, smtpSend, connectionLinkEmail, EMAIL_RE };
+/** Correo con el link y el código de una cita de videoatención. */
+function citaEmail({ cita, link, code, note }) {
+  const when = cita.startsAt ? new Date(cita.startsAt * 1000).toLocaleString('es-CO', { dateStyle: 'full', timeStyle: 'short' }) : '';
+  const subject = `Cita de videoatención · ${cita.title}`;
+  const text = [
+    `Tiene una cita de videoatención: ${cita.title}`,
+    cita.customerName ? `Para: ${cita.customerName}` : '',
+    when ? `Fecha y hora: ${when}` : '',
+    note ? `\n${note}\n` : '',
+    'A la hora de la cita, entre a la sala con este enlace:',
+    link,
+    `Código: ${code}`,
+    '',
+    'Para que funcionen la cámara y el micrófono, abra el enlace en un navegador actualizado.',
+    '',
+    '— IIT · Infraestructura-IT',
+  ].filter(Boolean).join('\n');
+  const esc = (x) => String(x).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const html = `<div style="font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px;color:#0b1220">
+<p>Tiene una cita de videoatención: <b>${esc(cita.title)}</b></p>
+${cita.customerName ? `<p>Para: ${esc(cita.customerName)}</p>` : ''}
+${when ? `<p>Fecha y hora: <b>${esc(when)}</b></p>` : ''}
+${note ? `<p>${esc(note)}</p>` : ''}
+<p>A la hora de la cita, entre a la sala:</p>
+<p><a href="${esc(link)}" style="display:inline-block;padding:10px 16px;background:#0ea5e9;color:#fff;border-radius:8px;text-decoration:none">Entrar a la sala</a></p>
+<p>O con el código: <b style="font-family:monospace;font-size:16px">${esc(code)}</b></p>
+<p style="color:#64748b">— IIT · Infraestructura-IT</p></div>`;
+  return { subject, text, html };
+}
+
+module.exports = { SETTINGS_KEY, loadSettings, publicSettings, updateSettings, sendMail, smtpSend, connectionLinkEmail, citaEmail, EMAIL_RE };
