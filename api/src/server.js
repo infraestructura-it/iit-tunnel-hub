@@ -5,6 +5,7 @@
 //   2. Server plugin para frps (PLUGIN_PORT, solo red interna)
 
 const http = require('node:http');
+const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -1079,7 +1080,7 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
 
   // ---------- sesión y cuenta propia ----------
 
-  const secureCookie = (req) => config.cookieSecure || req.headers['x-forwarded-proto'] === 'https';
+  const secureCookie = (req) => config.cookieSecure || req.headers['x-forwarded-proto'] === 'https' || !!req.socket.encrypted;
   const clientIp = (req) => String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
   const ipFails = new Map(); // ip → [marcas de tiempo de intentos fallidos]
   const ipBlocked = (ip) => {
@@ -1609,7 +1610,7 @@ function main() {
   let pluginUp = false;
   const api = createApi(store, frps, monitor, ai, plugin, { backups, bot, pluginListening: () => pluginUp, snmp: snmpMon, hub: hubFrpc, remote, citas });
 
-  const app = http.createServer(async (req, res) => {
+  const requestHandler = async (req, res) => {
     const { pathname } = new URL(req.url, 'http://x');
     try {
       if (pathname.startsWith('/api/') || pathname.startsWith('/i/') || pathname.startsWith('/descargas/')) { stats.api.requests++; return await api(req, res, pathname); }
@@ -1618,10 +1619,11 @@ function main() {
     } catch (err) {
       return errorResponse(res, err);
     }
-  });
+  };
+  const app = http.createServer(requestHandler);
 
   // WebSocket de las sesiones remotas: /api/remote/ws?t=<ticket>
-  app.on('upgrade', (req, socket, head) => {
+  const onUpgrade = (req, socket, head) => {
     socket.on('error', () => {});
     const u = new URL(req.url, 'http://x');
     // Agente WebRTC del equipo: se autentica con el id y el token de la máquina (los mismos de frpc)
@@ -1665,7 +1667,8 @@ function main() {
     if (!ws) return;
     const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
     remote.attach(ws, t, { ip, query: u.search.slice(1), run: (fn) => requestContext.run({ actor: t.actor }, fn) });
-  });
+  };
+  app.on('upgrade', onUpgrade);
 
   const pluginServer = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -1688,6 +1691,19 @@ function main() {
   });
 
   app.listen(config.port, config.host, () => console.log(`Panel y API en http://${config.host}:${config.port}`));
+
+  // HTTPS propio (Let's Encrypt DNS-01): habilita el contexto seguro del navegador (cámara/micrófono por el dominio).
+  if (config.tls.cert && config.tls.key) {
+    try {
+      const tlsOpts = { cert: fs.readFileSync(config.tls.cert), key: fs.readFileSync(config.tls.key) };
+      const secure = https.createServer(tlsOpts, requestHandler);
+      secure.on('upgrade', onUpgrade);
+      secure.on('error', (e) => console.error('https:', e.message));
+      secure.listen(config.tls.port, config.host, () => console.log(`Panel y API (HTTPS) en https://${config.host}:${config.tls.port}`));
+    } catch (e) {
+      console.error(`HTTPS deshabilitado: no pude leer el certificado o la clave (${e.message})`);
+    }
+  }
   pluginServer.listen(config.pluginPort, config.pluginHost, () => {
     pluginUp = true;
     console.log(`Plugin frps en http://${config.pluginHost}:${config.pluginPort}/frp/handler`);

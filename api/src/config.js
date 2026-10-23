@@ -28,6 +28,13 @@ const config = {
   adminToken: env.ADMIN_TOKEN || '',
   // Cookie de sesión con Secure (solo HTTPS). Detrás de un proxy HTTPS se activa sola con X-Forwarded-Proto.
   cookieSecure: env.COOKIE_SECURE === '1',
+  // HTTPS propio del hub (Let's Encrypt DNS-01). Si hay cert + clave, además escucha en TLS en tlsPort.
+  // Esto habilita el contexto seguro del navegador (cámara/micrófono de la videoatención por el dominio).
+  tls: {
+    cert: (env.HUB_TLS_CERT || '').trim(),
+    key: (env.HUB_TLS_KEY || '').trim(),
+    port: int('HUB_TLS_PORT', 8443),
+  },
   // URL con la que los equipos cliente llegan al hub (instalación con código). Vacía: la del navegador.
   hubPublicUrl: (env.HUB_PUBLIC_URL || '').trim().replace(/\/+$/, ''),
 

@@ -244,6 +244,12 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - **El proyecto vive en OneDrive** y se usa desde dos perfiles (`Infraestructura02` y `User01`). `data/hub.db` se sincroniza: **no correr el hub en ambos PC a la vez**. Opción: `DB_PATH` en `%LOCALAPPDATA%`.
 - `*.sh`, `*.service` y `*.toml` deben quedar con LF (`.gitattributes`); con CRLF fallan en Linux.
 
+## HTTPS propio del hub
+
+- El hub escucha en TLS si se definen `HUB_TLS_CERT` y `HUB_TLS_KEY` (archivos PEM: cadena completa + clave), en `HUB_TLS_PORT` (8443 por defecto), **además** del http normal. Mismo panel/API/WS (la sala de citas por `wss://`). `secureCookie` también marca la cookie `Secure` cuando la conexión es TLS (`req.socket.encrypted`).
+- Esto habilita el **contexto seguro del navegador** (cámara/micrófono de la videoatención, y `getDisplayMedia`) por el dominio, no solo en 127.0.0.1.
+- Certificado con **Let's Encrypt DNS-01 + Cloudflare** (el hub no tiene IP pública): ver `HTTPS-LETSENCRYPT.md`. Pon `HUB_PUBLIC_URL=https://hubups.infraestructura-it.com:8443` para que los links (citas, instalación) salgan en https. Node cachea el cert al arrancar: tras renovar, relanzar el hub.
+
 ## Producción (pendiente)
 
 - Destino: VPS o VM Linux propia. `docker compose up -d --build` (red del host) o `deploy/install.sh`.
