@@ -181,6 +181,53 @@ ${SERVICES_TABLE('services')}
       participants   TEXT NOT NULL DEFAULT '[]'    -- [{role,name,at}] de quienes entraron
     );
     CREATE INDEX IF NOT EXISTS call_logs_started ON call_logs (started_at DESC);
+
+    -- Datacenter: sensores (temp/humedad/monóxido/apertura biométrica/energía) que ENVÍAN sus lecturas
+    -- al hub por HTTP con el token de la máquina (push, agnóstico a RS232/Modbus/Ethernet/4G/5G).
+    CREATE TABLE IF NOT EXISTS dc_sensors (
+      id          TEXT PRIMARY KEY,
+      machine_id  TEXT,                          -- sede/equipo (puede ser nula = global)
+      key         TEXT NOT NULL,                 -- clave estable para la ingesta (slug por máquina)
+      kind        TEXT NOT NULL,                 -- temperatura | humedad | monoxido | apertura | energia
+      name        TEXT NOT NULL,
+      unit        TEXT NOT NULL DEFAULT '',
+      link        TEXT NOT NULL DEFAULT '',      -- ethernet | 4g | 5g | rs232 | modbus (informativo)
+      warn_low    REAL, warn_high REAL, crit_low REAL, crit_high REAL,
+      enabled     INTEGER NOT NULL DEFAULT 1,
+      status      TEXT NOT NULL DEFAULT 'sin_datos',  -- ok | warn | crit | sin_datos
+      created_at  INTEGER NOT NULL,
+      last_ts     INTEGER,
+      last_value  REAL,
+      last_extra  TEXT,                          -- JSON (energía: fases; apertura: estado/usuario)
+      UNIQUE (machine_id, key)
+    );
+    CREATE TABLE IF NOT EXISTS dc_samples (
+      sensor_id TEXT NOT NULL REFERENCES dc_sensors(id) ON DELETE CASCADE,
+      ts        INTEGER NOT NULL,
+      value     REAL NOT NULL,
+      extra     TEXT,                            -- JSON para energía (fases)
+      PRIMARY KEY (sensor_id, ts)
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS dc_events (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      sensor_id TEXT REFERENCES dc_sensors(id) ON DELETE CASCADE,
+      ts        INTEGER NOT NULL,
+      state     TEXT,                            -- abierto | cerrado
+      usr       TEXT,                            -- usuario biométrico
+      result    TEXT,                            -- ok | denegado
+      detail    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS dc_events_sensor ON dc_events (sensor_id, ts DESC);
+    CREATE TABLE IF NOT EXISTS dc_cameras (
+      id           TEXT PRIMARY KEY,
+      machine_id   TEXT,
+      name         TEXT NOT NULL,
+      rtsp_url     TEXT NOT NULL DEFAULT '',
+      snapshot_url TEXT NOT NULL DEFAULT '',
+      location     TEXT NOT NULL DEFAULT '',
+      enabled      INTEGER NOT NULL DEFAULT 1,
+      created_at   INTEGER NOT NULL
+    );
   `);
   migrate(db);
   db.exec(`
@@ -593,6 +640,56 @@ class Store {
   }
   endCall(id, t) { this.db.prepare('UPDATE call_logs SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(t || now(), id); }
   listCalls({ limit = 300 } = {}) { return this.db.prepare('SELECT * FROM call_logs ORDER BY started_at DESC LIMIT ?').all(Math.min(Math.max(limit, 1), 1000)); }
+
+  // ---------- Datacenter ----------
+  createDcSensor(s) {
+    const t = now();
+    this.db.prepare(`INSERT INTO dc_sensors (id, machine_id, key, kind, name, unit, link, warn_low, warn_high, crit_low, crit_high, enabled, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
+      .run(s.id, s.machineId ?? null, s.key, s.kind, s.name, s.unit || '', s.link || '',
+        s.warnLow ?? null, s.warnHigh ?? null, s.critLow ?? null, s.critHigh ?? null, t);
+    return this.getDcSensor(s.id);
+  }
+  getDcSensor(id) { return this.db.prepare('SELECT * FROM dc_sensors WHERE id = ?').get(id) || null; }
+  getDcSensorByKey(machineId, key) { return this.db.prepare('SELECT * FROM dc_sensors WHERE machine_id IS ? AND key = ?').get(machineId ?? null, key) || null; }
+  listDcSensors() { return this.db.prepare('SELECT * FROM dc_sensors ORDER BY machine_id, kind, name').all(); }
+  updateDcSensor(id, fields) {
+    const allowed = ['name', 'unit', 'link', 'warn_low', 'warn_high', 'crit_low', 'crit_high', 'enabled', 'status', 'last_ts', 'last_value', 'last_extra', 'key'];
+    const sets = [], vals = [];
+    for (const k of allowed) if (k in fields) { sets.push(`${k} = ?`); vals.push(fields[k]); }
+    if (!sets.length) return this.getDcSensor(id);
+    vals.push(id);
+    this.db.prepare(`UPDATE dc_sensors SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    return this.getDcSensor(id);
+  }
+  deleteDcSensor(id) { this.db.prepare('DELETE FROM dc_sensors WHERE id = ?').run(id); }
+  addDcSample(sensorId, ts, value, extra = null) {
+    this.db.prepare('INSERT OR REPLACE INTO dc_samples (sensor_id, ts, value, extra) VALUES (?, ?, ?, ?)').run(sensorId, ts, value, extra);
+  }
+  dcHistory(sensorId, from) { return this.db.prepare('SELECT ts, value, extra FROM dc_samples WHERE sensor_id = ? AND ts >= ? ORDER BY ts').all(sensorId, from); }
+  pruneDcSamples(olderThan) { return this.db.prepare('DELETE FROM dc_samples WHERE ts < ?').run(olderThan).changes; }
+  addDcEvent(e) {
+    this.db.prepare('INSERT INTO dc_events (sensor_id, ts, state, usr, result, detail) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(e.sensorId, e.ts || now(), e.state ?? null, e.usr ?? null, e.result ?? null, e.detail ?? null);
+  }
+  listDcEvents(sensorId, limit = 100) { return this.db.prepare('SELECT * FROM dc_events WHERE sensor_id = ? ORDER BY ts DESC LIMIT ?').all(sensorId, Math.min(Math.max(limit, 1), 500)); }
+  createDcCamera(c) {
+    this.db.prepare('INSERT INTO dc_cameras (id, machine_id, name, rtsp_url, snapshot_url, location, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)')
+      .run(c.id, c.machineId ?? null, c.name, c.rtspUrl || '', c.snapshotUrl || '', c.location || '', now());
+    return this.getDcCamera(c.id);
+  }
+  getDcCamera(id) { return this.db.prepare('SELECT * FROM dc_cameras WHERE id = ?').get(id) || null; }
+  listDcCameras() { return this.db.prepare('SELECT * FROM dc_cameras ORDER BY machine_id, name').all(); }
+  updateDcCamera(id, fields) {
+    const allowed = ['name', 'rtsp_url', 'snapshot_url', 'location', 'enabled', 'machine_id'];
+    const sets = [], vals = [];
+    for (const k of allowed) if (k in fields) { sets.push(`${k} = ?`); vals.push(fields[k]); }
+    if (!sets.length) return this.getDcCamera(id);
+    vals.push(id);
+    this.db.prepare(`UPDATE dc_cameras SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    return this.getDcCamera(id);
+  }
+  deleteDcCamera(id) { this.db.prepare('DELETE FROM dc_cameras WHERE id = ?').run(id); }
 
   // ---------- SNMP ----------
   listSnmp() { return this.db.prepare('SELECT * FROM snmp_devices ORDER BY machine_id, name').all(); }

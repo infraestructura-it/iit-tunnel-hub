@@ -17,6 +17,10 @@ $env:FRPS_TCP_PORT_MIN = "20000"; $env:FRPS_TCP_PORT_MAX = "20010"
 $env:FRP_AUTH_TOKEN = "iit-local-frp"
 $env:FRPS_API_URL = "http://127.0.0.1:7500"; $env:FRPS_API_USER = "admin"; $env:FRPS_API_PASSWORD = "dash123"
 $env:HUB_PUBLIC_URL = "http://hubups.infraestructura-it.com:8090"
+$env:HUB_TLS_CERT   = "C:\ITT\certs\certificates\hubups.infraestructura-it.com.crt"
+$env:HUB_TLS_KEY    = "C:\ITT\certs\certificates\hubups.infraestructura-it.com.key"
+$env:HUB_TLS_PORT   = "8443"
+$env:HUB_PUBLIC_URL = "https://hubups.infraestructura-it.com:8443"
 
 # ---------- comprobaciones ----------
 # Detiene un frps anterior que pudiera haber quedado corriendo con otra configuración

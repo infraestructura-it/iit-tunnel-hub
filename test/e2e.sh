@@ -684,6 +684,35 @@ check "ticket inválido en la sala → rechazado" '! node "$ROOT/test/cita-relay
 check "cancelar la cita invalida el código" 'api PATCH /citas/$CID -d "{\"cancel\":true}" >/dev/null; [ "$(api POST /citas/join -o /dev/null -w "%{http_code}" -d "{\"code\":\"$CODE\"}")" = 409 ]'
 check "eliminar la cita" '[ "$(api DELETE /citas/$CID | jq -r .deleted)" = true ]'
 
+echo "13e. Datacenter (sensores, energía, cámaras)"
+DCTOKEN=$(api POST /machines -d '{"name":"DC Sede","id":"dc-sede","services":[{"name":"vnc","type":"stcp","localPort":5900}]}' | jq -r .token)
+SID=$(api POST /dc/sensors -d '{"machineId":"dc-sede","kind":"temperatura","name":"Temp Rack","link":"rs232","warnHigh":28,"critHigh":35}' | jq -r .id)
+check "crea un sensor de temperatura" '[ -n "$SID" ] && [ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$SID\")][0].kind")" = temperatura ]'
+check "clave duplicada en el mismo equipo → 409" '[ "$(api POST /dc/sensors -o /dev/null -w "%{http_code}" -d "{\"machineId\":\"dc-sede\",\"kind\":\"temperatura\",\"name\":\"Temp Rack\"}")" = 409 ]'
+dcpost() { curl -s -X POST -H "X-IIT-Machine: dc-sede" -H "Authorization: Bearer $DCTOKEN" -H "Content-Type: application/json" "$API/dc/ingest" -d "$1"; }
+check "ingesta con token de máquina acepta la lectura (push)" '[ "$(dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":24}]}" | jq -r .accepted)" = 1 ]'
+check "token inválido en la ingesta → 401" '[ "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-IIT-Machine: dc-sede" -H "Authorization: Bearer malo" -H "Content-Type: application/json" "$API/dc/ingest" -d "{\"readings\":[]}")" = 401 ]'
+check "ingesta a sensor inexistente se reporta sin aceptar" '[ "$(dcpost "{\"readings\":[{\"key\":\"no-existe\",\"value\":1}]}" | jq -r ".accepted")" = 0 ]'
+check "lectura crítica marca el sensor en crit" 'dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":40}]}" >/dev/null; [ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$SID\")][0].status")" = crit ]'
+check "el historial devuelve muestras por rango" '[ "$(api GET "/dc/sensors/$SID/history?range=24h" | jq ".points|length")" -ge 1 ]'
+AID=$(api POST /dc/sensors -d '{"machineId":"dc-sede","kind":"apertura","name":"Puerta Rack"}' | jq -r .id)
+dcpost "{\"readings\":[{\"key\":\"puerta-rack\",\"event\":{\"state\":\"abierto\",\"user\":\"jairo\",\"result\":\"denegado\"}}]}" >/dev/null
+check "apertura biométrica denegada → crit y evento registrado" '[ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$AID\")][0].status")" = crit ] && [ "$(api GET "/dc/sensors/$AID/events" | jq "length")" -ge 1 ]'
+EID=$(api POST /dc/sensors -d '{"machineId":"dc-sede","kind":"energia","name":"Tablero"}' | jq -r .id)
+dcpost "{\"readings\":[{\"key\":\"tablero\",\"phases\":{\"v\":[120,119,121],\"i\":[5,6,4],\"f\":60}}]}" >/dev/null
+check "energía guarda las 3 fases (voltaje/corriente)" '[ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$EID\")][0].lastExtra.v[1]")" = 119 ]'
+check "tipo de sensor inválido → 400" '[ "$(api POST /dc/sensors -o /dev/null -w "%{http_code}" -d "{\"machineId\":\"dc-sede\",\"kind\":\"xxx\",\"name\":\"y\"}")" = 400 ]'
+CAMID=$(api POST /dc/cameras -d '{"machineId":"dc-sede","name":"Cam Pasillo","rtspUrl":"rtsp://u:p@10.0.0.5:554/s1","location":"Rack 3"}' | jq -r .id)
+check "crea una cámara con RTSP" '[ -n "$CAMID" ] && [ "$(api GET /dc/cameras | jq "[.[]|select(.id==\"$CAMID\")]|length")" = 1 ]'
+check "instantánea sin URL http → 400" '[ "$(api GET /dc/cameras/$CAMID/snapshot -o /dev/null -w "%{http_code}")" = 400 ]'
+mkdir -p "$WORK/cam"; printf '\xff\xd8\xff\xe0JFIFtest\xff\xd9' > "$WORK/cam/snap.jpg"
+python3 -m http.server 18777 --bind 127.0.0.1 --directory "$WORK/cam" >/dev/null 2>&1 & PIDS+=($!)
+wait_for "curl -s -o /dev/null http://127.0.0.1:18777/snap.jpg"
+CAM2=$(api POST /dc/cameras -d '{"machineId":"dc-sede","name":"Cam Snap","snapshotUrl":"http://127.0.0.1:18777/snap.jpg"}' | jq -r .id)
+check "el proxy de instantánea trae la imagen de la cámara" '[ "$(api GET /dc/cameras/$CAM2/snapshot -o /dev/null -w "%{http_code}")" = 200 ]'
+check "elimina sensor y cámara" '[ "$(api DELETE /dc/sensors/$SID | jq -r .deleted)" = true ] && [ "$(api DELETE /dc/cameras/$CAMID | jq -r .deleted)" = true ]'
+api DELETE /machines/dc-sede >/dev/null
+
 echo "14. SNMP por túnel privado (UPS, impresora, switch, servidor; v2c y v3)"
 SNMPOK=0
 if [ "$(id -u)" = 0 ] && [ -x /usr/sbin/snmpd ] && command -v snmpsim-command-responder >/dev/null; then SNMPOK=1; fi

@@ -1,0 +1,60 @@
+/* Ventana especializada Datacenter */
+.dc-page { min-height: 100vh; }
+.dc-bar { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+.dc-bar .brand { font-family: var(--display, 'Syne', sans-serif); font-weight: 800; }
+.dc-bar .brand span { color: var(--green); }
+.dc-bar .spacer { flex: 1; }
+.dc-bar select { max-width: 240px; }
+.dc-status { color: var(--dim); font-size: 12px; min-width: 90px; text-align: right; }
+
+.dc-main { padding: 18px; max-width: 1280px; margin: 0 auto; }
+.dc-main section { margin-bottom: 26px; }
+.dc-main h3 { margin: 0 0 12px; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+
+.dc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.dc-card { background: var(--panel); border: 1px solid var(--line); border-left-width: 4px; border-radius: 12px; padding: 14px 16px; cursor: pointer; transition: border-color .15s; }
+.dc-card:hover { border-color: var(--line-2); }
+.dc-card.ok { border-left-color: var(--green); }
+.dc-card.warn { border-left-color: var(--amber); }
+.dc-card.crit { border-left-color: var(--red); }
+.dc-card.sin_datos { border-left-color: var(--dim); }
+.dc-card .dc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.dc-card .dc-name { font-weight: 600; font-size: 14px; }
+.dc-card .dc-kind { font-size: 11px; color: var(--dim); }
+.dc-card .dc-value { font-size: 30px; font-weight: 700; margin: 8px 0 2px; font-family: var(--code, monospace); }
+.dc-card .dc-value small { font-size: 15px; color: var(--muted); font-weight: 500; }
+.dc-card .dc-sub { font-size: 12px; color: var(--dim); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.dc-card.stale .dc-value { color: var(--dim); }
+.dc-pill { font-size: 10px; padding: 1px 7px; border: 1px solid var(--line-2); border-radius: 999px; color: var(--muted); text-transform: uppercase; }
+.dc-phases { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
+.dc-phases div { background: var(--panel-2); border-radius: 6px; padding: 5px 6px; text-align: center; font-family: var(--code, monospace); }
+.dc-phases .pv { font-size: 15px; font-weight: 700; }
+.dc-phases .pi { font-size: 11px; color: var(--muted); }
+.dc-phases .pl { font-size: 10px; color: var(--dim); }
+
+.dc-cams { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.dc-cam { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.dc-cam .shot { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #05070b center/contain no-repeat; display: block; }
+.dc-cam .shot.empty { display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; }
+.dc-cam .dc-cam-body { padding: 10px 12px; }
+.dc-cam .dc-cam-name { font-weight: 600; }
+.dc-cam .dc-cam-loc { font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+.dc-cam .dc-cam-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.dc-chart-modal { max-width: 900px; width: 92vw; }
+.dc-chart-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.dc-chart-head h2 { margin: 0; flex: 1; font-size: 18px; }
+.dc-ranges { display: flex; gap: 4px; flex-wrap: wrap; }
+.dc-ranges button { background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 4px 9px; cursor: pointer; font-size: 12px; }
+.dc-ranges button.active { color: var(--cyan); border-color: var(--cyan); }
+#dc-chart { margin: 14px 0 6px; min-height: 240px; }
+#dc-chart svg { width: 100%; height: 260px; display: block; }
+.dc-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.dc-legend span b { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+.dc-events { margin-top: 12px; max-height: 180px; overflow-y: auto; font-size: 12px; }
+.dc-events .ev { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.dc-events .ev .den { color: var(--red); }
+.dc-events .ev .ok { color: var(--green); }
+#dc-thresholds.hidden { display: none; }
+
+@media (max-width: 640px) { .dc-grid { grid-template-columns: 1fr 1fr; } }

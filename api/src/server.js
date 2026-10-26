@@ -34,6 +34,7 @@ const { RemoteService, browserKind, KINDS: REMOTE_KINDS } = require('./remote');
 const MAIL = require('./mailer');
 const INC = require('./incidents');
 const { CitaService, view: citaView, callView, phase: citaPhase } = require('./citas');
+const DC = require('./datacenter');
 
 const VERSION = '1.1.0';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -1077,6 +1078,152 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
       return [e.status || 400, out];
     }
   }, 'public');
+
+  // ---------- Datacenter (sensores, energía, cámaras) ----------
+  const dcVisibleRow = (ctx, row, vis) => ctx.clientIds === null || (!!row.machine_id && (vis || visibleIds(ctx)).has(row.machine_id));
+
+  // Ingesta: los sensores ENVÍAN sus lecturas con el token de la máquina (push).
+  route('POST', '/api/dc/ingest', async (req) => {
+    const id = String(req.headers['x-iit-machine'] || '').slice(0, 64);
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const m = id && store.getMachine(id);
+    if (!m || !m.enabled || !M.tokenMatches(token, m.token_hash)) throw new M.HttpError(401, 'token de máquina inválido');
+    const body = await readJson(req);
+    try { return [200, DC.ingest(store, m, body, { notify: (a) => monitor.notify(a) })]; }
+    catch (e) { throw new M.HttpError(e.status || 400, e.message); }
+  }, 'public');
+
+  route('GET', '/api/dc/overview', async (_req, _p, ctx) => {
+    const vis = ctx.clientIds === null ? null : visibleIds(ctx);
+    const sensors = store.listDcSensors().filter((s) => dcVisibleRow(ctx, s, vis)).map(DC.view);
+    const cameras = store.listDcCameras().filter((c) => dcVisibleRow(ctx, c, vis)).map((c) => DC.cameraView(c, { withSecrets: true }));
+    const machines = {};
+    for (const m of visibleMachines(ctx)) machines[m.id] = { id: m.id, name: m.name, client: m.client };
+    return [200, { sensors, cameras, machines, kinds: DC.KINDS, links: DC.LINKS.filter(Boolean), units: DC.UNIT, ranges: Object.keys(DC.RANGES) }];
+  }, 'staff');
+
+  route('GET', '/api/dc/sensors', async (_req, _p, ctx) => {
+    const vis = ctx.clientIds === null ? null : visibleIds(ctx);
+    return [200, store.listDcSensors().filter((s) => dcVisibleRow(ctx, s, vis)).map(DC.view)];
+  }, 'staff');
+
+  route('POST', '/api/dc/sensors', async (req, _p, ctx) => {
+    const b = await readJson(req);
+    if (!DC.KINDS.includes(b.kind)) throw M.bad('tipo de sensor inválido');
+    const name = String(b.name || '').trim();
+    if (!name) throw M.bad('indique el nombre del sensor');
+    let machineId = null;
+    if (b.machineId) machineId = mustMachine(String(b.machineId), ctx).id;
+    else if (!ctx.isAdmin) throw M.bad('elija el equipo o sede del sensor');
+    const key = DC.slug(b.key || name);
+    if (!key) throw M.bad('clave inválida');
+    if (store.getDcSensorByKey(machineId, key)) throw new M.HttpError(409, `ya existe un sensor con la clave "${key}" en ese equipo`);
+    const num = (x) => (x === '' || x == null ? null : Number(x));
+    const s = store.createDcSensor({
+      id: DC.newId('dc'), machineId, key, kind: b.kind, name: name.slice(0, 80),
+      unit: (b.unit || DC.UNIT[b.kind] || '').slice(0, 12), link: DC.LINKS.includes(b.link) ? b.link : '',
+      warnLow: num(b.warnLow), warnHigh: num(b.warnHigh), critLow: num(b.critLow), critHigh: num(b.critHigh),
+    });
+    store.event(machineId, 'dc_sensor_creado', `${b.kind} · ${name} (${s.id})`, 0);
+    return [201, DC.view(s)];
+  }, 'staff');
+
+  route('PATCH', '/api/dc/sensors/:id', async (req, p, ctx) => {
+    const s = store.getDcSensor(p.id);
+    if (!s || !dcVisibleRow(ctx, s)) throw new M.HttpError(404, 'no existe el sensor');
+    if (s.machine_id) mustMachine(s.machine_id, ctx);
+    const b = await readJson(req);
+    const f = {};
+    if (b.name !== undefined) { const n = String(b.name).trim(); if (n) f.name = n.slice(0, 80); }
+    if (b.unit !== undefined) f.unit = String(b.unit).slice(0, 12);
+    if (b.link !== undefined) f.link = DC.LINKS.includes(b.link) ? b.link : '';
+    if (b.enabled !== undefined) f.enabled = b.enabled ? 1 : 0;
+    for (const [k, col] of [['warnLow', 'warn_low'], ['warnHigh', 'warn_high'], ['critLow', 'crit_low'], ['critHigh', 'crit_high']])
+      if (b[k] !== undefined) f[col] = (b[k] === '' || b[k] == null) ? null : Number(b[k]);
+    return [200, DC.view(store.updateDcSensor(s.id, f))];
+  }, 'staff');
+
+  route('DELETE', '/api/dc/sensors/:id', async (_req, p, ctx) => {
+    const s = store.getDcSensor(p.id);
+    if (!s || !dcVisibleRow(ctx, s)) throw new M.HttpError(404, 'no existe el sensor');
+    if (s.machine_id) mustMachine(s.machine_id, ctx);
+    store.deleteDcSensor(s.id);
+    return [200, { deleted: true }];
+  }, 'staff');
+
+  route('GET', '/api/dc/sensors/:id/history', async (req, p, ctx) => {
+    const s = store.getDcSensor(p.id);
+    if (!s || !dcVisibleRow(ctx, s)) throw new M.HttpError(404, 'no existe el sensor');
+    const range = new URL(req.url, 'http://x').searchParams.get('range') || '24h';
+    const span = DC.RANGES[range] || DC.RANGES['24h'];
+    const points = store.dcHistory(s.id, Math.floor(Date.now() / 1000) - span).map((r) => ({ ts: r.ts, value: r.value, extra: r.extra ? JSON.parse(r.extra) : null }));
+    return [200, { range, sensor: DC.view(s), points }];
+  }, 'staff');
+
+  route('GET', '/api/dc/sensors/:id/events', async (_req, p, ctx) => {
+    const s = store.getDcSensor(p.id);
+    if (!s || !dcVisibleRow(ctx, s)) throw new M.HttpError(404, 'no existe el sensor');
+    return [200, store.listDcEvents(s.id).map((e) => ({ ts: e.ts, state: e.state, user: e.usr, result: e.result, detail: e.detail }))];
+  }, 'staff');
+
+  route('GET', '/api/dc/cameras', async (_req, _p, ctx) => {
+    const vis = ctx.clientIds === null ? null : visibleIds(ctx);
+    return [200, store.listDcCameras().filter((c) => dcVisibleRow(ctx, c, vis)).map((c) => DC.cameraView(c, { withSecrets: true }))];
+  }, 'staff');
+
+  route('POST', '/api/dc/cameras', async (req, _p, ctx) => {
+    const b = await readJson(req);
+    const name = String(b.name || '').trim();
+    if (!name) throw M.bad('indique el nombre de la cámara');
+    let machineId = null;
+    if (b.machineId) machineId = mustMachine(String(b.machineId), ctx).id;
+    else if (!ctx.isAdmin) throw M.bad('elija el equipo o sede de la cámara');
+    const okUrl = (u) => !u || /^(rtsp|rtsps|http|https):\/\//i.test(u);
+    if (!okUrl(b.rtspUrl) || !okUrl(b.snapshotUrl)) throw M.bad('URL inválida (rtsp:// o http(s)://)');
+    const c = store.createDcCamera({ id: DC.newId('cam'), machineId, name: name.slice(0, 80), rtspUrl: String(b.rtspUrl || '').slice(0, 400), snapshotUrl: String(b.snapshotUrl || '').slice(0, 400), location: String(b.location || '').slice(0, 120) });
+    store.event(machineId, 'dc_camara_creada', `${name} (${c.id})`, 0);
+    return [201, DC.cameraView(c, { withSecrets: true })];
+  }, 'staff');
+
+  route('PATCH', '/api/dc/cameras/:id', async (req, p, ctx) => {
+    const c = store.getDcCamera(p.id);
+    if (!c || !dcVisibleRow(ctx, c)) throw new M.HttpError(404, 'no existe la cámara');
+    if (c.machine_id) mustMachine(c.machine_id, ctx);
+    const b = await readJson(req);
+    const f = {};
+    if (b.name !== undefined) { const n = String(b.name).trim(); if (n) f.name = n.slice(0, 80); }
+    if (b.rtspUrl !== undefined) f.rtsp_url = String(b.rtspUrl).slice(0, 400);
+    if (b.snapshotUrl !== undefined) f.snapshot_url = String(b.snapshotUrl).slice(0, 400);
+    if (b.location !== undefined) f.location = String(b.location).slice(0, 120);
+    if (b.enabled !== undefined) f.enabled = b.enabled ? 1 : 0;
+    return [200, DC.cameraView(store.updateDcCamera(c.id, f), { withSecrets: true })];
+  }, 'staff');
+
+  route('DELETE', '/api/dc/cameras/:id', async (_req, p, ctx) => {
+    const c = store.getDcCamera(p.id);
+    if (!c || !dcVisibleRow(ctx, c)) throw new M.HttpError(404, 'no existe la cámara');
+    if (c.machine_id) mustMachine(c.machine_id, ctx);
+    store.deleteDcCamera(c.id);
+    return [200, { deleted: true }];
+  }, 'staff');
+
+  // Proxy de instantánea: el hub busca la imagen de la cámara y la devuelve (debe poder alcanzarla por red/ZeroTier).
+  route('GET', '/api/dc/cameras/:id/snapshot', async (_req, p, ctx, res) => {
+    const c = store.getDcCamera(p.id);
+    if (!c || !dcVisibleRow(ctx, c)) { send(res, 404, { error: 'no existe la cámara' }); return null; }
+    if (!c.snapshot_url || !/^https?:\/\//i.test(c.snapshot_url)) { send(res, 400, { error: 'la cámara no tiene URL de instantánea http(s)' }); return null; }
+    await new Promise((resolve) => {
+      const lib = c.snapshot_url.startsWith('https') ? https : http;
+      const rq = lib.get(c.snapshot_url, { timeout: 6000 }, (up) => {
+        if (up.statusCode !== 200) { send(res, 502, { error: `la cámara respondió ${up.statusCode}` }); up.resume(); return resolve(); }
+        res.writeHead(200, { 'content-type': up.headers['content-type'] || 'image/jpeg', 'cache-control': 'no-store' });
+        up.pipe(res); up.on('end', resolve);
+      });
+      rq.on('timeout', () => { rq.destroy(); if (!res.headersSent) send(res, 504, { error: 'la cámara no respondió a tiempo' }); resolve(); });
+      rq.on('error', (e) => { if (!res.headersSent) send(res, 502, { error: `no se pudo alcanzar la cámara: ${e.message}` }); resolve(); });
+    });
+    return null;
+  }, 'staff');
 
   // ---------- sesión y cuenta propia ----------
 

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Datacenter · IIT</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="datacenter.css">
+</head>
+<body class="dc-page">
+  <header class="dc-bar">
+    <div class="brand">IIT <span>//</span> Datacenter</div>
+    <select id="dc-site" title="Sede / equipo"></select>
+    <div class="spacer"></div>
+    <button class="btn small" id="dc-add-sensor">+ Sensor</button>
+    <button class="btn small" id="dc-add-camera">+ Cámara</button>
+    <button class="btn small" id="dc-refresh">↻ Refrescar</button>
+    <span class="dc-status" id="dc-status"></span>
+  </header>
+
+  <main class="dc-main">
+    <section>
+      <h3>Sensores</h3>
+      <div id="dc-sensors" class="dc-grid"></div>
+    </section>
+    <section>
+      <h3>Cámaras de seguridad</h3>
+      <div id="dc-cameras" class="dc-cams"></div>
+    </section>
+  </main>
+
+  <!-- Historial / gráfica -->
+  <div id="dc-chart-modal" class="overlay hidden">
+    <div class="modal dc-chart-modal">
+      <div class="dc-chart-head">
+        <h2 id="dc-chart-title">Historial</h2>
+        <div class="dc-ranges" id="dc-ranges"></div>
+        <button class="btn small" data-close>Cerrar</button>
+      </div>
+      <div id="dc-chart"></div>
+      <div id="dc-chart-legend" class="dc-legend"></div>
+      <div id="dc-events" class="dc-events"></div>
+    </div>
+  </div>
+
+  <!-- Alta de sensor -->
+  <div id="dc-sensor-modal" class="overlay hidden">
+    <form class="modal" id="dc-sensor-form" autocomplete="off">
+      <h2>Nuevo sensor</h2>
+      <div class="row">
+        <div class="field" style="flex:2"><label>Nombre</label><input name="name" required maxlength="80" placeholder="Temp Rack A"></div>
+        <div class="field"><label>Tipo</label>
+          <select name="kind">
+            <option value="temperatura">Temperatura</option>
+            <option value="humedad">Humedad</option>
+            <option value="monoxido">Monóxido (CO)</option>
+            <option value="apertura">Apertura biométrica</option>
+            <option value="energia">Energía (fases)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field"><label>Equipo / sede</label><select name="machineId" id="dc-sensor-site"></select></div>
+        <div class="field"><label>Conexión</label>
+          <select name="link">
+            <option value="">(sin especificar)</option>
+            <option value="ethernet">Ethernet</option>
+            <option value="rs232">RS232</option>
+            <option value="modbus">Modbus</option>
+            <option value="4g">4G</option>
+            <option value="5g">5G</option>
+          </select>
+        </div>
+        <div class="field"><label>Clave (ingesta)</label><input name="key" maxlength="40" placeholder="automática" spellcheck="false"></div>
+      </div>
+      <div class="row" id="dc-thresholds">
+        <div class="field"><label>Aviso ≤</label><input name="warnLow" type="number" step="any" placeholder="—"></div>
+        <div class="field"><label>Aviso ≥</label><input name="warnHigh" type="number" step="any" placeholder="28"></div>
+        <div class="field"><label>Crítico ≤</label><input name="critLow" type="number" step="any" placeholder="—"></div>
+        <div class="field"><label>Crítico ≥</label><input name="critHigh" type="number" step="any" placeholder="35"></div>
+      </div>
+      <div class="hint">La clave es la que usará el sensor/agente en sitio para enviar sus lecturas por HTTP (push).</div>
+      <div class="error" id="dc-sensor-error"></div>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancelar</button><button type="submit" class="btn primary">Crear</button></div>
+    </form>
+  </div>
+
+  <!-- Alta de cámara -->
+  <div id="dc-camera-modal" class="overlay hidden">
+    <form class="modal" id="dc-camera-form" autocomplete="off">
+      <h2>Nueva cámara</h2>
+      <div class="row">
+        <div class="field" style="flex:2"><label>Nombre</label><input name="name" required maxlength="80" placeholder="Cámara pasillo"></div>
+        <div class="field"><label>Equipo / sede</label><select name="machineId" id="dc-camera-site"></select></div>
+      </div>
+      <div class="field"><label>URL RTSP</label><input name="rtspUrl" maxlength="400" placeholder="rtsp://usuario:clave@10.0.0.5:554/stream1" spellcheck="false"></div>
+      <div class="field"><label>URL de instantánea (JPEG, opcional)</label><input name="snapshotUrl" maxlength="400" placeholder="http://10.0.0.5/snapshot.jpg" spellcheck="false"></div>
+      <div class="field"><label>Ubicación</label><input name="location" maxlength="120" placeholder="Rack 3 / pasillo norte"></div>
+      <div class="hint">El streaming en vivo llegará en una segunda fase (gateway RTSP→WebRTC). Por ahora: instantánea (si la cámara la expone) + enlace RTSP para abrir en VLC.</div>
+      <div class="error" id="dc-camera-error"></div>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancelar</button><button type="submit" class="btn primary">Crear</button></div>
+    </form>
+  </div>
+
+  <script src="datacenter.js"></script>
+</body>
+</html>

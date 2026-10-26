@@ -1133,6 +1133,7 @@ function renderCitas(list) {
 }
 
 $('#citas-btn').addEventListener('click', openCitas);
+$('#datacenter-btn').addEventListener('click', () => window.open('datacenter.html', '_blank'));
 
 $('#cita-new-form').addEventListener('submit', async (e) => {
   e.preventDefault();

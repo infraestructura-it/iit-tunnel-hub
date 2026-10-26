@@ -105,6 +105,10 @@ function message(alert, tz) {
       return `${alert.level === 'crit' ? '🔴' : '🟠'} ${alert.text}\n${alert.device.name} (${alert.device.host}) · ${alert.machine.name}${alert.machine.client ? ` · ${alert.machine.client}` : ''}\nDesde: ${when(alert.since)}`;
     case 'snmp_ok':
       return `🟢 Normalizado: ${alert.text}\n${alert.device.name} (${alert.device.host}) · ${alert.machine.name}${alert.machine.client ? ` · ${alert.machine.client}` : ''}\nDuró ${duration(alert.downtimeSeconds)}`;
+    case 'dc_alert':
+      return `🔴 Datacenter · ${alert.sensor.name} en crítico: ${alert.value}${alert.sensor.unit ? ' ' + alert.sensor.unit : ''}\n${alert.machine.name}${alert.machine.client ? ` · ${alert.machine.client}` : ''}`;
+    case 'dc_ok':
+      return `🟢 Datacenter · ${alert.sensor.name} normalizado: ${alert.value}${alert.sensor.unit ? ' ' + alert.sensor.unit : ''}\n${alert.machine.name}${alert.machine.client ? ` · ${alert.machine.client}` : ''}`;
     case 'backup_failed':
       return `💾 Falló el respaldo ${alert.kind === 'auto' ? 'automático ' : ''}de la base del hub\n${alert.error || ''}`.trim();
     case 'test':
