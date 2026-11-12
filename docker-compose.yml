@@ -11,8 +11,12 @@ services:
     env_file: .env
     environment:
       DB_PATH: /data/hub.db
+      # Binarios del agente (los sirve /descargas/ a los instaladores). Se generan con agente/compilar.sh
+      # y no van en la imagen ni en Git: se montan desde el host, solo lectura.
+      AGENT_DIST_DIR: /agente-dist
     volumes:
       - hub-data:/data
+      - ./agente/dist:/agente-dist:ro
     restart: unless-stopped
 
   frps:
