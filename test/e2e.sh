@@ -591,7 +591,9 @@ else
   echo "  (SSH en el navegador omitido: requiere root y sshd)"
 fi
 # Escritorio remoto: sin guacd → 503 claro; con el guacd simulado, saludo, parámetros fijados por el hub y eco
-check "RDP sin guacd → 503 que explica qué falta" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"escritorio\"}" -o "$WORK/rdp503.json" -w "%{http_code}")" = 503 ] && grep -q guacd "$WORK/rdp503.json"'
+# Se reintenta: justo después de otros cambios el servicio puede figurar un instante sin publicar (409) y luego pasar a 503
+rdp503() { [ "$(api POST /machines/remota/remote -d "{\"service\":\"escritorio\"}" -o "$WORK/rdp503.json" -w "%{http_code}")" = 503 ] && grep -q guacd "$WORK/rdp503.json"; }
+check "RDP sin guacd → 503 que explica qué falta" 'wait_for_long rdp503'
 python3 "$ROOT/test/fake-guacd.py" 18822 "$WORK/guacd-connect.json" & PIDS+=($!)
 wait_for "(echo > /dev/tcp/127.0.0.1/18822) 2>/dev/null"
 check "RDP: primero pide credenciales (sin ticket)" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"escritorio\"}" | jq -r "[.needCredentials, .kind, (.ticket // \"sin\")] | join(\",\")")" = "true,rdp,sin" ]'
@@ -781,7 +783,8 @@ CONF
   check "el archivo de la sede publica los equipos como sudp sin clave" 'grep -q "name = \"snmp-$UPS-r1\"" "$WORK/sede/accesos-$SEDE.toml" && grep -q "type = \"sudp\"" "$WORK/sede/accesos-$SEDE.toml" && ! grep -q secretKey "$WORK/sede/accesos-$SEDE.toml"'
   kill $SEDEPID 2>/dev/null; sleep 0.5
   ( cd "$WORK/sede" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc2.log 2>&1 ) & SEDEPID=$!; PIDS+=($SEDEPID)
-  pollok() { api POST /snmp/devices/$1/poll | jq -r ".result.ok"; }
+  # UDP por el túnel: un datagrama perdido o el descubrimiento SNMPv3 lento no son un fallo; se reintenta hasta 5 veces
+  pollok() { local r i; for i in 1 2 3 4 5; do r=$(api POST /snmp/devices/$1/poll | jq -r ".result.ok"); [ "$r" = true ] && break; sleep 1; done; echo "$r"; }
   check "UPS consultada por el túnel (UPS-MIB detectado)" 'wait_for_long "[ \"\$(pollok $UPS)\" = true ]" && [ "$(api GET /snmp/devices/$UPS | jq -r ".detected + \" \" + (.metrics.charge|tostring)")" = "ups 100" ]'
   check "UPS APC (PowerNet) detectada con autonomía" '[ "$(pollok $APC)" = true ] && [ "$(api GET /snmp/devices/$APC | jq -r ".detected + \" \" + (.metrics.runtime|tostring)")" = "ups-apc 45" ]'
   check "impresora: consumible bajo → aviso" '[ "$(pollok $PRN)" = true ] && [ "$(api GET /snmp/devices/$PRN | jq -r ".detected + \" \" + .state + \" \" + (.tables.supplies[0].percent|tostring)")" = "printer warn 8" ]'
@@ -800,7 +803,11 @@ CONF
   api POST /snmp/devices/$UPS/poll >/dev/null
   check "al volver la energía → aviso de normalización" 'wait_for "grep -q snmp_ok \"$WORK/hooks.log\""'
   api PATCH /snmp/devices/$SW -d '{"watch":["3"]}' >/dev/null
-  api POST /snmp/devices/$SW/poll > "$WORK/swpoll.json"; api GET /snmp/devices/$SW > "$WORK/swdev.json"
+  for i in 1 2 3 4 5; do
+    api POST /snmp/devices/$SW/poll > "$WORK/swpoll.json"
+    [ "$(jq -r .result.state "$WORK/swpoll.json")" = crit ] && break; sleep 1
+  done
+  api GET /snmp/devices/$SW > "$WORK/swdev.json"
   check "interfaz vigilada caída → crítico" '[ "$(jq -r .result.state "$WORK/swpoll.json")" = crit ] && jq -r ".alerts[].text" "$WORK/swdev.json" | grep -q "Gi1/0/3"'
   [ "$(jq -r .result.state "$WORK/swpoll.json")" = crit ] || { echo "    diagnóstico poll: $(head -c 700 "$WORK/swpoll.json")"; echo "    diagnóstico equipo: $(jq -c "{state,alerts,watch}" "$WORK/swdev.json" 2>/dev/null | head -c 500)"; }
 
