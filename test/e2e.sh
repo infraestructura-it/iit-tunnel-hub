@@ -463,8 +463,9 @@ cp "$WORK/tec1.jar" "$WORK/vieja.jar"
 sapi tec1 POST /auth/logout >/dev/null
 check "cerrar sesión invalida la cookie" '[ "$(scode vieja GET /machines)" = 401 ]'
 check "con 2FA, la contraseña sola no basta" '[ "$(login tec1 tec1 clave-tecnico-nueva-1 | jq -r .needCode)" = true ] && [ "$(scode tec1 GET /machines)" = 401 ]'
-check "con contraseña y código, entra" '[ "$(login tec1 tec1 clave-tecnico-nueva-1 "$(totp $SECRET 30000)" | jq -r .user.username)" = tec1 ]'
-check "un código ya usado no se acepta otra vez" '[ "$(login t2 tec1 clave-tecnico-nueva-1 "$(totp $SECRET 30000)" | jq -r .error)" != null ]'
+C30=$(totp $SECRET 30000)   # un solo cálculo: si se recalcula en el límite de los 30 s, el segundo código cambia
+check "con contraseña y código, entra" '[ "$(login tec1 tec1 clave-tecnico-nueva-1 "$C30" | jq -r .user.username)" = tec1 ]'
+check "un código ya usado no se acepta otra vez" '[ "$(login t2 tec1 clave-tecnico-nueva-1 "$C30" | jq -r .error)" != null ]'
 
 for i in 1 2 3 4 5; do login h2 hotel malamala-clave >/dev/null; done
 check "5 intentos fallidos bloquean el usuario" '[ "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" $API/auth/login -d "{\"username\":\"hotel\",\"password\":\"clave-hotel-nueva-1\"}")" = 423 ]'
@@ -581,6 +582,11 @@ check "ticket inventado → rechazado" 'wsc "${WSU}inventado" vnc | grep -q "ERR
 if [ "$SSHD" = 1 ]; then
   check "SSH: terminal en el navegador con la clave del hub, ajusta el tamaño" 'wait_for_long "node $ROOT/test/ws-client.js \"$WSU$(rticket ssh)\" ssh root | grep -q \"^OK terminal 120x40\""'
   check "la huella SSH del equipo queda guardada (TOFU)" '[ "$(api DELETE /machines/remota/services/ssh/hostkey | jq -r .forgotten)" = ssh ]'
+  # La IA usa el SSH privado (stcp) por el visitante del hub, sin puerto público
+  check "alcance de IA: el SSH puede ser un servicio privado (stcp)" '[ "$(api PUT /machines/remota/ai-scope -o /dev/null -w "%{http_code}" -d "{\"enabled\":true,\"ssh\":{\"service\":\"ssh\",\"user\":\"$(whoami)\"},\"commands\":[{\"id\":\"uptime\",\"command\":\"uptime\",\"mode\":\"read\"}]}")" = 200 ]'
+  check "alcance de IA: un servicio http no sirve de SSH → 400" '[ "$(api PUT /machines/remota/ai-scope -o /dev/null -w "%{http_code}" -d "{\"enabled\":true,\"ssh\":{\"service\":\"web\",\"user\":\"root\"},\"commands\":[{\"id\":\"uptime\",\"command\":\"uptime\",\"mode\":\"read\"}]}")" = 400 ]'
+  api PUT /machines/remota/ai-scope -d "{\"enabled\":true,\"ssh\":{\"service\":\"ssh\",\"user\":\"$(whoami)\"},\"commands\":[{\"id\":\"uptime\",\"command\":\"uptime\",\"mode\":\"read\"}]}" >/dev/null
+  check "la IA ejecuta SSH por el stcp privado (visitante del hub)" 'say m-remota "$(tool ejecutar_comando "{\"maquina_id\":\"remota\",\"comando_id\":\"uptime\",\"motivo\":\"carga\"}")" | jq -r .reply | grep -q "load average"'
 else
   echo "  (SSH en el navegador omitido: requiere root y sshd)"
 fi
@@ -695,6 +701,21 @@ check "token inválido en la ingesta → 401" '[ "$(curl -s -o /dev/null -w "%{h
 check "ingesta a sensor inexistente se reporta sin aceptar" '[ "$(dcpost "{\"readings\":[{\"key\":\"no-existe\",\"value\":1}]}" | jq -r ".accepted")" = 0 ]'
 check "lectura crítica marca el sensor en crit" 'dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":40}]}" >/dev/null; [ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$SID\")][0].status")" = crit ]'
 check "el historial devuelve muestras por rango" '[ "$(api GET "/dc/sensors/$SID/history?range=24h" | jq ".points|length")" -ge 1 ]'
+check "entrar en crítico envía dc_alert por los canales, en español" 'wait_for "grep -q dc_alert \"$WORK/hooks.log\""'
+check "el aviso trae el valor y la unidad" 'jq -r "select(.type==\"dc_alert\") | .text" "$WORK/hooks.log" | grep -q "Temp Rack en crítico: 40 °C"'
+: > "$WORK/hooks.log"
+dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":41}]}" >/dev/null; sleep 1
+check "seguir en crítico no repite el aviso" '! grep -q dc_alert "$WORK/hooks.log"'
+dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":22}]}" >/dev/null
+check "volver a normal → estado ok y aviso dc_ok" '[ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$SID\")][0].status")" = ok ] && wait_for "grep -q dc_ok \"$WORK/hooks.log\""'
+dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":30}]}" >/dev/null
+check "entre aviso y crítico el estado es warn, sin alerta" '[ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$SID\")][0].status")" = warn ] && ! grep -q dc_alert "$WORK/hooks.log"'
+check "lectura no numérica se rechaza sin tumbar el lote" '[ "$(dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":\"abc\"},{\"key\":\"temp-rack\",\"value\":23}]}" | jq -r .accepted)" = 1 ]'
+check "ingesta sin lecturas → 400" '[ "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-IIT-Machine: dc-sede" -H "Authorization: Bearer $DCTOKEN" -H "Content-Type: application/json" "$API/dc/ingest" -d "{}")" = 400 ]'
+check "ajustar umbrales por PATCH cambia el estado en la próxima lectura" 'api PATCH /dc/sensors/$SID -d "{\"warnHigh\":20,\"critHigh\":25}" >/dev/null; dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":26}]}" >/dev/null; [ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$SID\")][0].status")" = crit ]'
+api PATCH /dc/sensors/$SID -d '{"enabled":false}' >/dev/null
+check "sensor deshabilitado no acepta lecturas" '[ "$(dcpost "{\"readings\":[{\"key\":\"temp-rack\",\"value\":1}]}" | jq -r ".results[0].status")" = deshabilitado ]'
+api PATCH /dc/sensors/$SID -d '{"enabled":true}' >/dev/null
 AID=$(api POST /dc/sensors -d '{"machineId":"dc-sede","kind":"apertura","name":"Puerta Rack"}' | jq -r .id)
 dcpost "{\"readings\":[{\"key\":\"puerta-rack\",\"event\":{\"state\":\"abierto\",\"user\":\"jairo\",\"result\":\"denegado\"}}]}" >/dev/null
 check "apertura biométrica denegada → crit y evento registrado" '[ "$(api GET /dc/sensors | jq -r "[.[]|select(.id==\"$AID\")][0].status")" = crit ] && [ "$(api GET "/dc/sensors/$AID/events" | jq "length")" -ge 1 ]'
@@ -710,6 +731,10 @@ python3 -m http.server 18777 --bind 127.0.0.1 --directory "$WORK/cam" >/dev/null
 wait_for "curl -s -o /dev/null http://127.0.0.1:18777/snap.jpg"
 CAM2=$(api POST /dc/cameras -d '{"machineId":"dc-sede","name":"Cam Snap","snapshotUrl":"http://127.0.0.1:18777/snap.jpg"}' | jq -r .id)
 check "el proxy de instantánea trae la imagen de la cámara" '[ "$(api GET /dc/cameras/$CAM2/snapshot -o /dev/null -w "%{http_code}")" = 200 ]'
+check "la clave RTSP de la cámara no sale en la vista pública (maskUrl)" '[ "$(node -e "console.log(require(\"$ROOT/api/src/datacenter.js\").maskUrl(\"rtsp://u:p@10.0.0.5:554/s1\"))")" = "rtsp://u:***@10.0.0.5:554/s1" ]'
+check "instantánea de cámara inalcanzable → 502" 'CAM3=$(api POST /dc/cameras -d "{\"machineId\":\"dc-sede\",\"name\":\"Cam Muerta\",\"snapshotUrl\":\"http://127.0.0.1:18778/x.jpg\"}" | jq -r .id); [ "$(api GET /dc/cameras/$CAM3/snapshot -o /dev/null -w "%{http_code}")" = 502 ]'
+check "URL de cámara con esquema inválido → 400" '[ "$(api POST /dc/cameras -o /dev/null -w "%{http_code}" -d "{\"machineId\":\"dc-sede\",\"name\":\"x\",\"rtspUrl\":\"file:///etc/passwd\"}")" = 400 ]'
+check "máquina deshabilitada no puede enviar lecturas → 401" 'api PATCH /machines/dc-sede -d "{\"enabled\":false}" >/dev/null; c=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "X-IIT-Machine: dc-sede" -H "Authorization: Bearer $DCTOKEN" -H "Content-Type: application/json" "$API/dc/ingest" -d "{\"readings\":[{\"key\":\"temp-rack\",\"value\":1}]}"); api PATCH /machines/dc-sede -d "{\"enabled\":true}" >/dev/null; [ "$c" = 401 ]'
 check "elimina sensor y cámara" '[ "$(api DELETE /dc/sensors/$SID | jq -r .deleted)" = true ] && [ "$(api DELETE /dc/cameras/$CAMID | jq -r .deleted)" = true ]'
 api DELETE /machines/dc-sede >/dev/null
 
@@ -775,7 +800,9 @@ CONF
   api POST /snmp/devices/$UPS/poll >/dev/null
   check "al volver la energía → aviso de normalización" 'wait_for "grep -q snmp_ok \"$WORK/hooks.log\""'
   api PATCH /snmp/devices/$SW -d '{"watch":["3"]}' >/dev/null
-  check "interfaz vigilada caída → crítico" '[ "$(api POST /snmp/devices/$SW/poll | jq -r .result.state)" = crit ] && api GET /snmp/devices/$SW | jq -r ".alerts[].text" | grep -q "Gi1/0/3"'
+  api POST /snmp/devices/$SW/poll > "$WORK/swpoll.json"; api GET /snmp/devices/$SW > "$WORK/swdev.json"
+  check "interfaz vigilada caída → crítico" '[ "$(jq -r .result.state "$WORK/swpoll.json")" = crit ] && jq -r ".alerts[].text" "$WORK/swdev.json" | grep -q "Gi1/0/3"'
+  [ "$(jq -r .result.state "$WORK/swpoll.json")" = crit ] || { echo "    diagnóstico poll: $(head -c 700 "$WORK/swpoll.json")"; echo "    diagnóstico equipo: $(jq -c "{state,alerts,watch}" "$WORK/swdev.json" 2>/dev/null | head -c 500)"; }
 
   # Otra máquina registrada que roba la clave del sudp no puede consultar el equipo
   SK=$(awk -v n="snmp-$UPS" '$0 ~ "name = \""n"\"" {f=1} f && /secretKey/ {gsub(/.*= "|"/,""); print; exit}' "$WORK/hub-frpc.toml")

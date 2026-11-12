@@ -2,6 +2,8 @@
 # Uso (desde la carpeta iit-tunnel-hub):
 #   powershell -ExecutionPolicy Bypass -File .\iniciar-local.ps1
 
+param([switch]$SinNavegador)   # -SinNavegador: no abre el panel al terminar
+
 $root = $PSScriptRoot
 
 # ---------- configuración de prueba local ----------
@@ -44,7 +46,27 @@ if (Test-Path "$root\frp\frps.exe") {
   Write-Host "No se encontró frp\frps.exe: el panel abre, pero sin túneles." -ForegroundColor Yellow
 }
 
-Start-Sleep -Seconds 1
-Start-Process "http://127.0.0.1:$env:PORT"
+# ---------- esperar a que todo responda (hasta 30 s) ----------
+$listo = $false
+for ($i = 0; $i -lt 30; $i++) {
+  try {
+    $h = Invoke-RestMethod "http://127.0.0.1:$env:PORT/api/health" -TimeoutSec 2 -ErrorAction Stop
+    if ($h.checks.db -and ($h.checks.frps -or -not (Test-Path "$root\frp\frps.exe"))) { $listo = $true; break }
+  } catch {
+    # el hub responde 503 mientras frps no está listo: el cuerpo trae los checks
+    $cuerpo = $_.ErrorDetails.Message
+    if ($cuerpo) {
+      try {
+        $h = $cuerpo | ConvertFrom-Json
+        if ($h.checks.db -and $h.checks.frps) { $listo = $true; break }
+      } catch { }
+    }
+  }
+  Start-Sleep -Seconds 1
+}
+if ($listo) { Write-Host "Hub y frps listos." -ForegroundColor Green }
+else { Write-Host "El hub no quedó listo en 30 s: revise las ventanas del hub y de frps." -ForegroundColor Yellow }
+
+if (-not $SinNavegador) { Start-Process "http://127.0.0.1:$env:PORT" }
 Write-Host "Token de administración: $env:ADMIN_TOKEN" -ForegroundColor Green
 Write-Host "La primera vez, el panel pide crear el administrador con ese token; después entre con su usuario." -ForegroundColor Gray
