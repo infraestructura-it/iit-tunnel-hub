@@ -59,7 +59,9 @@ function normalizeScope(body, services, prev, bad) {
     const service = str(body.ssh.service, 20, 'ssh.service', bad, { required: true });
     const user = str(body.ssh.user, 32, 'ssh.user', bad, { required: true });
     const svc = byName.get(service);
-    if (!svc || svc.type !== 'tcp') throw bad(`ssh.service debe ser un servicio tcp de la máquina ("${service}" no lo es)`);
+    // tcp (puerto público de frps) o stcp privado de tipo SSH (el hub entra como visitante, sin puerto público)
+    const privSsh = svc && svc.type === 'stcp' && require('./remote').remoteKind(svc) === 'ssh';
+    if (!svc || (svc.type !== 'tcp' && !privSsh)) throw bad(`ssh.service debe ser un servicio tcp, o stcp de SSH, de la máquina ("${service}" no lo es)`);
     if (!/^[a-z_][a-z0-9_.-]{0,31}$/i.test(user)) throw bad('ssh.user no es un usuario válido');
     out.ssh = { service, user };
   }

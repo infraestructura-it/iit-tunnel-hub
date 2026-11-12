@@ -9,6 +9,7 @@
 
 const crypto = require('node:crypto');
 const S = require('./ai-scope');
+const R = require('./remote'); // remoteKind / visitorPort: SSH privado (stcp) por el visitante del hub
 
 const SETTINGS_KEY = 'ai';
 const USAGE_KEY = 'ai_usage';
@@ -410,7 +411,7 @@ class AIService {
     const item = (scope.commands || []).find((c) => c.id === itemId);
     if (!item) throw bad(`el comando "${itemId}" no está en el alcance de ${m.id}`);
     if (params && Object.keys(params).length) throw bad('los comandos SSH no admiten parámetros');
-    const service = services.find((s) => s.name === scope.ssh?.service && s.type === 'tcp');
+    const service = services.find((s) => s.name === scope.ssh?.service && (s.type === 'tcp' || (s.type === 'stcp' && R.remoteKind(s) === 'ssh')));
     if (!service) throw bad('el servicio SSH configurado en el alcance ya no existe');
     return { m, scope, item, service, filled: {}, summary: `SSH "${item.command}" en ${m.name} (${item.name})` };
   }
@@ -423,7 +424,13 @@ class AIService {
       return { ok: res.ok, output: `HTTP ${res.status}\n${res.output}` };
     }
     await this.key.ensure();
-    const res = await S.runSsh({ command: r.item.command, user: r.scope.ssh.user, port: r.service.remote_port, localAddr: this.config.ai.frpsLocalAddr, key: this.key });
+    // stcp privado: el hub entra por su visitante local (127.0.0.1:<puerto del visitante>); tcp: puerto público de frps
+    let port = r.service.remote_port; let localAddr = this.config.ai.frpsLocalAddr;
+    if (r.service.type === 'stcp') {
+      port = R.visitorPort(this.config.remotePortBase, r.service); localAddr = '127.0.0.1';
+      if (!port || !r.service.secret) return { ok: false, output: 'el servicio SSH privado no tiene visitante del hub; reinstale la máquina o revise el servicio' };
+    }
+    const res = await S.runSsh({ command: r.item.command, user: r.scope.ssh.user, port, localAddr, key: this.key });
     return { ok: res.ok, output: `código de salida ${res.exitCode}\n${res.output}` };
   }
 
