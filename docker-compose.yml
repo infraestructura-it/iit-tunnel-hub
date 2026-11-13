@@ -35,5 +35,37 @@ services:
     command: ["/opt/guacamole/sbin/guacd", "-b", "127.0.0.1", "-l", "4822", "-f"]
     restart: unless-stopped
 
+  # TURN propio para la pantalla WebRTC (NAT estrictos, donde STUN no basta). Opcional: no arranca con un
+  # `up` normal; se activa con  docker compose --profile turn up -d
+  # Requiere en .env: TURN_EXTERNAL_IP (IP pública del servidor), TURN_USER y TURN_PASS, y que el hub use
+  # WEBRTC_ICE_SERVERS=[{"urls":"turn:<IP o dominio>:3478","username":"<TURN_USER>","credential":"<TURN_PASS>"}]
+  # Abrir en el firewall: 3478 UDP+TCP y el rango 49160-49200 UDP. No se permite retransmitir hacia redes privadas.
+  turn:
+    image: coturn/coturn:4.6.2
+    profiles: ["turn"]
+    network_mode: host
+    command:
+      - "-n"
+      - "--lt-cred-mech"
+      - "--realm=iit-tunnel-hub"
+      - "--user=${TURN_USER:-}:${TURN_PASS:-}"
+      - "--external-ip=${TURN_EXTERNAL_IP:-}"
+      - "--listening-port=3478"
+      - "--min-port=49160"
+      - "--max-port=49200"
+      - "--fingerprint"
+      - "--no-cli"
+      - "--no-tls"
+      - "--no-dtls"
+      - "--no-multicast-peers"
+      - "--denied-peer-ip=0.0.0.0-0.255.255.255"
+      - "--denied-peer-ip=10.0.0.0-10.255.255.255"
+      - "--denied-peer-ip=100.64.0.0-100.127.255.255"
+      - "--denied-peer-ip=127.0.0.0-127.255.255.255"
+      - "--denied-peer-ip=169.254.0.0-169.254.255.255"
+      - "--denied-peer-ip=172.16.0.0-172.31.255.255"
+      - "--denied-peer-ip=192.168.0.0-192.168.255.255"
+    restart: unless-stopped
+
 volumes:
   hub-data:
