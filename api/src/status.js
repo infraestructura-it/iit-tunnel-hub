@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const net = require('node:net');
 
 const fileSize = (f) => { try { return fs.statSync(f).size; } catch { return 0; } };
 
@@ -32,6 +33,18 @@ async function frpsProbe(frps) {
     const code = e.cause?.code || (e.name === 'TimeoutError' ? 'TIMEOUT' : null);
     return { reachable: false, latencyMs: null, error: code ? `no responde (${code})` : e.message };
   }
+}
+
+/** ¿guacd acepta conexiones TCP? (solo conecta y cierra; no habla el protocolo) */
+function guacdProbe({ host, port }, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const t = Date.now();
+    const sock = net.connect({ host, port });
+    const done = (r) => { sock.destroy(); resolve(r); };
+    sock.setTimeout(timeoutMs, () => done({ reachable: false, error: 'sin respuesta (TIMEOUT)' }));
+    sock.once('connect', () => done({ reachable: true, latencyMs: Date.now() - t }));
+    sock.once('error', (e) => done({ reachable: false, error: e.code === 'ECONNREFUSED' ? 'no está corriendo (ECONNREFUSED)' : e.message }));
+  });
 }
 
 const count = (store, table, where = '') => {
@@ -70,6 +83,9 @@ async function gather({ config, store, frps, monitor, bot, ai, backups, stats, v
   const writable = dbWritable(store);
   const sessions = count(store, 'sessions', `WHERE expires_at > ${Math.floor(now / 1000)}`);
   const users = store.listUsers();
+  const R = require('./remote');
+  const rdpServices = store.listServices().filter((s) => s.type === 'stcp' && R.browserKind(s) === 'rdp').length;
+  const guacd = await guacdProbe(config.guacd);
 
   const status = {
     at: Math.floor(now / 1000),
@@ -133,6 +149,7 @@ async function gather({ config, store, frps, monitor, bot, ai, backups, stats, v
     },
     telegram: { enabled: tgEnabled, lastOkAt: bot.lastOkAt ? Math.floor(bot.lastOkAt / 1000) : null, lastError: tgEnabled ? bot.lastError || null : null },
     ai: { enabled: aiS.enabled, ready: ai.ready(), model: aiS.model, pending: ai.pending().length },
+    rdp: { services: rdpServices, guacd: { host: config.guacd.host, port: config.guacd.port, ...guacd } },
     snmp: (() => {
       const list = store.listSnmp();
       const by = (s) => list.filter((d) => d.enabled && d.state === s).length;
@@ -172,6 +189,8 @@ function warnings(s, { config, users }) {
   else if (!b.lastOkAt || nowS - b.lastOkAt > 26 * 3600) add('warn', 'No hay un respaldo correcto en las últimas 26 horas.');
   if (b.count && path.dirname(b.dir) === path.dirname(s.db.path)) add('info', 'Los respaldos están en el mismo disco que la base: cópielos también a otro lugar (NAS, nube) o use BACKUP_DIR.');
   if (b.count && !b.encrypted) add('info', 'Los respaldos no están cifrados (contienen claves de servicios y de la IA). Defina BACKUP_KEY para cifrarlos.');
+
+  if (s.rdp.services && !s.rdp.guacd.reachable) add('warn', `Hay ${s.rdp.services} servicio(s) RDP pero guacd no responde en ${s.rdp.guacd.host}:${s.rdp.guacd.port} (${s.rdp.guacd.error}): el escritorio remoto en el navegador no abrirá.`);
 
   const sn = s.snmp;
   if (sn.enabled && sn.hubFrpc && !sn.hubFrpc.available) add('bad', `Hay ${sn.enabled} equipo(s) SNMP pero el hub no tiene frpc para consultarlos: ${sn.hubFrpc.lastError}`);

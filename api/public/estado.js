@@ -83,6 +83,10 @@ async function loadStatus() {
       ['Archivo', `<code>${esc(s.db.path)}</code>`],
     ])],
     ['💽 Disco', disk],
+    ['🖥️ Escritorio remoto (RDP)', kv([
+      ['Servicios RDP', s.rdp.services],
+      ['guacd', `<code>${esc(s.rdp.guacd.host)}:${s.rdp.guacd.port}</code> · ${s.rdp.guacd.reachable ? `<b class="ok">responde</b> (${s.rdp.guacd.latencyMs} ms)` : `<b class="${s.rdp.services ? 'ko' : 'dim'}">${esc(s.rdp.guacd.error)}</b>`}`],
+    ])],
     ['📟 SNMP', kv([
       ['Equipos', `${s.snmp.enabled} activos de ${s.snmp.devices}${s.snmp.devices ? ` · <b class="ok">${s.snmp.ok} normal</b>${s.snmp.warn ? ` · ${s.snmp.warn} aviso` : ''}${s.snmp.crit ? ` · <b class="ko">${s.snmp.crit} crítico</b>` : ''}${s.snmp.down ? ` · <b class="ko">${s.snmp.down} sin respuesta</b>` : ''}${s.snmp.pending ? ` · ${s.snmp.pending} pendiente(s)` : ''}` : ''}`],
       ['Consultas', `${s.snmp.polls} · ${s.snmp.errors} con error`],

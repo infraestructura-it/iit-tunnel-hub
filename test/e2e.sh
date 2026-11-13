@@ -594,8 +594,10 @@ fi
 # Se reintenta: justo después de otros cambios el servicio puede figurar un instante sin publicar (409) y luego pasar a 503
 rdp503() { [ "$(api POST /machines/remota/remote -d "{\"service\":\"escritorio\"}" -o "$WORK/rdp503.json" -w "%{http_code}")" = 503 ] && grep -q guacd "$WORK/rdp503.json"; }
 check "RDP sin guacd → 503 que explica qué falta" 'wait_for_long rdp503'
+check "estado: guacd caído con un servicio RDP → advertencia" 'api GET /status | jq -e ".rdp.services >= 1 and (.rdp.guacd.reachable == false) and ([.warnings[].text] | any(test(\"guacd no responde\")))" >/dev/null'
 python3 "$ROOT/test/fake-guacd.py" 18822 "$WORK/guacd-connect.json" & PIDS+=($!)
 wait_for "(echo > /dev/tcp/127.0.0.1/18822) 2>/dev/null"
+check "estado: con guacd arriba no hay advertencia de guacd" 'api GET /status | jq -e ".rdp.guacd.reachable and ([.warnings[].text] | any(test(\"guacd\")) | not)" >/dev/null'
 check "RDP: primero pide credenciales (sin ticket)" '[ "$(api POST /machines/remota/remote -d "{\"service\":\"escritorio\"}" | jq -r "[.needCredentials, .kind, (.ticket // \"sin\")] | join(\",\")")" = "true,rdp,sin" ]'
 RT=$(api POST /machines/remota/remote -d '{"service":"escritorio","credentials":{"username":"tecnico","password":"Clave Win 1","domain":"OFICINA","layout":"es-latam-qwerty"}}' | jq -r .ticket)
 check "RDP: el hub saluda a guacd, responde el ping y reenvía instrucciones (UTF-8)" 'wsc "$WSU$RT" rdp | grep -q "^OK"'
