@@ -91,7 +91,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/public/cita.html`, `cita.js`, `cita.css` | Página pública de la sala: ingreso por código → WebRTC cámara a cámara + chat + envío de imagen. Cámara/micrófono requieren HTTPS o 127.0.0.1; el chat funciona en http |
 | `test/cita-relay.js` | Cliente de prueba de la sala (dos participantes): verifica el relay de señalización y chat |
 | `test/mock-smtp.js` | Servidor SMTP simulado para las pruebas (EHLO/AUTH/MAIL/RCPT/DATA; guarda cada correo como línea JSON) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (288 casos; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (304 casos; desde Windows: `test/e2e-wsl.ps1`; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -202,7 +202,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Cambiar accesos, rotar clave, borrar un stcp o borrar una máquina visitante ⇒ `plugin.requestReload(dueño)`: se rechaza **un** Ping, frpc cierra la sesión y reconecta (~15 s) y frps vuelve a preguntar `NewProxy`. El Login limpia la marca.
 - Todo `frpc.toml` lleva `includes = ['<dir>/accesos-<id>.toml']`. frp resuelve rutas relativas contra el **directorio de trabajo** (no el del toml) y falla si la **carpeta** no existe, pero ignora un archivo inexistente: por eso es un archivo en la misma carpeta y no una subcarpeta. Instaladores: `/etc/iit-frpc/` y `__IIT_DIR__\`.
 - El archivo de accesos y los scripts `accesos-<id>.{sh,ps1}` llevan claves pero **no** el token de la máquina. `.ps1` con BOM.
-- La IA no usa stcp (SSH de la IA sigue requiriendo `tcp`); el hub ya es visitante de los SSH para el navegador (remote.js), falta usarlo en ai-scope.
+- La IA también usa SSH privado: un servicio stcp de SSH entra al alcance (`ai-scope.js` `privSsh`) y `ai.js` conecta por el visitante `_hub` en `127.0.0.1:visitorPort` (`remote.js`).
 
 ## IA: reglas (no romper)
 
@@ -259,7 +259,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Destino: VPS o VM Linux propia. `docker compose up -d --build` (red del host) o `deploy/install.sh`.
 - DNS en Cloudflare **solo DNS (nube gris)**: `tuneles.<dominio>` y `*.clientes.<dominio>`.
 - Si Nginx ya usa el 443: `stream` + `ssl_preread` hacia frps (ver README).
-- Las imágenes Docker aún **no se han construido** en un daemon real; validar en el primer despliegue.
+- La imagen del hub se construyó y validó en Docker Desktop (sirve `/descargas/` desde `agente/dist` montado solo lectura vía `AGENT_DIST_DIR`); `frps` y `docker compose up` (red del host, solo Linux) quedan por validar en el primer despliegue.
 
 ## Pendientes / ideas
 
@@ -267,9 +267,8 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Portal de cliente con alertas propias (Telegram/webhook por cliente).
 - Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
 - Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
-- Que la IA use SSH privado: el hub ya es visitante de los SSH stcp (remote.js); falta que ai-scope use ese puerto local.
 - RDP en el navegador: probado con xrdp + guacd 1.3 (Ubuntu) por el túnel real; falta probar contra Windows real y guacd en Docker Desktop (`host.docker.internal` hacia puertos solo 127.0.0.1). Pendiente: subir/bajar archivos, guacd en `/api/status`.
-- WebRTC pantalla Windows (captura propia): GDI + SendInput + cursor dibujado. Modo **supervisor** (`-supervisor`, `supervisor_windows.go`): la tarea "IIT agente" corre como SYSTEM AtStartup y lanza el trabajador (CreateProcessAsUser con token SYSTEM + TokenSessionId) en la **sesión de consola activa**, con privilegio para capturar esa sesión e inyectar en cualquier ventana (incluidas elevadas). Instalador: admin ⇒ supervisor SYSTEM (además excluye el agente de Windows Defender: carpeta + proceso `iit-agente.exe` + `Remove-MpThreat`, porque la captura/inyección se marca como HackTool); sin admin ⇒ trabajador por-usuario (limitado). **Seguimiento de escritorio en vivo hecho** (`ensureDesktop` se reengancha al escritorio de entrada en cada captura: muestra la pantalla de login como SYSTEM y sigue el cambio a la sesión del usuario). Pendiente: video H.264, varios monitores, archivos. TURN propio en el VPS; servir `agente/dist` en la imagen Docker (`AGENT_DIST_DIR`).
+- WebRTC pantalla Windows (captura propia): GDI + SendInput + cursor dibujado. Modo **supervisor** (`-supervisor`, `supervisor_windows.go`): la tarea "IIT agente" corre como SYSTEM AtStartup y lanza el trabajador (CreateProcessAsUser con token SYSTEM + TokenSessionId) en la **sesión de consola activa**, con privilegio para capturar esa sesión e inyectar en cualquier ventana (incluidas elevadas). Instalador: admin ⇒ supervisor SYSTEM (además excluye el agente de Windows Defender: carpeta + proceso `iit-agente.exe` + `Remove-MpThreat`, porque la captura/inyección se marca como HackTool); sin admin ⇒ trabajador por-usuario (limitado). **Seguimiento de escritorio en vivo hecho** (`ensureDesktop` se reengancha al escritorio de entrada en cada captura: muestra la pantalla de login como SYSTEM y sigue el cambio a la sesión del usuario). Pendiente: video H.264, varios monitores, archivos. TURN propio en el VPS.
 - SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.
