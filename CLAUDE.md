@@ -42,7 +42,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/public/vendor/qrcode.js` | qrcode-generator 1.4.4 (MIT), servido localmente para el QR del 2FA |
 | `api/src/backup.js` | Respaldos: `VACUUM INTO`, sin sesiones, `quick_check`, cifrado AES-256-GCM opcional, programación diaria por zona horaria, retención |
 | `api/src/respaldo.js` | CLI: `verificar`, `descifrar`, `restaurar --hub-detenido` |
-| `api/src/status.js` | `/api/status` (estado y advertencias) y `/api/health` (200/503 para monitores) |
+| `api/src/status.js` | `/api/status` (estado, sondeo de guacd y advertencias) y `/api/health` (200/503 para monitores) |
 | `api/public/estado.js` | Panel: modal 🩺 Estado y respaldos |
 | `api/src/snmp.js` | Cliente SNMP sin dependencias: BER, GET/GETNEXT/GETBULK/walk, v2c y v3 (USM: MD5/SHA/SHA-2, AES-128, DES con legacy provider) |
 | `api/src/snmp-profiles.js` | Perfiles (ups, ups-apc, network, printer, host, generic): detección, lectura, metadatos y reglas de alerta |
@@ -91,7 +91,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 | `api/public/cita.html`, `cita.js`, `cita.css` | Página pública de la sala: ingreso por código → WebRTC cámara a cámara + chat + envío de imagen. Cámara/micrófono requieren HTTPS o 127.0.0.1; el chat funciona en http |
 | `test/cita-relay.js` | Cliente de prueba de la sala (dos participantes): verifica el relay de señalización y chat |
 | `test/mock-smtp.js` | Servidor SMTP simulado para las pruebas (EHLO/AUTH/MAIL/RCPT/DATA; guarda cada correo como línea JSON) |
-| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (304 casos; desde Windows: `test/e2e-wsl.ps1`; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
+| `test/e2e.sh` | Prueba de punta a punta con frps/frpc reales (306 casos; desde Windows: `test/e2e-wsl.ps1`; SNMP requiere root, `snmpd` y `snmpsim-command-responder`) |
 
 ## Comandos
 
@@ -267,7 +267,7 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - Portal de cliente con alertas propias (Telegram/webhook por cliente).
 - Probar la IA con una clave real (en desarrollo solo se probó con el simulador) y SSH desde Windows.
 - Probar stcp con RDP real entre dos Windows (en desarrollo: SSH simulado e instalador Linux real del visitante, sin systemd).
-- RDP en el navegador: probado con xrdp + guacd 1.3 (Ubuntu) por el túnel real; falta probar contra Windows real y guacd en Docker Desktop (`host.docker.internal` hacia puertos solo 127.0.0.1). Pendiente: subir/bajar archivos, guacd en `/api/status`.
+- RDP en el navegador: probado con xrdp + guacd 1.3 (Ubuntu) por el túnel real; falta probar contra Windows real y guacd en Docker Desktop (`host.docker.internal` hacia puertos solo 127.0.0.1). Pendiente: subir/bajar archivos. guacd ya se sondea en `/api/status` (`rdp`) y avisa si hay servicios RDP sin guacd.
 - WebRTC pantalla Windows (captura propia): GDI + SendInput + cursor dibujado. Modo **supervisor** (`-supervisor`, `supervisor_windows.go`): la tarea "IIT agente" corre como SYSTEM AtStartup y lanza el trabajador (CreateProcessAsUser con token SYSTEM + TokenSessionId) en la **sesión de consola activa**, con privilegio para capturar esa sesión e inyectar en cualquier ventana (incluidas elevadas). Instalador: admin ⇒ supervisor SYSTEM (además excluye el agente de Windows Defender: carpeta + proceso `iit-agente.exe` + `Remove-MpThreat`, porque la captura/inyección se marca como HackTool); sin admin ⇒ trabajador por-usuario (limitado). **Seguimiento de escritorio en vivo hecho** (`ensureDesktop` se reengancha al escritorio de entrada en cada captura: muestra la pantalla de login como SYSTEM y sigue el cambio a la sesión del usuario). Pendiente: video H.264, varios monitores, archivos. TURN propio: servicio opcional `turn` (coturn) en `docker-compose.yml`, perfil `turn`, con `TURN_*` en `.env` y `WEBRTC_ICE_SERVERS` en el hub; falta probarlo con un NAT estricto real.
 - SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
