@@ -97,6 +97,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 
 ```bash
 # Pruebas (Linux/WSL; descarga frp en .frp/ si falta)
+node --test test/unidad/*.test.js
 ./test/e2e.sh
 
 # Hub en desarrollo (Linux)
@@ -272,3 +273,4 @@ Panel local: `http://127.0.0.1:8090`. Primera vez: crear el administrador con el
 - SNMP: traps (hoy solo sondeo), AES-192/256, SET con aprobación, envío automático del archivo de accesos a la sede (API de admin del frpc de la sede).
 - Emisión automática de certificados por máquina (DNS-01 con Cloudflare) para `https` con TLS local.
 - Probar el instalador Windows en un equipo real (solo se validó el parseo con PowerShell 7 en Linux) y el camino systemd del instalador Linux en una Raspberry.
+- Transporte de las máquinas hacia frps: `FRPS_CLIENT_TRANSPORT` = tcp | websocket | wss y `FRPS_CLIENT_PORT` (443 por defecto con wss). `M.clientEndpoint(frps, serverAddr)` decide dirección, puerto y protocolo: solo con `FRPS_PUBLIC_ADDR` se aplican el transporte y el puerto de cliente; con otra dirección (LAN/ZeroTier) va tcp al `bindPort`. frps acepta WebSocket en el mismo `bindPort` (ruta `/~!frp`), sin configuración extra. El frpc interno del hub (`hubfrpc.js`) sigue en tcp a 127.0.0.1. Pruebas: `test/unidad/transporte-frps.test.js` y la sección 15b de `test/e2e.sh`.
