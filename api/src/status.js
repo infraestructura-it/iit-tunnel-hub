@@ -133,6 +133,8 @@ async function gather({ config, store, frps, monitor, bot, ai, backups, stats, v
       apiUrl: config.frps.apiUrl,
       publicAddr: config.frps.publicAddr,
       bindPort: config.frps.bindPort,
+      clientTransport: config.frps.clientTransport,
+      clientPort: config.frps.clientPort,
       clientsOnline: live.clients.size,
       proxies: live.proxies.size,
       authToken: !!config.frps.authToken,

@@ -162,6 +162,20 @@ function normalizeServerAddr(v, fallback) {
 }
 
 /**
+ * Cómo se conecta una máquina a frps.
+ * Con la dirección pública (FRPS_PUBLIC_ADDR) se usan el transporte y el puerto de cliente configurados
+ * (p. ej. wss:443 detrás de Cloudflare Tunnel). Si el instalador indica otra dirección (una IP de la LAN o
+ * de ZeroTier), la máquina va directo a frps: tcp al bindPort.
+ */
+function clientEndpoint(frps, serverAddr) {
+  const addr = serverAddr || frps.publicAddr;
+  const viaPublic = addr === frps.publicAddr;
+  const protocol = viaPublic ? (frps.clientTransport || 'tcp') : 'tcp';
+  const port = viaPublic ? (frps.clientPort || frps.bindPort) : frps.bindPort;
+  return { addr, port, protocol, label: `${protocol === 'tcp' ? '' : protocol + '://'}${addr}:${port}` };
+}
+
+/**
  * opts.serverAddr: dirección del servidor para esta máquina (por defecto FRPS_PUBLIC_ADDR)
  * opts.certDir:    carpeta de certificados para https con TLS local (por defecto ./certs)
  * opts.extra:      líneas adicionales de configuración global (p. ej. log.to)
@@ -170,18 +184,21 @@ function normalizeServerAddr(v, fallback) {
  */
 function frpcToml(machine, services, frps, token, opts = {}) {
   const certDir = opts.certDir || './certs';
+  const ep = clientEndpoint(frps, opts.serverAddr);
   const lines = [
     `# frpc.toml generado por IIT Tunnel Hub`,
     `# Máquina: ${machine.name}${machine.client ? ' · Cliente: ' + machine.client : ''}`,
     `# Guarde este archivo junto a frpc y ejecute:  frpc -c frpc.toml`,
     ``,
-    `serverAddr = ${q(opts.serverAddr || frps.publicAddr)}`,
-    `serverPort = ${frps.bindPort}`,
+    `serverAddr = ${q(ep.addr)}`,
+    `serverPort = ${ep.port}`,
     `user = ${q(machine.id)}`,
     `loginFailExit = false`,
     `transport.heartbeatInterval = 15`,
     `transport.heartbeatTimeout = 45`,
   ];
+  // WebSocket (wss: con TLS, p. ej. a través de Cloudflare Tunnel en el 443)
+  if (ep.protocol !== 'tcp') lines.push(`transport.protocol = ${q(ep.protocol)}`);
   if (frps.authToken) lines.push(`auth.token = ${q(frps.authToken)}`);
   lines.push(`metadatas.token = ${q(token || 'PEGUE_AQUI_EL_TOKEN_DE_LA_MAQUINA')}`);
   for (const l of opts.extra || []) lines.push(l);
@@ -314,5 +331,5 @@ function rdpFile(a, user = '') {
 
 module.exports = {
   normalizeAccess, accessToml, accessFileName, snmpProxyName, rdpFile, newSecret, suggestedPort,
-  HttpError, bad, newToken, hashToken, tokenMatches, normalizeMachine, normalizeService, publicUrl, frpcToml, normalizeServerAddr, ID_RE,
+  HttpError, bad, newToken, hashToken, tokenMatches, normalizeMachine, normalizeService, publicUrl, frpcToml, clientEndpoint, normalizeServerAddr, ID_RE,
 };

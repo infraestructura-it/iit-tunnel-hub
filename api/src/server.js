@@ -346,6 +346,8 @@ function createApi(store, frps, monitor, ai, plugin, extra = {}) {
         totalTrafficOut: status.server?.totalTrafficOut ?? null,
         publicAddr: config.frps.publicAddr,
         bindPort: config.frps.bindPort,
+        clientTransport: config.frps.clientTransport,
+        clientPort: config.frps.clientPort,
         subdomainHost: config.frps.subdomainHost,
         tcpPortRange: [config.frps.tcpPortMin, config.frps.tcpPortMax],
       },

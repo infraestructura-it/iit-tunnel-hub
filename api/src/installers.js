@@ -2,7 +2,7 @@
 // Instaladores autocontenidos por máquina: llevan la configuración y el token incrustados,
 // descargan frpc para la arquitectura del equipo y lo dejan como servicio.
 
-const { frpcToml, accessFileName } = require('./machines');
+const { frpcToml, accessFileName, clientEndpoint } = require('./machines');
 
 const FRP_VERSION = '0.71.0';
 const RELEASES = `https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}`;
@@ -41,7 +41,7 @@ set -euo pipefail
 
 FRP_VERSION="${FRP_VERSION}"
 MACHINE_ID="${machine.id}"
-SERVER="${serverAddr}:${frps.bindPort}"
+SERVER="${clientEndpoint(frps, serverAddr).label}"
 DIR=/etc/iit-frpc
 BIN=/usr/local/bin/iit-frpc
 UNIT=/etc/systemd/system/iit-frpc.service
@@ -255,7 +255,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $FrpVersion = "${FRP_VERSION}"
 $MachineId  = "${machine.id}"
-$Server     = "${serverAddr}:${frps.bindPort}"
+$Server     = "${clientEndpoint(frps, serverAddr).label}"
 $TaskName   = "IIT frpc"
 $AgentTask  = "IIT agente"
 $HubUrl     = "${hubUrl}"

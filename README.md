@@ -110,6 +110,18 @@ stream {
 }
 ```
 
+### Detrás de Cloudflare Tunnel (sin abrir puertos)
+
+El panel y frps pueden quedar en un servidor sin IP pública ni puertos abiertos, con `cloudflared` en la misma red:
+
+1. En el `.env`: `HOST=0.0.0.0`, `COOKIE_SECURE=1`, `HUB_PUBLIC_URL=https://hub.ejemplo.com`, `FRPS_PUBLIC_ADDR=frp.ejemplo.com` y `FRPS_CLIENT_TRANSPORT=wss`.
+2. En el túnel de Cloudflare, dos rutas (*Published application*):
+   - `hub.ejemplo.com` → `http://<IP del servidor>:8080` (panel, API, instaladores y WebSocket de las sesiones)
+   - `frp.ejemplo.com` → `http://<IP del servidor>:7000` (control de frps: Cloudflare termina el TLS y entrega el WebSocket a frps en la ruta `/~!frp`)
+3. Los instaladores y `frpc.toml` salen con `serverPort = 443` y `transport.protocol = "wss"`.
+
+Límites: Cloudflare solo deja pasar HTTP/WebSocket, así que los servicios **tcp públicos** (rango `FRPS_TCP_PORT_MIN–MAX`) y los subdominios de `FRPS_SUBDOMAIN_HOST` no quedan alcanzables desde internet por ese camino. Los servicios **privados (stcp)**, las sesiones en el navegador (terminal SSH, VNC, RDP), la pantalla WebRTC, SNMP y la IA funcionan igual, porque viajan por la conexión de control. Si un instalador se genera con otra dirección del servidor (IP de la LAN o de ZeroTier), ese equipo se conecta directo por tcp al `FRPS_BIND_PORT`.
+
 ## 3. Registrar una máquina
 
 En el panel: **+ Registrar máquina**, nombre, cliente y servicios. Al guardar aparecen el **token** (se muestra una sola vez) y el **frpc.toml** listo para descargar.
@@ -507,10 +519,11 @@ Si el hub no responde, frps rechaza: el sistema falla cerrado. Por eso, al reini
 ## Pruebas
 
 ```bash
-./test/e2e.sh
+node --test test/unidad/*.test.js   # unitarias (rápidas, sin red)
+./test/e2e.sh                       # punta a punta (también corre las unitarias)
 ```
 
-Levanta frps, el hub y frpc reales en localhost y verifica 306 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores, la instalación con código (arranque real, canje único, revocación, token anterior anulado, límite por IP), las sesiones remotas en el navegador (VNC y SSH reales por el túnel privado, RDP con guacd simulado, pantalla por WebRTC directo con el agente real, ticket de un uso, origen, permisos, huella) y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado (incluido el aviso de guacd caído con servicios RDP); y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
+Levanta frps, el hub y frpc reales en localhost y verifica 306 casos: registro, tráfico http/tcp/https por SNI, certificado presentado por la máquina, rechazo de tokens falsos y de servicios no registrados, deshabilitar y eliminar, rotación de token, generación de instaladores, la instalación con código (arranque real, canje único, revocación, token anterior anulado, límite por IP), las sesiones remotas en el navegador (VNC y SSH reales por el túnel privado, RDP con guacd simulado, pantalla por WebRTC directo con el agente real, ticket de un uso, origen, permisos, huella) y alertas (caída, recuperación, cortes breves, servidor caído) y la IA con simuladores de la API de Claude y de Telegram: consultas HTTP y comandos SSH reales por el túnel, aprobaciones, rechazos, límites del alcance, secretos que nunca llegan a la IA y el bot; y los servicios privados: visitante autorizado entra, otra máquina con la clave no, frps no abre puertos, revocar y rotar cortan el acceso, y la migración de bases anteriores; una máquina conectada por WebSocket (como detrás de Cloudflare Tunnel) entra, publica y es expulsada al eliminarla; y los usuarios: primer administrador, técnico limitado a sus clientes (también en la IA), cliente de solo lectura, cambio obligatorio de contraseña, 2FA con código de un solo uso, bloqueo por intentos, CSRF, cierre de sesión y auditoría; respaldos (al arrancar, manual, sin sesiones, descarga, retención, fallo con alerta, CLI de verificación y restauración, cifrado) y la página de estado (incluido el aviso de guacd caído con servicios RDP); y SNMP con agentes reales (Net-SNMP v2c y v3 SHA-256/AES y MD5/DES) y simulados (UPS, APC, impresora, switch) por el túnel: detección, alertas y normalización, interfaz vigilada, otra máquina con la clave rechazada, usuario interno del hub protegido, cambio de IP y permisos.
 
 ## Límites conocidos
 

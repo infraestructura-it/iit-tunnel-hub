@@ -5,6 +5,9 @@ const path = require('node:path');
 
 const env = process.env;
 
+// Transportes de frpc hacia frps que el hub sabe generar
+const CLIENT_TRANSPORTS = ['tcp', 'websocket', 'wss'];
+
 function int(name, def) {
   const v = env[name];
   if (v === undefined || v === '') return def;
@@ -88,6 +91,12 @@ const config = {
     // Dirección con la que las máquinas llegan a frps (IP pública, dominio o IP de ZeroTier/LAN)
     publicAddr: env.FRPS_PUBLIC_ADDR || '127.0.0.1',
     bindPort: int('FRPS_BIND_PORT', 7000),
+    // Cómo llegan las máquinas a FRPS_PUBLIC_ADDR: tcp (directo al puerto de control), websocket o wss.
+    // wss sirve detrás de un proxy HTTPS como Cloudflare Tunnel: el proxy termina el TLS y entrega el
+    // WebSocket a frps, que lo acepta en el mismo bindPort (ruta /~!frp). No hay que abrir puertos.
+    clientTransport: (env.FRPS_CLIENT_TRANSPORT || 'tcp').trim().toLowerCase(),
+    // Puerto al que se conectan las máquinas. Por defecto: 443 con wss, bindPort en los demás casos.
+    clientPort: int('FRPS_CLIENT_PORT', (env.FRPS_CLIENT_TRANSPORT || '').trim().toLowerCase() === 'wss' ? 443 : int('FRPS_BIND_PORT', 7000)),
     // Token global de frps (auth.token). Opcional: la autenticación real es por máquina.
     authToken: env.FRP_AUTH_TOKEN || '',
     subdomainHost: env.FRPS_SUBDOMAIN_HOST || 'tuneles.local',
@@ -109,10 +118,14 @@ function validate() {
   const errors = [];
   if (config.adminToken.length < 16) errors.push('ADMIN_TOKEN es obligatorio y debe tener al menos 16 caracteres');
   if (config.frps.tcpPortMin > config.frps.tcpPortMax) errors.push('FRPS_TCP_PORT_MIN no puede ser mayor que FRPS_TCP_PORT_MAX');
+  if (!CLIENT_TRANSPORTS.includes(config.frps.clientTransport)) {
+    errors.push(`FRPS_CLIENT_TRANSPORT debe ser uno de: ${CLIENT_TRANSPORTS.join(', ')}`);
+  }
+  if (!(config.frps.clientPort >= 1 && config.frps.clientPort <= 65535)) errors.push('FRPS_CLIENT_PORT debe ser un puerto entre 1 y 65535');
   if (config.hubPublicUrl && !/^https?:\/\/[A-Za-z0-9.\-[\]:]+(\/[A-Za-z0-9._~\-/]*)?$/.test(config.hubPublicUrl)) {
     errors.push('HUB_PUBLIC_URL debe ser una URL http(s)://host[:puerto][/ruta]');
   }
   return errors;
 }
 
-module.exports = { config, validate };
+module.exports = { config, validate, CLIENT_TRANSPORTS };

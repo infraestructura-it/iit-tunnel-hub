@@ -97,6 +97,9 @@ wait_for() { local cond="$1" n=0; while [ $n -lt 40 ]; do eval "$cond" && return
 wait_for_long() { local cond="$1" n=0; while [ $n -lt 70 ]; do eval "$cond" && return 0; sleep 1; n=$((n+1)); done; return 1; }
 start_frpc() { "$FRP_DIR/frpc" -c "$1" > "$1.log" 2>&1 & echo $!; }
 
+echo "0. Pruebas unitarias"
+check "node --test test/unidad (transporte tcp/websocket/wss)" 'node --test "$ROOT"/test/unidad/*.test.js > "$WORK/unidad.log" 2>&1 || { tail -30 "$WORK/unidad.log"; false; }'
+
 echo "1. API y frps"
 check "health responde" 'wait_for "[ \"\$(api GET /health | jq -r .ok)\" = true ]"'
 check "sin token → 401" '[ "$(curl -s -o /dev/null -w "%{http_code}" $API/machines)" = "401" ]'
@@ -874,6 +877,21 @@ api POST /backups >/dev/null
 api GET /status > "$WORK/status.json"
 check "estado: frps, plugin, base y monitor" 'jq -e ".frps.reachable and .plugin.listening and (.plugin.calls > 0) and .db.writable and (.monitor.lastCheckAt != null) and (.hub.uptimeSeconds > 0)" "$WORK/status.json" >/dev/null'
 check "estado: advierte administradores sin 2FA" 'jq -e "[.warnings[].text] | any(test(\"sin verificación en dos pasos\"))" "$WORK/status.json" >/dev/null'
+
+echo "15b. Máquina conectada por WebSocket (como detrás de Cloudflare Tunnel)"
+# frps acepta WebSocket en el mismo bindPort (ruta /~!frp). Con wss el TLS lo pone el proxy (Cloudflare);
+# aquí se prueba el WebSocket sin TLS contra el frps real, con la autorización del hub incluida.
+api POST /machines -d '{"name":"Equipo WS","client":"Sede Remota","services":[{"name":"web","type":"http","localPort":18999}]}' > "$WORK/ws.json"
+WSID=$(jq -r .machine.id "$WORK/ws.json")
+mkdir -p "$WORK/ws"
+jq -r .frpcToml "$WORK/ws.json" | sed '/^transport.heartbeatTimeout/a transport.protocol = "websocket"' > "$WORK/ws/frpc.toml"
+check "frpc.toml con transport.protocol websocket es válido" '"$FRP_DIR/frpc" verify -c "$WORK/ws/frpc.toml" >/dev/null'
+( cd "$WORK/ws" && exec "$FRP_DIR/frpc" -c frpc.toml > frpc.log 2>&1 ) & WSPID=$!; PIDS+=($WSPID)
+check "la máquina por WebSocket aparece en línea" 'wait_for "[ \"\$(api GET /machines/$WSID | jq -r .online)\" = true ]"'
+check "HTTP por subdominio llega por el túnel WebSocket" 'wait_for "[ \"\$(curl -s -H \"Host: web-$WSID.test.local\" http://127.0.0.1:18080/)\" = hola-desde-la-maquina ]"'
+check "por WebSocket también se rechaza un token inválido" '! grep -q "login to server success" <(sed "s|^metadatas.token = .*|metadatas.token = \"token-falso-1234567890\"|" "$WORK/ws/frpc.toml" > "$WORK/ws/malo.toml"; timeout 4 "$FRP_DIR/frpc" -c "$WORK/ws/malo.toml" 2>&1)'
+check "eliminar la máquina WebSocket la expulsa de frps" '[ "$(api DELETE /machines/$WSID | jq -r .deleted)" = "$WSID" ] && wait_for_long "! kill -0 $WSPID 2>/dev/null || ! curl -s -u admin:$FRPS_API_PASSWORD http://127.0.0.1:7500/api/clients | jq -e \".[] | select(.user == \\\"$WSID\\\")\" >/dev/null"'
+kill $WSPID 2>/dev/null
 
 echo "16. Configuración y limpieza"
 check "frpc.toml descargable sin exponer el token" 'api GET /machines/$ID/frpc.toml | grep -q PEGUE_AQUI_EL_TOKEN'
