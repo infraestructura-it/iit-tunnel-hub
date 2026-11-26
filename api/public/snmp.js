@@ -48,7 +48,7 @@ function snmpSummary(d) {
   return d.sys?.descr ? d.sys.descr.slice(0, 60) : '';
 }
 
-/** Línea de la tarjeta de máquina en el tablero. */
+/** Línea SNMP en la fila de la máquina (tabla de equipos). */
 function snmpCardLine(m) {
   const list = state.snmp.filter((d) => d.machine === m.id);
   if (!list.length) return '';
