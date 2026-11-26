@@ -264,7 +264,7 @@ No avisan las máquinas que nunca se han conectado, las deshabilitadas ni las qu
 
 ## Sesiones remotas en el navegador (pantalla VNC, terminal SSH y escritorio de Windows)
 
-Como Raspberry Pi Connect: en la tarjeta de la máquina, **Conectar por ▾ → 🖥 Pantalla (VNC)**, **⌨ Terminal (SSH)** o **🪟 Escritorio remoto (RDP)** abre la sesión en una pestaña del navegador. No hay que instalar nada en el PC del técnico ni aplicar archivos de accesos, y la máquina no abre ningún puerto público.
+Como Raspberry Pi Connect: en la fila de la máquina, **Conectar por ▾ → 🖥 Pantalla (VNC)**, **⌨ Terminal (SSH)** o **🪟 Escritorio remoto (RDP)** abre la sesión en una pestaña del navegador. No hay que instalar nada en el PC del técnico ni aplicar archivos de accesos, y la máquina no abre ningún puerto público.
 
 ```
 navegador ──WebSocket (sesión del panel)──▶ hub ──▶ frpc del hub (visitante "_hub") ──▶ frps ──▶ frpc de la máquina ──▶ VNC :5900 / SSH :22
@@ -308,7 +308,7 @@ navegador ════════════ equipo   canal de datos WebRTC "r
 ```
 
 - **Instalación:** el instalador Linux (descargado o con código) instala el agente si la máquina tiene un servicio VNC: lo descarga **del propio hub** (`/descargas/iit-agente-linux-<arm|arm64|amd64>`), escribe `/etc/iit-frpc/agente.json` (600) y lo deja como servicio `iit-agente`. Usa el mismo id y token de la máquina; al reinstalar (token nuevo) se actualiza.
-- **En el panel:** "Conectar por ▾ → Pantalla (VNC)" muestra **· directo** cuando el agente está conectado, y la tarjeta muestra "agente 1.0.0". La pestaña dice **Conectado · directo (WebRTC)** o **Conectado · por el túnel**.
+- **En el panel:** "Conectar por ▾ → Pantalla (VNC)" muestra **· directo** cuando el agente está conectado, y la tabla de equipos muestra "agente 1.0.0". La pestaña dice **Conectado · directo (WebRTC)** o **Conectado · por el túnel**.
 - **Respaldo automático:** si el canal directo no se abre en 10 s (firewall, NAT estricto), la misma pestaña se conecta por el túnel frp, como antes.
 - **Red:** en la misma ZeroTier/LAN conecta sin nada más. Entre redes distintas usa STUN (`stun.l.google.com` por defecto); para NAT estrictos defina un servidor TURN propio en `WEBRTC_ICE_SERVERS` (JSON, p. ej. `[{"urls":"turn:turn.infraestructura-it.com:3478","username":"u","credential":"c"}]`).
 - **Seguridad:** el agente entra al hub con el token de la máquina (sin token válido ⇒ 401 y evento `agente_rechazado`); solo conecta el canal al IP:puerto del servicio VNC que el hub tiene registrado; la contraseña de wayvnc se sigue pidiendo igual.

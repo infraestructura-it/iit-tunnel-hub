@@ -27,7 +27,7 @@ Máquina cliente: frpc ──túnel saliente──▶ frps :7000
 ## Stack y convenciones
 
 - **Node.js ≥ 22.13 sin `npm install`.** SQLite con el módulo nativo `node:sqlite` (`DatabaseSync`). Única excepción: `ssh2` y sus dependencias **vendorizadas** en `api/deps/` (ver `api/deps/LEEME.md`), para la terminal SSH del navegador. No agregar paquetes sin necesidad clara.
-- **Frontend vanilla** HTML/CSS/JS en `api/public/` (sin frameworks, sin build). Estética oscura IIT: fondo `#080b10`, cian/verde/morado, fuentes Syne / Space Mono / DM Mono.
+- **Frontend vanilla** HTML/CSS/JS en `api/public/` (sin frameworks, sin build). El panel usa barra de navegación lateral (se pliega con ☰ bajo 900 px) y la lista de equipos es una tabla (`machineRow` en `app.js`; se apila cuando no cabe). Estética oscura IIT: fondo `#080b10`, cian/verde/morado, fuentes Syne / Space Mono / DM Mono.
 - Todo el texto de UI, errores de API, eventos y comentarios en **español**.
 - frp **v0.71.0**, configuración en **TOML** (el formato INI está obsoleto). Fijar la versión en `frp.ps1`, `frps/Dockerfile`, `deploy/*.sh` y `test/e2e.sh` a la vez.
 

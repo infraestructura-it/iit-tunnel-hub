@@ -313,34 +313,40 @@ function renderMachines() {
   const list = filtered();
   const el = $('#machines');
   if (!state.machines.length) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Aún no hay máquinas</h3>Registre la primera para obtener su token y su frpc.toml.</div>`;
+    el.innerHTML = `<div class="empty"><h3>Aún no hay máquinas</h3>Registre la primera para obtener su token y su frpc.toml.</div>`;
     return;
   }
   if (!list.length) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1">Ninguna máquina coincide con el filtro.</div>`;
+    el.innerHTML = `<div class="empty">Ninguna máquina coincide con el filtro.</div>`;
     return;
   }
-  el.innerHTML = list.map((m) => {
-    const st = machineState(m);
-    const conn = m.online
-      ? `<span>IP <b>${esc(m.connection.clientIp)}</b> · ${esc(m.connection.hostname)}</span><span>Conectada ${ago(m.connection.connectedSince)} · frpc ${esc(m.connection.version)}${m.agent ? ` · <span title="Agente WebRTC conectado: la pantalla va directo">agente ${esc(m.agent.version)}</span>` : ''}</span>`
-      : `<span>${m.enabled && m.lastLogin && m.stateSince ? `<b class="down">Sin conexión ${ago(m.stateSince)}</b>` : STATE_LABEL[st]}</span><span>Último login: <b>${m.lastLogin ? ago(m.lastLogin.at) : 'nunca'}</b>${m.lastLogin ? ' · ' + esc(m.lastLogin.address) : ''}</span>`;
-    return `<article class="card ${st}" data-id="${esc(m.id)}">
-      <div class="card-head">
-        <span class="dot ${st}"></span>
-        <div class="card-title">
-          <h3>${esc(m.name)}${m.alerts !== false ? '' : ' <span class="muted-bell" title="Alertas desactivadas">🔕</span>'}</h3>
-          ${m.client ? `<div class="client">${esc(m.client)}</div>` : ''}
-          <div class="id">${esc(m.id)}</div>
-        </div>
-      </div>
-      <div class="meta">${conn}</div>
+  el.innerHTML = `<table class="machines-table">
+    <thead><tr><th>Estado</th><th>Equipo</th><th>Cliente</th><th>Conexión</th><th>Servicios</th><th><span class="sr-only">Acciones</span></th></tr></thead>
+    <tbody>${list.map(machineRow).join('')}</tbody>
+  </table>`;
+}
+
+/** Fila de la tabla de equipos. data-label es el rótulo cuando la tabla se apila en pantallas angostas. */
+function machineRow(m) {
+  const st = machineState(m);
+  const conn = m.online
+    ? `<span>IP <b>${esc(m.connection.clientIp)}</b> · ${esc(m.connection.hostname)}</span><span>Conectada ${ago(m.connection.connectedSince)} · frpc ${esc(m.connection.version)}${m.agent ? ` · <span title="Agente WebRTC conectado: la pantalla va directo">agente ${esc(m.agent.version)}</span>` : ''}</span>`
+    : `${m.enabled && m.lastLogin && m.stateSince ? `<span><b class="down">Sin conexión ${ago(m.stateSince)}</b></span>` : ''}<span>Último login: <b>${m.lastLogin ? ago(m.lastLogin.at) : 'nunca'}</b>${m.lastLogin ? ' · ' + esc(m.lastLogin.address) : ''}</span>`;
+  return `<tr class="machine-row ${st}" data-id="${esc(m.id)}">
+    <td data-label="Estado"><span class="state ${st}"><span class="dot ${st}"></span>${STATE_LABEL[st]}</span></td>
+    <td class="c-name" data-label="Equipo"><div>
+      <div class="name">${esc(m.name)}${m.alerts !== false ? '' : ' <span class="muted-bell" title="Alertas desactivadas">🔕</span>'}</div>
+      <div class="id">${esc(m.id)}</div>
+    </div></td>
+    <td class="c-client" data-label="Cliente"><span>${m.client ? esc(m.client) : '—'}</span></td>
+    <td data-label="Conexión"><div class="meta">${conn}</div></td>
+    <td class="c-svcs" data-label="Servicios"><div>
       ${m.services.length ? m.services.map(serviceLine).join('') : (m.visits?.length ? '' : '<div class="no-svc">Sin servicios publicados</div>')}
       ${typeof snmpCardLine === 'function' ? snmpCardLine(m) : ''}
       ${m.visits?.length ? `<div class="visits-line">🔑 Entra a ${plural(m.visits.length, 'servicio privado', 'servicios privados')}</div>` : ''}
-      ${connectMenu(m)}
-    </article>`;
-  }).join('');
+    </div></td>
+    <td class="c-actions">${connectMenu(m)}</td>
+  </tr>`;
 }
 
 function eventItem(e, withMachine = true) {
@@ -362,8 +368,9 @@ $('#machines').addEventListener('click', (e) => {
   if (rem) { state.connectOpen = null; renderMachines(); return openRemote(rem.dataset.machine, rem.dataset.remote); }
   const con = e.target.closest('[data-connect]');
   if (con) { state.connectOpen = state.connectOpen === con.dataset.connect ? null : con.dataset.connect; return renderMachines(); }
-  const card = e.target.closest('.card');
-  if (card) openDrawer(card.dataset.id);
+  if (e.target.closest('a, .connect')) return;
+  const row = e.target.closest('.machine-row');
+  if (row) openDrawer(row.dataset.id);
 });
 document.addEventListener('click', (e) => {
   if (state.connectOpen && !e.target.closest('.connect')) { state.connectOpen = null; renderMachines(); }
@@ -385,7 +392,7 @@ function remoteEntries(m) {
 function openRemote(machineId, service) {
   window.open(`remoto.html?m=${encodeURIComponent(machineId)}&s=${encodeURIComponent(service)}`, '_blank');
 }
-/** Botón "Conectar por ▾" de la tarjeta, como Raspberry Pi Connect. */
+/** Botón "Conectar por ▾" de la fila, como Raspberry Pi Connect. */
 function connectMenu(m) {
   const list = remoteEntries(m);
   if (!isStaff() || !list.length) return '';
@@ -1022,7 +1029,7 @@ $('#maillink-form').addEventListener('submit', async (e) => {
     toast('Link enviado a ' + r.to);
   } catch (err) {
     $('#maillink-error').textContent = /no está configurado/i.test(err.message)
-      ? 'El correo saliente no está configurado. Ábralo en 📧 Correo (arriba).' : err.message;
+      ? 'El correo saliente no está configurado. Ábralo en 📧 Correo (menú lateral).' : err.message;
   }
 });
 
@@ -1169,7 +1176,7 @@ $('#citas-list').addEventListener('click', async (e) => {
       const to = prompt('Enviar el link de la cita por correo a:'); if (to === null) return;
       if (!to.trim()) return;
       try { const r = await api('POST', `/citas/${id}/email`, { to: to.trim() }); toast('Cita enviada por correo a ' + r.to); }
-      catch (err) { $('#citas-error').style.color = ''; $('#citas-error').textContent = /no está configurado/i.test(err.message) ? 'El correo saliente no está configurado. Ábralo en 📧 Correo (arriba).' : err.message; }
+      catch (err) { $('#citas-error').style.color = ''; $('#citas-error').textContent = /no está configurado/i.test(err.message) ? 'El correo saliente no está configurado. Ábralo en 📧 Correo (menú lateral).' : err.message; }
     } else if (e.target.closest('[data-cita-cancel]')) {
       if (!confirm('¿Cancelar esta cita? El código dejará de servir.')) return;
       await api('PATCH', `/citas/${id}`, { cancel: true }); await loadCitas();
@@ -1215,6 +1222,18 @@ function renderCalls(list) {
   }).join('');
 }
 
+// ---------- barra lateral ----------
+
+/** En pantallas angostas la barra lateral se abre sobre el contenido. */
+function toggleNav(open) {
+  $('#app').classList.toggle('nav-open', open);
+  $('#nav-toggle').setAttribute('aria-expanded', String(open));
+}
+$('#nav-toggle').addEventListener('click', () => toggleNav(!$('#app').classList.contains('nav-open')));
+$('#nav-backdrop').addEventListener('click', () => toggleNav(false));
+$('#sidebar').addEventListener('click', (e) => { if (e.target.closest('.nav-item')) toggleNav(false); });
+$('#nav-machines').addEventListener('click', () => { closeDrawer(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+
 // ---------- modales genéricos ----------
 
 document.addEventListener('click', (e) => {
@@ -1228,6 +1247,7 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  toggleNav(false);
   const open = $$('.overlay').find((o) => !o.classList.contains('hidden'));
   if (open?.dataset.locked) return; // cambio de contraseña obligatorio
   if (open) open.classList.add('hidden'); else if (state.openId) closeDrawer();
